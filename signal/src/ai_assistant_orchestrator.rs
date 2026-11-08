@@ -3745,7 +3745,6 @@ mod tests {
             operation_scope: vec!["observe".into()],
             export_destinations: Vec::new(),
             allowed_envelope_ids: Vec::new(),
-            allowed_content_digests_sha256: Vec::new(),
             use_policy: CapabilityGrantUsePolicy::Reusable,
             canonical_input_digest_sha256: None,
             issued_by: CapabilityGrantIssuer::UserDecision,
@@ -3972,7 +3971,6 @@ mod tests {
                 source_object_id: Some("snapshot-1".into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256,
             sensitivity: Sensitivity::Sensitive,
             // A read result has no implicit model destination. MeteredModel must
             // mint the exact ExportData projection before provider I/O.
@@ -4101,7 +4099,7 @@ expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_fac
             match case {
                 0 => changed.compressor.provider_call_key = "a".repeat(64),
                 1 => changed.export_authorization_id = "another-export".into(),
-                _ => changed.model_output.digest_sha256 = "b".repeat(64),
+                _ => changed.model_output.envelope_id = "model-output-other".into(),
             }
             assert!(
                 crate::model_egress_store::SignalModelEgressStore::read_compression_inputs_on(
@@ -4262,7 +4260,7 @@ expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_fac
         let output = turn.provider_meta.data_envelope.as_ref().unwrap();
         assert_eq!(
             receipts[0].model_output_digest_sha256.as_deref(),
-            Some(output.digest_sha256.as_str())
+            output.content_sha256()
         );
 
         let mut stored_message = ChatMessage::text(

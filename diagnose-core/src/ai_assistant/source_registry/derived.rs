@@ -40,7 +40,11 @@ impl NativeDerivedInputPolicy {
             conversation_id: evidence.context_conversation_id.clone(),
             physical_call_id: evidence.physical_call_id.clone(),
             output_envelope_id: parent.output.envelope_id.clone(),
-            output_digest_sha256: parent.output.digest_sha256.clone(),
+            output_digest_sha256: parent
+                .output
+                .content_sha256()
+                .unwrap_or_default()
+                .to_owned(),
             output_label_sha256: evidence.output_label_sha256.clone(),
             actor_input_seq: parent.actor_input_seq,
             input_revision: parent.input_revision,
@@ -91,7 +95,7 @@ impl NativeDerivedInputPolicy {
     fn matches_label(&self, source: &DataEnvelope) -> Result<bool, &'static str> {
         Ok(is_native_output_policy_source(source)
             && self.output_envelope_id == source.envelope_id
-            && self.output_digest_sha256 == source.digest_sha256
+            && source.content_sha256() == Some(self.output_digest_sha256.as_str())
             && self.output_label_sha256 == sink_metadata_sha256(source)?)
     }
 }

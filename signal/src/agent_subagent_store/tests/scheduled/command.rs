@@ -121,7 +121,6 @@ async fn fixture() -> (
             operation_scope: &operations,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &digest,
             byte_count: canonical.len() as u64,
             item_count: 1,

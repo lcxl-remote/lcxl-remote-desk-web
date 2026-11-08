@@ -11,7 +11,7 @@ use desk_agent_protocol::capability_provider::{
     CapabilityCancelRequest, CapabilityCompletionClass, CapabilityCompletionEvent,
     CapabilityProgressEvent,
 };
-use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
+use desk_agent_protocol::data_lineage::DataEnvelope;
 #[cfg(test)]
 use desk_diagnose_core::dynamic_run::BackgroundCancelDeliveredRunEvent;
 use desk_diagnose_core::dynamic_run::{
@@ -89,11 +89,7 @@ impl BackgroundCompletionPayload {
             .envelope
             .validate()
             .map_err(|error| error.to_string())?;
-        let size_bytes = match &output.envelope.content {
-            ContentRef::ImmutableBlob { size_bytes, .. }
-            | ContentRef::EphemeralObservation { size_bytes, .. }
-            | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
-        };
+        let size_bytes = output.envelope.content.size_bytes();
         if size_bytes != output.text.len() as u64 {
             return Err("background result size does not match its DataEnvelope".into());
         }
@@ -1627,7 +1623,7 @@ mod tests {
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: "result-envelope-1".into(),
-            content: ContentRef::ImmutableBlob {
+            content: desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
                 blob_id: "result-blob-1".into(),
                 sha256: digest.clone(),
                 size_bytes: text.len() as u64,
@@ -1639,7 +1635,6 @@ mod tests {
                 source_object_id: Some("fake-read-only-task".into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -1880,7 +1875,7 @@ mod tests {
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: "result-file-batch-1".into(),
-            content: ContentRef::ImmutableBlob {
+            content: desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
                 blob_id: "blob-file-batch-1".into(),
                 sha256: digest.clone(),
                 size_bytes: text.len() as u64,
@@ -1892,7 +1887,6 @@ mod tests {
                 source_object_id: Some(task.task_id.clone()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {

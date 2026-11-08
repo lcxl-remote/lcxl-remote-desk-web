@@ -224,12 +224,7 @@ async fn exercise_accepted(
         envelope_ids: selected.iter().map(|e| e.envelope_id.clone()).collect(),
         total_bytes: selected
             .iter()
-            .map(|e| match e.content {
-                desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
-                    size_bytes, ..
-                } => size_bytes as usize,
-                _ => panic!("immutable"),
-            })
+            .map(|e| e.content.size_bytes() as usize)
             .sum(),
     };
     let answer_text = format!("The project plan was approved.〔来源:{source}〕");

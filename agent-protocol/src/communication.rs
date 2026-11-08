@@ -1440,7 +1440,9 @@ fn validate_immutable_content_ref(
             media_type,
             ..
         } => (sha256, size_bytes, media_type),
-        ContentRef::EphemeralObservation { .. } => {
+        ContentRef::Message { .. }
+        | ContentRef::Projection { .. }
+        | ContentRef::EphemeralObservation { .. } => {
             return Err(CommunicationContractError::InvalidContentRef);
         }
     };

@@ -207,11 +207,7 @@ fn remove_image(message: &mut ChatMessage) {
         .data_envelope
         .as_ref()
         .filter(|source| {
-            let size = match &source.content {
-                ContentRef::ImmutableBlob { size_bytes, .. }
-                | ContentRef::EphemeralObservation { size_bytes, .. }
-                | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
-            };
+            let size = source.content.size_bytes();
             source.validate().is_ok()
                 && crate::model_egress::message_content_bytes(message)
                     .is_ok_and(|bytes| bytes.len() as u64 == size)
@@ -253,7 +249,6 @@ fn remove_image(message: &mut ChatMessage) {
             size_bytes: bytes.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),
         };
-        envelope.digest_sha256 = digest;
         if !envelope.provenance.source_envelope_ids.contains(&source_id) {
             envelope.provenance.source_envelope_ids.push(source_id);
         }
@@ -344,7 +339,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "model".into(),
@@ -380,8 +374,8 @@ mod tests {
         );
         let bytes = crate::model_egress::message_content_bytes(&message).unwrap();
         assert_eq!(
-            projected.digest_sha256,
-            format!("{:x}", Sha256::digest(&bytes))
+            projected.content_sha256(),
+            Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
         );
         assert!(
             matches!(projected.content, ContentRef::ImmutableBlob {size_bytes, ..} if size_bytes == bytes.len() as u64)

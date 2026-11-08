@@ -1119,7 +1119,6 @@ fn context_attachment(
                 source_object_id: Some(format!("opaque-{id}")),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: "a".repeat(64),
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -1729,7 +1728,6 @@ fn conversion_permission_freezes_source_and_directory_for_manual_and_ai_on_both_
                 source_object_id: Some("source-read".into()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![],
             retention: RetentionBoundary {

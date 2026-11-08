@@ -140,7 +140,6 @@ impl IssueAdmission {
                 source_object_id: Some(comment.event_id()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity: if self.issue.target.private || self.issue.target.internal {
                 Sensitivity::UserContent
             } else {
@@ -195,7 +194,6 @@ impl IssueAdmission {
                 source_object_id: Some(id),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity: if self.issue.target.private || self.issue.target.internal {
                 Sensitivity::UserContent
             } else {
@@ -236,7 +234,7 @@ pub fn is_issue_workset_label(label: &DataEnvelope) -> bool {
         && matches!(label.allowed_destinations.as_slice(), [DestinationIdentity::Model {..}, DestinationIdentity::ExternalIssue {audience,..}]
             if label.sensitivity == if *audience == desk_agent_protocol::data_lineage::ExternalIssueAudience::Public { Sensitivity::Public } else { Sensitivity::UserContent })
         && matches!(&label.content, ContentRef::ImmutableBlob { blob_id,sha256,size_bytes,media_type }
-            if blob_id == &format!("issue-workset-{}", label.digest_sha256)
-                && sha256 == &label.digest_sha256 && *size_bytes > 0 && *size_bytes <= MAX_WORKSET_BYTES as u64
+            if blob_id == &format!("issue-workset-{sha256}")
+                && *size_bytes > 0 && *size_bytes <= MAX_WORKSET_BYTES as u64
                 && media_type == "application/json;charset=utf-8")
 }

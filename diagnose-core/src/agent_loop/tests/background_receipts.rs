@@ -397,15 +397,7 @@ async fn background_receipt_keeps_original_call_and_label_separate_from_wait_sta
 
 #[tokio::test]
 async fn background_receipt_rejects_mismatched_identity_or_bytes_without_ack() {
-    for corruption in [
-        "work",
-        "action",
-        "generation",
-        "bytes",
-        "image",
-        "size",
-        "digest",
-    ] {
+    for corruption in ["work", "action", "generation", "bytes", "image", "size"] {
         let sess = original_task_session();
         let model = waiter();
         let mut output = ToolRunOutput {
@@ -427,7 +419,6 @@ async fn background_receipt_rejects_mismatched_identity_or_bytes_without_ack() {
                     *size_bytes += 1;
                 }
             }
-            "digest" => envelope.digest_sha256 = "a".repeat(64),
             _ => unreachable!(),
         }
         let scripted = tools_with_waits(

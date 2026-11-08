@@ -206,7 +206,7 @@ mod tests {
             profile_revision: 1,
         };
         let envelope = DataEnvelope {
-            schema_version: 1,
+            schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: "exported-input".into(),
             content: ContentRef::ImmutableBlob {
                 blob_id: "private-content-handle".into(),
@@ -220,7 +220,6 @@ mod tests {
                 source_object_id: Some("private-object-handle".into()),
                 source_envelope_ids: vec!["original-read".into()],
             },
-            digest_sha256: "a".repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![destination.clone()],
             retention: RetentionBoundary {
@@ -250,7 +249,6 @@ mod tests {
             }
             let bytes = message_content_bytes(&message).unwrap();
             let digest = hex_digest(&bytes);
-            envelope.digest_sha256 = digest.clone();
             envelope.content = ContentRef::ImmutableBlob {
                 blob_id: "output".into(),
                 sha256: digest,

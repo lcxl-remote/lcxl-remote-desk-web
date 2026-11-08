@@ -659,7 +659,6 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
             operation_scope: vec!["observe".into()],
             export_destinations: vec![],
             allowed_envelope_ids: vec![],
-            allowed_content_digests_sha256: vec![],
             use_policy: CapabilityGrantUsePolicy::OneShotExact,
             canonical_input_digest_sha256: Some(canonical),
             issued_by: CapabilityGrantIssuer::TaskAuthorization(authority.provenance().clone()),

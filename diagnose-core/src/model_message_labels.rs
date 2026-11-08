@@ -15,20 +15,20 @@ use desk_agent_protocol::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+pub const STATUS_RESULT_PROJECTION: &str = "status-result";
+pub const SOURCE_RESULT_PROJECTION: &str = "source-result";
+
 pub fn model_bound_user_message(
     message_id: String,
     text: String,
     destination: DestinationIdentity,
 ) -> Result<ChatMessage, AgentError> {
-    let bytes = text.as_bytes();
-    let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("user-message-{message_id}"),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("session-message-{message_id}"),
-            sha256: digest_sha256.clone(),
-            size_bytes: bytes.len() as u64,
+        content: ContentRef::Message {
+            message_id: message_id.clone(),
+            size_bytes: text.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),
         },
         provenance: DataProvenance {
@@ -37,7 +37,6 @@ pub fn model_bound_user_message(
             source_object_id: Some(message_id.clone()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256,
         sensitivity: Sensitivity::UserContent,
         // Pressing Send explicitly targets the currently resolved model. A
         // different gateway/model revision produces a different identity and
@@ -103,7 +102,6 @@ pub fn read_result_envelope(
             source_object_id: label.source_object_id,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256,
         sensitivity: match capability.wire.capability_id.as_str() {
             crate::ai_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
             | crate::ai_assistant::WEB_RESEARCH_SEARCH_CAPABILITY_ID => Sensitivity::Public,
@@ -137,17 +135,41 @@ fn invalid_label() -> AgentError {
 
 /// Runtime-authored tool closure inherits its parent authority and retention.
 /// A missing label remains missing; this never grants export to a new sink.
+/// Label a persisted runtime status result. One call has one result under a
+/// given parent label and tool, and in-place rewrites derive from the current
+/// label, so the id needs no body digest.
 pub fn internal_tool_result_envelope(
     parent: Option<&DataEnvelope>,
     call_id: &str,
     content: &str,
     source_tool_name: &str,
 ) -> Result<Option<DataEnvelope>, AgentError> {
+    status_envelope(parent, call_id, content, source_tool_name, false)
+}
+
+/// Label a runtime projection that exists only in one model request. Its body
+/// is regenerated per request under a fixed call id, so the id names the
+/// body revision by digest.
+pub fn request_projection_envelope(
+    parent: Option<&DataEnvelope>,
+    call_id: &str,
+    content: &str,
+    source_tool_name: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    status_envelope(parent, call_id, content, source_tool_name, true)
+}
+
+fn status_envelope(
+    parent: Option<&DataEnvelope>,
+    call_id: &str,
+    content: &str,
+    source_tool_name: &str,
+    content_addressed: bool,
+) -> Result<Option<DataEnvelope>, AgentError> {
     let Some(parent) = parent else {
         return Ok(None);
     };
     parent.validate().map_err(|_| invalid_label())?;
-    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
     let mut retention = parent.retention;
     if let ContentRef::EphemeralObservation {
         expires_at_unix_ms, ..
@@ -158,25 +180,38 @@ pub fn internal_tool_result_envelope(
             delete_with_run: true,
         });
     }
+    let (identity, content) = if content_addressed {
+        let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+        (
+            format!("{}:{call_id}:{digest}", parent.envelope_id),
+            ContentRef::ImmutableBlob {
+                blob_id: format!("status-content-{:x}", Sha256::digest(digest.as_bytes())),
+                sha256: digest,
+                size_bytes: content.len() as u64,
+                media_type: "text/plain".into(),
+            },
+        )
+    } else {
+        (
+            serde_json::to_string(&(&parent.envelope_id, call_id, source_tool_name))
+                .map_err(|_| invalid_label())?,
+            ContentRef::Projection {
+                projection: STATUS_RESULT_PROJECTION.into(),
+                size_bytes: content.len() as u64,
+                media_type: "text/plain".into(),
+            },
+        )
+    };
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-        envelope_id: format!(
-            "status-result-{:x}",
-            Sha256::digest(format!("{}:{call_id}:{digest}", parent.envelope_id).as_bytes())
-        ),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("status-content-{:x}", Sha256::digest(digest.as_bytes())),
-            sha256: digest.clone(),
-            size_bytes: content.len() as u64,
-            media_type: "text/plain".into(),
-        },
+        envelope_id: format!("status-result-{:x}", Sha256::digest(identity.as_bytes())),
+        content,
         provenance: DataProvenance {
             source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
             source_tool_name: source_tool_name.into(),
             source_object_id: None,
             source_envelope_ids: vec![parent.envelope_id.clone()],
         },
-        digest_sha256: digest,
         sensitivity: parent.sensitivity,
         allowed_destinations: parent.allowed_destinations.clone(),
         retention,
@@ -269,11 +304,9 @@ fn source_result_envelope(
     tool_name: &str,
     object: Option<&str>,
 ) -> Result<Option<DataEnvelope>, AgentError> {
-    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
     source_result_identity(
         inputs,
         call_id,
-        &digest,
         content.len() as u64,
         provider,
         tool_name,
@@ -291,17 +324,10 @@ pub(crate) fn retained_assistant_data_result(
     episode_id: &str,
 ) -> Result<Option<DataEnvelope>, AgentError> {
     source.validate().map_err(|_| invalid_label())?;
-    let ContentRef::ImmutableBlob {
-        sha256, size_bytes, ..
-    } = &source.content
-    else {
-        return Err(invalid_label());
-    };
     source_result_identity(
         &[parent, source],
         call_id,
-        sha256,
-        *size_bytes,
+        source.content.size_bytes(),
         "assistant-data-result",
         tool_name,
         Some(episode_id),
@@ -311,7 +337,6 @@ pub(crate) fn retained_assistant_data_result(
 fn source_result_identity(
     inputs: &[&DataEnvelope],
     call_id: &str,
-    digest: &str,
     size_bytes: u64,
     provider: &str,
     tool_name: &str,
@@ -383,16 +408,14 @@ fn source_result_identity(
         tool_name,
         object,
         call_id,
-        &digest,
         by_id.values().collect::<Vec<_>>(),
     ))
     .map_err(|_| invalid_label())?;
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("source-result-{:x}", Sha256::digest(identity)),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("history-content-{:x}", Sha256::digest(digest.as_bytes())),
-            sha256: digest.into(),
+        content: ContentRef::Projection {
+            projection: SOURCE_RESULT_PROJECTION.into(),
             size_bytes,
             media_type: "application/json".into(),
         },
@@ -402,7 +425,6 @@ fn source_result_identity(
             source_object_id: object.map(str::to_owned),
             source_envelope_ids,
         },
-        digest_sha256: digest.into(),
         sensitivity,
         allowed_destinations: allowed.into_iter().collect(),
         retention,
@@ -576,7 +598,10 @@ mod tests {
                 4 => tool = "search_conversations",
                 5 => episode = "other-episode",
                 _ => {
-                    if let ContentRef::ImmutableBlob { size_bytes, .. } = &mut projection.content {
+                    if let ContentRef::ImmutableBlob { size_bytes, .. }
+                    | ContentRef::Projection { size_bytes, .. }
+                    | ContentRef::Message { size_bytes, .. } = &mut projection.content
+                    {
                         *size_bytes += 1;
                     }
                 }
@@ -663,7 +688,7 @@ mod tests {
             result.provenance.source_envelope_ids,
             vec![parent.envelope_id.clone()]
         );
-        parent.digest_sha256 = "bad".into();
+        parent.envelope_id.clear();
         assert!(
             internal_tool_result_envelope(
                 Some(&parent),
@@ -711,8 +736,8 @@ mod tests {
         assert_eq!(envelope.retention.expires_at_unix_ms, None);
         assert!(envelope.retention.delete_with_run);
         assert_eq!(
-            envelope.digest_sha256,
-            format!("{:x}", Sha256::digest(output.content.as_bytes()))
+            envelope.content_sha256(),
+            Some(format!("{:x}", Sha256::digest(output.content.as_bytes())).as_str())
         );
     }
 

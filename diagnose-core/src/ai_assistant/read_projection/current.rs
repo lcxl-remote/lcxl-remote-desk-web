@@ -179,7 +179,6 @@ impl ReadProjectionProof {
                 size_bytes: content.len() as u64,
                 media_type: "application/json".into(),
             },
-            digest_sha256: digest,
             provenance: DataProvenance {
                 source_provider_id: "assistant-data-source".into(),
                 source_tool_name: "current_memories".into(),

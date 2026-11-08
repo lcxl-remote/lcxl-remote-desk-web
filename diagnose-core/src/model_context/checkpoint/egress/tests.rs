@@ -138,7 +138,6 @@ fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
     for message in &mut conversation {
         let bytes = crate::model_egress::message_content_bytes(message).unwrap();
         let envelope = message.data_envelope.as_mut().unwrap();
-        envelope.digest_sha256 = sha256_hex(&bytes);
         envelope.content = ContentRef::EphemeralObservation {
             observation_id: message.message_id.clone(),
             size_bytes: bytes.len() as u64,
@@ -370,8 +369,8 @@ fn compression_and_reloaded_checkpoint_keep_exact_lineage_and_lens_dependencies(
     assert_eq!(summary.role, ChatRole::ContextSummary);
     assert_eq!(summary.data_envelope.as_ref(), Some(&lineage.envelope));
     assert_eq!(
-        lineage.envelope.digest_sha256,
-        sha256_hex(summary.text.as_bytes())
+        lineage.envelope.content_sha256(),
+        Some(sha256_hex(summary.text.as_bytes()).as_str())
     );
     assert_eq!(
         lineage.envelope.allowed_destinations,
@@ -396,7 +395,7 @@ fn compression_and_reloaded_checkpoint_keep_exact_lineage_and_lens_dependencies(
         match case {
             0 => changed.derivations.clear(),
             1 => changed.derivations[0].compression_sources.clear(),
-            2 => changed.derivations[0].model_output.digest_sha256 = "a".repeat(64),
+            2 => changed.derivations[0].model_output.envelope_id = "model-output-other".into(),
             3 => changed.derivations[0].summary.retention.delete_with_run = false,
             _ => changed.derivations[0]
                 .compression_input

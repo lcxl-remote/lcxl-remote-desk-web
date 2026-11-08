@@ -55,7 +55,6 @@ async fn fixture() -> (DatabaseConnection, i64) {
     let authority = desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority {
         target_session_id: None,
         envelope_ids: vec!["evidence".into()],
-        content_digests_sha256: vec![],
         provider_id: "provider".into(),
         capability_id: "command".into(),
         tool_name: tool.into(),

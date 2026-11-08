@@ -212,7 +212,6 @@ mod tests {
         ObservedCapabilityAuthority {
             target_session_id: None,
             envelope_ids: vec![],
-            content_digests_sha256: vec![],
             provider_id: registry
                 .provider_for_capability(&descriptor.wire.capability_id)
                 .unwrap()

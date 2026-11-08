@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-pub const DATA_ENVELOPE_SCHEMA_VERSION: u16 = 1;
+pub const DATA_ENVELOPE_SCHEMA_VERSION: u16 = 2;
 pub const MAX_LINEAGE_ID_BYTES: usize = 256;
 pub const MAX_LINEAGE_ITEMS: usize = 256;
 /// Bound historical source metadata by bytes rather than conversation length.
@@ -162,6 +162,23 @@ impl DestinationIdentity {
 )]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContentRef {
+    /// A persisted conversation message body, produced by the host or the user.
+    /// The body lives beside its label in trusted storage, so no digest is kept.
+    Message {
+        message_id: String,
+        size_bytes: u64,
+        media_type: String,
+    },
+    /// A body the host derives from other labels; the sources are listed in
+    /// provenance and `projection` names the fixed projection kind.
+    Projection {
+        projection: String,
+        size_bytes: u64,
+        media_type: String,
+    },
+    /// Immutable bytes whose digest is compared with a value produced outside
+    /// the trust boundary, used to reject a replayed call with a different
+    /// external result, or used to tell revisions of one regenerated body apart.
     ImmutableBlob {
         blob_id: String,
         sha256: String,
@@ -184,6 +201,24 @@ pub enum ContentRef {
 impl ContentRef {
     pub fn validate(&self) -> Result<(), DataLineageError> {
         match self {
+            Self::Message {
+                message_id,
+                size_bytes,
+                media_type,
+            } => {
+                validate_id("message_id", message_id)?;
+                validate_size(*size_bytes)?;
+                validate_id("media_type", media_type)?;
+            }
+            Self::Projection {
+                projection,
+                size_bytes,
+                media_type,
+            } => {
+                validate_id("projection", projection)?;
+                validate_size(*size_bytes)?;
+                validate_id("media_type", media_type)?;
+            }
             Self::ImmutableBlob {
                 blob_id,
                 sha256,
@@ -229,7 +264,9 @@ impl ContentRef {
 
     pub fn size_bytes(&self) -> u64 {
         match self {
-            Self::ImmutableBlob { size_bytes, .. }
+            Self::Message { size_bytes, .. }
+            | Self::Projection { size_bytes, .. }
+            | Self::ImmutableBlob { size_bytes, .. }
             | Self::EphemeralObservation { size_bytes, .. }
             | Self::Artifact { size_bytes, .. } => *size_bytes,
         }
@@ -238,7 +275,9 @@ impl ContentRef {
     pub fn content_sha256(&self) -> Option<&str> {
         match self {
             Self::ImmutableBlob { sha256, .. } | Self::Artifact { sha256, .. } => Some(sha256),
-            Self::EphemeralObservation { .. } => None,
+            Self::Message { .. } | Self::Projection { .. } | Self::EphemeralObservation { .. } => {
+                None
+            }
         }
     }
 }
@@ -306,13 +345,17 @@ pub struct DataEnvelope {
     pub envelope_id: String,
     pub content: ContentRef,
     pub provenance: DataProvenance,
-    pub digest_sha256: String,
     pub sensitivity: Sensitivity,
     pub allowed_destinations: Vec<DestinationIdentity>,
     pub retention: RetentionBoundary,
 }
 
 impl DataEnvelope {
+    /// Digest kept only for content that needs one; see [`ContentRef::ImmutableBlob`].
+    pub fn content_sha256(&self) -> Option<&str> {
+        self.content.content_sha256()
+    }
+
     pub fn validate(&self) -> Result<(), DataLineageError> {
         if self.schema_version != DATA_ENVELOPE_SCHEMA_VERSION {
             return Err(DataLineageError::UnsupportedSchemaVersion(
@@ -322,12 +365,6 @@ impl DataEnvelope {
         validate_id("envelope_id", &self.envelope_id)?;
         self.content.validate()?;
         self.provenance.validate()?;
-        validate_sha256(&self.digest_sha256)?;
-        if let Some(content_digest) = self.content.content_sha256()
-            && content_digest != self.digest_sha256
-        {
-            return Err(DataLineageError::DigestMismatch);
-        }
         if self.allowed_destinations.len() > MAX_LINEAGE_ITEMS {
             return Err(DataLineageError::TooManyItems("allowed_destinations"));
         }
@@ -555,7 +592,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest(),
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![destination.clone(), destination],
             retention: RetentionBoundary {
@@ -568,8 +604,12 @@ mod tests {
             Err(DataLineageError::DuplicateItem("allowed_destinations"))
         );
         envelope.allowed_destinations.pop();
-        envelope.digest_sha256 = "b".repeat(64);
-        assert_eq!(envelope.validate(), Err(DataLineageError::DigestMismatch));
+        assert_eq!(envelope.validate(), Ok(()));
+        envelope.schema_version = 1;
+        assert_eq!(
+            envelope.validate(),
+            Err(DataLineageError::UnsupportedSchemaVersion(1))
+        );
     }
 
     #[test]

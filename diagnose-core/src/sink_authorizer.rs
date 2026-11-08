@@ -237,11 +237,7 @@ fn authorize_inputs(
 }
 
 fn content_size(content: &ContentRef) -> u64 {
-    match content {
-        ContentRef::ImmutableBlob { size_bytes, .. }
-        | ContentRef::EphemeralObservation { size_bytes, .. }
-        | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
-    }
+    content.size_bytes()
 }
 
 fn is_expired(envelope: &DataEnvelope, now_unix_ms: u64) -> bool {
@@ -366,7 +362,6 @@ mod tests {
         sensitivity: Sensitivity,
         destinations: Vec<DestinationIdentity>,
     ) -> DataEnvelope {
-        let digest = hex_digest(bytes);
         DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: id.into(),
@@ -381,7 +376,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest,
             sensitivity,
             allowed_destinations: destinations,
             retention: RetentionBoundary {

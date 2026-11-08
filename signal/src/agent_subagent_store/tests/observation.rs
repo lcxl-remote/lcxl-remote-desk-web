@@ -146,7 +146,7 @@ pub(super) async fn record_accepted_provider(
         active_time_ms: 100,
         ..Default::default()
     };
-    let call_digest = &output.digest_sha256;
+    let call_digest = &output.content_sha256().unwrap().to_owned();
     let CallAdmission::Reserved(reservation) = store
         .reserve_runtime_call(
             parent,

@@ -373,7 +373,6 @@ fn exact_rehearsal_matching_requires_identity_input_and_observed_scope() {
     let observation = ObservedCapabilityAuthority {
         target_session_id: None,
         envelope_ids: vec![],
-        content_digests_sha256: vec![],
         provider_id: rule.provider_id.clone(),
         capability_id: rule.capability_id.clone(),
         tool_name: rule.tool_name.clone(),
@@ -586,7 +585,6 @@ fn generated_send_binds_actual_payload_current_surface_and_run() {
         let authority = ObservedCapabilityAuthority {
             target_session_id: None,
             envelope_ids: vec![],
-            content_digests_sha256: vec![],
             provider_id: rule.provider_id.clone(),
             capability_id: rule.capability_id.clone(),
             tool_name: rule.tool_name.clone(),
@@ -2173,7 +2171,6 @@ fn exercise_automatic_approval_candidate(with_alias: bool) {
         operation_scope: &item.operation_scope,
         export_destinations: &item.export_destinations,
         envelope_ids: &[],
-        content_digests_sha256: &[],
         canonical_input_digest_sha256: item.canonical_input_digest_sha256.as_deref().unwrap(),
         byte_count: 2,
         item_count: 1,

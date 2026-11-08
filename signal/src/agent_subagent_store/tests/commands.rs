@@ -309,7 +309,6 @@ fn prepared<'a>(
             operation_scope: &grant.operation_scope,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: grant.canonical_input_digest_sha256.as_deref().unwrap(),
             byte_count: call.arguments_json.len() as u64,
             item_count: 1,

@@ -1633,10 +1633,6 @@ export type EvidenceNodeDto = {
     /**
      * @type string
     */
-    envelopeDigestSha256: string;
-    /**
-     * @type string
-    */
     envelopeId: string;
     /**
      * @type string,null
@@ -2800,24 +2796,72 @@ export type UnknownOutcomeDto = {
 };
 
 export const contentRefKindEnum = {
-    immutable_blob: "immutable_blob"
+    message: "message"
 } as const;
 
 export type ContentRefKindEnumKey = (typeof contentRefKindEnum)[keyof typeof contentRefKindEnum];
 
 export const contentRefKindEnum2 = {
-    ephemeral_observation: "ephemeral_observation"
+    projection: "projection"
 } as const;
 
 export type ContentRefKindEnum2Key = (typeof contentRefKindEnum2)[keyof typeof contentRefKindEnum2];
 
 export const contentRefKindEnum3 = {
-    artifact: "artifact"
+    immutable_blob: "immutable_blob"
 } as const;
 
 export type ContentRefKindEnum3Key = (typeof contentRefKindEnum3)[keyof typeof contentRefKindEnum3];
 
+export const contentRefKindEnum4 = {
+    ephemeral_observation: "ephemeral_observation"
+} as const;
+
+export type ContentRefKindEnum4Key = (typeof contentRefKindEnum4)[keyof typeof contentRefKindEnum4];
+
+export const contentRefKindEnum5 = {
+    artifact: "artifact"
+} as const;
+
+export type ContentRefKindEnum5Key = (typeof contentRefKindEnum5)[keyof typeof contentRefKindEnum5];
+
 export type ContentRef = ({
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnumKey;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    message_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
+    /**
+     * @type string
+    */
+    kind: ContentRefKindEnum2Key;
+    /**
+     * @type string
+    */
+    media_type: string;
+    /**
+     * @type string
+    */
+    projection: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    size_bytes: number;
+} | {
     /**
      * @type string
     */
@@ -2825,7 +2869,7 @@ export type ContentRef = ({
     /**
      * @type string
     */
-    kind: ContentRefKindEnumKey;
+    kind: ContentRefKindEnum3Key;
     /**
      * @type string
     */
@@ -2848,7 +2892,7 @@ export type ContentRef = ({
     /**
      * @type string
     */
-    kind: ContentRefKindEnum2Key;
+    kind: ContentRefKindEnum4Key;
     /**
      * @type string
     */
@@ -2866,7 +2910,7 @@ export type ContentRef = ({
     /**
      * @type string
     */
-    kind: ContentRefKindEnum3Key;
+    kind: ContentRefKindEnum5Key;
     /**
      * @type string
     */

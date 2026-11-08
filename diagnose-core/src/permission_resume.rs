@@ -122,7 +122,6 @@ fn model_bound_resume_message(
             source_object_id: Some(message_id.clone()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256,
         sensitivity: Sensitivity::UserContent,
         // The bridge repeats the already-authorized original user input so a
         // trimmed or compressed history cannot strand an approved exact-input
@@ -312,7 +311,6 @@ pub fn bind_exact_authorization_system_message(
             source_object_id: Some(format!("exact-authorization-{short_digest}")),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256,
         // The projection can contain recipient/body data and opaque provider
         // references. It is not a public system prompt merely because the
         // server authored it.

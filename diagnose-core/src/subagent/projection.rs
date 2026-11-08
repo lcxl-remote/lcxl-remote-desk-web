@@ -266,12 +266,12 @@ mod tests {
         externalized.conversation[2].data_envelope = Some(projected.clone());
         externalized.conversation[2].raw_result = Some(Box::new(
             crate::conversation_attachment::delivery::RawResult {
-                original_sha256: native.digest_sha256.clone(),
+                original_sha256: native.content_sha256().unwrap_or_default().to_owned(),
                 original_envelope: Some(native.clone()),
                 restorable: true,
                 template: None,
                 slots: vec![],
-                sha256: projected.digest_sha256.clone(),
+                sha256: projected.content_sha256().unwrap_or_default().to_owned(),
                 envelope: Some(projected),
             },
         ));

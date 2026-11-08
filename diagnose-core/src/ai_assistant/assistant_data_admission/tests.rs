@@ -299,7 +299,7 @@ fn matching_assistant_state_cannot_hide_a_changed_persisted_producer_or_task() {
                     .data_envelope
                     .as_mut()
                     .unwrap()
-                    .digest_sha256 = "b".repeat(64)
+                    .envelope_id = "user-message-other".into()
             }
             4 => changed.trigger_origin = crate::session::TriggerOrigin::PermissionDecision,
             5 => changed.focus_epoch.input_revision += 1,

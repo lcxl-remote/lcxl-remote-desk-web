@@ -207,7 +207,6 @@ pub struct CapabilityGrant {
     pub operation_scope: Vec<String>,
     pub export_destinations: Vec<DestinationIdentity>,
     pub allowed_envelope_ids: Vec<String>,
-    pub allowed_content_digests_sha256: Vec<String>,
     pub use_policy: CapabilityGrantUsePolicy,
     pub canonical_input_digest_sha256: Option<String>,
     pub issued_by: CapabilityGrantIssuer,
@@ -306,7 +305,6 @@ impl CapabilityGrant {
         validate_unique_scope("resource_scope", &self.resource_scope)?;
         validate_unique_scope("operation_scope", &self.operation_scope)?;
         validate_unique_scope("allowed_envelope_ids", &self.allowed_envelope_ids)?;
-        validate_unique_digests(&self.allowed_content_digests_sha256)?;
         if self.export_destinations.len() > MAX_GRANT_SCOPE_VALUES {
             return Err(CapabilityGrantError::TooManyValues("export_destinations"));
         }
@@ -421,24 +419,6 @@ fn validate_unique_scope(
         validate_id(field, value)?;
         if !seen.insert(value) {
             return Err(CapabilityGrantError::DuplicateValue(field));
-        }
-    }
-    Ok(())
-}
-
-fn validate_unique_digests(values: &[String]) -> Result<(), CapabilityGrantError> {
-    if values.len() > MAX_GRANT_SCOPE_VALUES {
-        return Err(CapabilityGrantError::TooManyValues(
-            "allowed_content_digests_sha256",
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for value in values {
-        validate_digest(value)?;
-        if !seen.insert(value) {
-            return Err(CapabilityGrantError::DuplicateValue(
-                "allowed_content_digests_sha256",
-            ));
         }
     }
     Ok(())

@@ -754,7 +754,7 @@ async fn routed_work_uses_the_first_comment_and_header_without_expanding_origina
     assert_eq!(routing::candidates_on(&db, 0, 4).await.unwrap().len(), 2);
     let txn = db.begin().await.unwrap();
     let mut wrong_label = labels[0].clone();
-    wrong_label.digest_sha256 = "0".repeat(64);
+    wrong_label.envelope_id.push_str("-other");
     assert!(
         supplements::verify_model_material_on(
             &txn,

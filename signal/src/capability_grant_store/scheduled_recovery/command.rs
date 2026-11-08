@@ -91,7 +91,7 @@ async fn reconcile_inner_on(
                         CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
                     }
                 || (completed.outcome == CapabilityDispatchOutcome::Succeeded
-                    && completed.result_digest_sha256 != receipt.envelope.digest_sha256)
+                    && completed.result_digest_sha256 != receipt.result_sha256)
             {
                 return Err(invalid());
             }
@@ -103,7 +103,7 @@ async fn reconcile_inner_on(
                     call_id: payload.call_id.clone(),
                     generation: payload.generation,
                     outcome: CapabilityDispatchOutcome::Succeeded,
-                    result_digest_sha256: receipt.envelope.digest_sha256.clone(),
+                    result_digest_sha256: receipt.result_sha256.clone(),
                 },
                 now_ms,
             )

@@ -208,7 +208,6 @@ pub fn build_live_context(
             "interactive_session_incarnation": incarnation,
         }))
         .map_err(|error| invalid(format!("encode context metadata: {error}")))?;
-        let digest = format!("{:x}", Sha256::digest(&metadata));
         let client_request_id = selection_request_id(request_id, capability_id);
         candidates.push(ContextAttachment {
             schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
@@ -256,7 +255,6 @@ pub fn build_live_context(
                     source_object_id: Some(opaque_token),
                     source_envelope_ids: Vec::new(),
                 },
-                digest_sha256: digest,
                 sensitivity: Sensitivity::UserContent,
                 allowed_destinations: vec![destination.clone()],
                 retention: RetentionBoundary {

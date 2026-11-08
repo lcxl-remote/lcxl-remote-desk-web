@@ -225,7 +225,6 @@ fn interactive_home_is_a_short_lived_sensitive_model_projection() {
             source_object_id: None,
             source_envelope_ids: vec![],
         },
-        digest_sha256: format!("{:x}", Sha256::digest(b"x")),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: vec![destination.clone()],
         retention: RetentionBoundary {
@@ -2023,7 +2022,6 @@ async fn ai_assistant_user_followup_reprojects_latest_browser_page_ref() {
             source_object_id: Some("browser-call-followup".into()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: format!("{:x}", Sha256::digest(completion_text.as_bytes())),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -2091,7 +2089,6 @@ async fn ai_assistant_user_followup_reprojects_latest_browser_page_ref() {
             source_object_id: Some("u".into()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: followup_digest,
         sensitivity: Sensitivity::UserContent,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -2167,7 +2164,6 @@ async fn ai_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge(
             source_object_id: Some("u2".into()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: digest,
         sensitivity: desk_agent_protocol::data_lineage::Sensitivity::UserContent,
         allowed_destinations: Vec::new(),
         retention: desk_agent_protocol::data_lineage::RetentionBoundary {
@@ -2219,8 +2215,8 @@ async fn ai_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge(
     let projected = messages.last().unwrap().data_envelope.as_ref().unwrap();
     assert_ne!(projected.envelope_id, "latest-user-envelope");
     assert_eq!(
-        projected.digest_sha256,
-        latest.data_envelope.unwrap().digest_sha256
+        projected.content.size_bytes(),
+        latest.data_envelope.unwrap().content.size_bytes()
     );
     assert_eq!(
         projected.provenance.source_envelope_ids,
@@ -5481,7 +5477,6 @@ async fn ai_assistant_retries_one_malformed_permission_plan_after_tool_result() 
             source_object_id: Some("user".into()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: user_digest,
         sensitivity: Sensitivity::UserContent,
         allowed_destinations: vec![destination.clone()],
         retention: RetentionBoundary {
@@ -6254,7 +6249,6 @@ async fn mutating_rejected_skips_remaining_in_turn() {
             source_object_id: None,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: "a".repeat(64),
         sensitivity: desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
         allowed_destinations: vec![
             desk_agent_protocol::data_lineage::DestinationIdentity::LocalArtifact {
@@ -7952,7 +7946,6 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
             source_object_id: None,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: "a".repeat(64),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -8026,7 +8019,6 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
             source_object_id: None,
             source_envelope_ids: vec!["artifact-envelope-1".into()],
         },
-        digest_sha256: "d".repeat(64),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -8049,7 +8041,6 @@ fn artifact_consumer_lineage_resolves_a_prior_typed_artifact_result() {
             source_object_id: None,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: "b".repeat(64),
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -8086,7 +8077,6 @@ fn artifact_producer_lineage_resolves_preview_and_current_requirement() {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest.to_string().repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -8219,7 +8209,6 @@ fn requested_artifact_projection_restores_only_verbatim_named_typed_artifact() {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: "a".repeat(64),
             sensitivity,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "gateway:1".into(),
@@ -8533,7 +8522,6 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: "a".repeat(64),
             sensitivity,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "gateway:1".into(),
@@ -8971,7 +8959,6 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
             source_object_id: None,
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: "b".repeat(64),
         sensitivity: Sensitivity::UserContent,
         allowed_destinations: Vec::new(),
         retention: RetentionBoundary {
@@ -9183,7 +9170,6 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest.to_string().repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -9192,7 +9178,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
             },
         }
     }
-    fn handoff_envelope(id: &str, observation_id: &str, digest: char) -> DataEnvelope {
+    fn handoff_envelope(id: &str, observation_id: &str) -> DataEnvelope {
         DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: id.into(),
@@ -9207,7 +9193,6 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest.to_string().repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -9300,8 +9285,8 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
     scripted.mutation_envelopes.borrow_mut().extend([
         Some(artifact_envelope("xlsx-envelope-1", "xlsx-artifact-1", 'a')),
         Some(artifact_envelope("docx-envelope-1", "docx-artifact-1", 'b')),
-        Some(handoff_envelope("gmail-envelope-1", "gmail-result-1", 'c')),
-        Some(handoff_envelope("slack-envelope-1", "slack-result-1", 'd')),
+        Some(handoff_envelope("gmail-envelope-1", "gmail-result-1")),
+        Some(handoff_envelope("slack-envelope-1", "slack-result-1")),
     ]);
     let registry = vec![
         read_tool("inspect_spreadsheets"),

@@ -5,7 +5,6 @@
 pub struct ObservedCapabilityAuthority {
     pub target_session_id: Option<String>,
     pub envelope_ids: Vec<String>,
-    pub content_digests_sha256: Vec<String>,
     pub provider_id: String,
     pub capability_id: String,
     pub tool_name: String,
@@ -60,7 +59,6 @@ impl ObservedCapabilityAuthority {
         Self {
             target_session_id: call.target_session_id.map(str::to_owned),
             envelope_ids: call.envelope_ids.to_vec(),
-            content_digests_sha256: call.content_digests_sha256.to_vec(),
             provider_id: call.provider_id.into(),
             capability_id: call.capability_id.into(),
             tool_name: call.tool_name.into(),
@@ -104,10 +102,6 @@ impl ObservedCapabilityAuthority {
                 .envelope_ids
                 .iter()
                 .all(|value| grant.allowed_envelope_ids.contains(value))
-            && self
-                .content_digests_sha256
-                .iter()
-                .all(|value| grant.allowed_content_digests_sha256.contains(value))
             && grant
                 .canonical_input_digest_sha256
                 .as_ref()

@@ -9,7 +9,6 @@ use desk_agent_protocol::{
         DestinationIdentity, RetentionBoundary, Sensitivity,
     },
 };
-use sha2::{Digest, Sha256};
 
 use crate::{
     ai_assistant::*,
@@ -155,7 +154,6 @@ pub fn build_read_attachment(
                 source_object_id: Some(object_ref.token.clone()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: format!("{:x}", Sha256::digest(metadata)),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![context.destination.clone()],
             retention: RetentionBoundary {

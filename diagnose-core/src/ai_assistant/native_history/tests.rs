@@ -57,7 +57,7 @@ fn source_navigation_uses_only_unique_original_result_envelopes_including_extern
         None
     );
     result.raw_result = Some(Box::new(RawResult {
-        original_sha256: envelope.digest_sha256.clone(),
+        original_sha256: "0".repeat(64),
         original_envelope: Some(envelope.clone()),
         restorable: true,
         template: None,

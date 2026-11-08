@@ -30,7 +30,6 @@ async fn application_catalog_passes_observation_gate_and_reaches_remote_dispatch
         operation_scope: vec!["observe".into()],
         export_destinations: vec![],
         allowed_envelope_ids: vec![],
-        allowed_content_digests_sha256: vec![],
         use_policy: CapabilityGrantUsePolicy::Reusable,
         canonical_input_digest_sha256: None,
         issued_by: CapabilityGrantIssuer::UserDecision,

@@ -473,7 +473,9 @@ pub fn validate_summary_derivations(
             return Err(lineage_error());
         };
         let expected_input = derive_projection_metadata(
-            &step.compression_input.digest_sha256,
+            step.compression_input
+                .content_sha256()
+                .ok_or_else(lineage_error)?,
             *size_bytes,
             &step.compression_sources,
             "compression-input",
@@ -486,7 +488,7 @@ pub fn validate_summary_derivations(
             return Err(lineage_error());
         };
         let mut expected_summary = derive_projection_metadata(
-            &step.summary.digest_sha256,
+            step.summary.content_sha256().ok_or_else(lineage_error)?,
             *size_bytes,
             &[step.model_output.clone(), step.compression_input.clone()],
             "checkpoint-summary",
@@ -507,7 +509,7 @@ fn source_binding_digest(
     sources: &[ContextSummarySourceV1],
 ) -> Result<String, ModelContextError> {
     Ok(sha256_hex(&canonical_bytes(&(
-        &envelope.digest_sha256,
+        &envelope.envelope_id,
         sources,
     ))?))
 }

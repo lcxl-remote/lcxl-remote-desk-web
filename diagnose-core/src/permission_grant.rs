@@ -834,7 +834,6 @@ pub fn build_permission_grants(
             operation_scope: operation_scope.clone(),
             export_destinations,
             allowed_envelope_ids: Vec::new(),
-            allowed_content_digests_sha256: Vec::new(),
             use_policy,
             canonical_input_digest_sha256,
             issued_by: CapabilityGrantIssuer::UserDecision,

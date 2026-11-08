@@ -224,12 +224,7 @@ pub(super) async fn native_on(
             .collect(),
         total_bytes: envelopes
             .iter()
-            .map(|value| match value.content {
-                desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
-                    size_bytes, ..
-                } => size_bytes as usize,
-                _ => unreachable!(),
-            })
+            .map(|value| value.content.size_bytes() as usize)
             .sum(),
     };
     crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(

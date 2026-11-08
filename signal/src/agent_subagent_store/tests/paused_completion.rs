@@ -207,7 +207,6 @@ async fn seed_origin(
         observed_authority: ObservedCapabilityAuthority {
             target_session_id: None,
             envelope_ids: vec!["fixture-original-input".into()],
-            content_digests_sha256: vec![],
             provider_id: origin.provider_id.clone(),
             capability_id: "fixture.command".into(),
             tool_name: origin.tool_name.clone(),

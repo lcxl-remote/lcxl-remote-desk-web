@@ -2143,7 +2143,6 @@ mod tests {
             operation_scope: vec!["create_new".into()],
             export_destinations: Vec::new(),
             allowed_envelope_ids: Vec::new(),
-            allowed_content_digests_sha256: Vec::new(),
             use_policy: CapabilityGrantUsePolicy::Reusable,
             canonical_input_digest_sha256: None,
             issued_by: CapabilityGrantIssuer::UserDecision,
@@ -2356,7 +2355,6 @@ mod tests {
                 operation_scope: operations,
                 export_destinations: &[],
                 envelope_ids: &[],
-                content_digests_sha256: &[],
                 canonical_input_digest_sha256: canonical_digest,
                 byte_count: 10,
                 item_count: 1,
@@ -2621,7 +2619,7 @@ mod tests {
             call_id: finished.exec_request_id.clone(),
             generation: 1,
             outcome: CapabilityDispatchOutcome::Succeeded,
-            result_digest_sha256: staged.1.envelope.digest_sha256.clone(),
+            result_digest_sha256: staged.1.result_sha256.clone(),
         };
         SignalCapabilityGrantStore::record_dispatch_completion_on(
             &txn,

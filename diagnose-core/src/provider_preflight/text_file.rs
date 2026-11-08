@@ -296,11 +296,7 @@ pub(crate) fn resolve_file_result_from_history(
             || crate::model_egress::envelope_expires_by(envelope, now_unix_ms)
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id != provider.wire.provider_id
-            || envelope.digest_sha256
-                != format!(
-                    "{:x}",
-                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
-                )
+            || envelope.content.size_bytes() != message.trusted_tool_result().text.len() as u64
         {
             continue;
         }
@@ -735,11 +731,7 @@ fn read_evidence_on_device(
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id
                 != crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID
-            || envelope.digest_sha256
-                != format!(
-                    "{:x}",
-                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
-                )
+            || envelope.content.size_bytes() != message.trusted_tool_result().text.len() as u64
         {
             continue;
         }
@@ -897,11 +889,7 @@ pub fn document_source_evidence_on_device(
                 && envelope.provenance.source_object_id.as_deref()
                     != Some(format!("{device_id}:{id}").as_str()))
             || envelope.provenance.source_provider_id != provider.wire.provider_id
-            || envelope.digest_sha256
-                != format!(
-                    "{:x}",
-                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
-                )
+            || envelope.content.size_bytes() != message.trusted_tool_result().text.len() as u64
         {
             continue;
         }
@@ -1407,7 +1395,6 @@ impl TextMutationPreflight {
             operation_scope: &self.operation_scope,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.canonical_input_digest_sha256,
             byte_count: self.canonical_input_json.len() as u64,
             item_count: 1,
@@ -1818,7 +1805,6 @@ mod tests {
                 source_object_id: Some("device:read-call".into()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: hash,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![],
             retention: RetentionBoundary {

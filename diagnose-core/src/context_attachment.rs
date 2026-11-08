@@ -381,8 +381,6 @@ mod tests {
                     source_object_id: Some("range".into()),
                     source_envelope_ids: Vec::new(),
                 },
-                digest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .into(),
                 sensitivity: Sensitivity::Sensitive,
                 allowed_destinations: Vec::new(),
                 retention: RetentionBoundary {

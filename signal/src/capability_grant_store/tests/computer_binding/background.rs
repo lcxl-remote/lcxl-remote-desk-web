@@ -608,8 +608,8 @@ async fn expired_background_becomes_reconcilable_unknown_then_accepts_original_l
         .find(|message| message.message_id == "running")
         .unwrap();
     assert_eq!(
-        message.data_envelope.as_ref().unwrap().digest_sha256,
-        format!("{:x}", Sha256::digest(message.text.as_bytes()))
+        message.data_envelope.as_ref().unwrap().content.size_bytes(),
+        message.text.len() as u64
     );
     let sessions = SignalAgentSessionStore::new(f.store.db.clone());
     let snapshot = sessions

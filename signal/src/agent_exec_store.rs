@@ -468,7 +468,7 @@ impl SignalAgentExecStore {
                         call_id: task.exec_request_id.clone(),
                         generation: 1,
                         outcome: CapabilityDispatchOutcome::Succeeded,
-                        result_digest_sha256: receipt.envelope.digest_sha256.clone(),
+                        result_digest_sha256: receipt.result_sha256.clone(),
                     };
                     SignalCapabilityGrantStore::new(self.db.clone())
                         .record_dispatch_completion(

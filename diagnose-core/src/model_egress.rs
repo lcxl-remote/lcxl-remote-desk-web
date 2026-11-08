@@ -346,10 +346,7 @@ impl ModelEgressPolicy {
         let digest_sha256 = hex_digest(&bytes);
         // Equal text can be produced from different sources in the same clock tick.
         // Bind the immutable output identity to the full input identities as well.
-        let input_identities: Vec<_> = inputs
-            .iter()
-            .map(|input| (&input.envelope_id, &input.digest_sha256))
-            .collect();
+        let input_identities: Vec<_> = inputs.iter().map(|input| &input.envelope_id).collect();
         let identity = serde_json::to_vec(&(
             "model-output-v1",
             &self.export_authorization_id,
@@ -374,7 +371,6 @@ impl ModelEgressPolicy {
                 source_object_id: Some(short_digest(format!("{:?}", self.destination).as_bytes())),
                 source_envelope_ids: source_ids,
             },
-            digest_sha256,
             sensitivity,
             allowed_destinations: allowed.into_iter().collect(),
             retention,
@@ -414,7 +410,6 @@ impl ModelEgressPolicy {
                 source_object_id: Some(message_id.to_string()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256,
             sensitivity: Sensitivity::Public,
             allowed_destinations: vec![destination.clone()],
             retention: RetentionBoundary {
@@ -682,7 +677,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256,
             sensitivity,
             allowed_destinations: destinations,
             retention: RetentionBoundary {
@@ -1418,8 +1412,8 @@ mod tests {
             second.input_envelopes[0].envelope_id
         );
         assert_ne!(
-            first.input_envelopes[0].digest_sha256,
-            second.input_envelopes[0].digest_sha256
+            first.input_envelopes[0].content_sha256(),
+            second.input_envelopes[0].content_sha256()
         );
         let second_turn = ModelTurn {
             text: "first report".into(),

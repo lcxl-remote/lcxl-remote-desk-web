@@ -117,7 +117,7 @@ pub fn is_published_input_label(source: &DataEnvelope) -> bool {
             DestinationIdentity::Model { .. }
         )
         && matches!(&source.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
-            if blob_id == &format!("published-task-content-{key}") && sha256 == &source.digest_sha256
+            if blob_id == &format!("published-task-content-{key}") && sha256.len() == 64
                 && *size_bytes > 0 && media_type == "text/plain;charset=utf-8")
 }
 
@@ -163,7 +163,6 @@ pub fn model_bound_published_input(
             source_object_id: Some(message_id.clone()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: digest,
         sensitivity: Sensitivity::UserContent,
         allowed_destinations: vec![destination],
         retention: RetentionBoundary {
@@ -245,7 +244,6 @@ mod tests {
         let source = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("published-task-input-{key}"),
-            digest_sha256: hash.clone(),
             content: ContentRef::ImmutableBlob {
                 blob_id: format!("published-task-content-{key}"),
                 sha256: hash,

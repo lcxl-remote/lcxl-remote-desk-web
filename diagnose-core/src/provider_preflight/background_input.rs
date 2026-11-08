@@ -211,7 +211,6 @@ impl BackgroundInputCallPreflight {
             operation_scope: &self.operation_scope,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.canonical_input_digest_sha256,
             byte_count: self.canonical_input_json.len() as u64,
             item_count: 1,

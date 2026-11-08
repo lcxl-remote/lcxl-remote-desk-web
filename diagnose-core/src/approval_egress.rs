@@ -538,7 +538,6 @@ fn authorize_review_sources(
                 .map(|source| source.envelope_id.clone())
                 .collect(),
         },
-        digest_sha256: digest,
         sensitivity,
         allowed_destinations: vec![destination.clone()],
         retention,
@@ -586,7 +585,10 @@ pub(crate) fn is_completed_history_receipt(
     matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
         && message.image_data_url.is_none()
         && message.attachment_read.is_none()
-        && matches!(source.content, ContentRef::ImmutableBlob { .. })
+        && matches!(
+            source.content,
+            ContentRef::ImmutableBlob { .. } | ContentRef::Projection { .. }
+        )
         && !is_historical_permission_pause_result(message)
         && matches!(
             source.provenance.source_tool_name.as_str(),
@@ -652,7 +654,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity,
             allowed_destinations: vec![],
             retention: RetentionBoundary {
@@ -679,16 +680,16 @@ mod tests {
         )
         .unwrap();
         reference.raw_result = Some(Box::new(delivery::RawResult {
-            original_sha256: original_envelope.digest_sha256.clone(),
+            original_sha256: original_envelope.content_sha256().unwrap().to_owned(),
             original_envelope: Some(original_envelope.clone()),
             restorable: true,
             template: Some(serde_json::json!({"hidden": "original-private-body"})),
             slots: vec![delivery::RawSlot {
                 path: "result".into(),
                 attachment_id: "ui-result".into(),
-                sha256: original_envelope.digest_sha256.clone(),
+                sha256: original_envelope.content_sha256().unwrap().to_owned(),
             }],
-            sha256: original_envelope.digest_sha256.clone(),
+            sha256: original_envelope.content_sha256().unwrap().to_owned(),
             envelope: Some(original_envelope.clone()),
         }));
 
@@ -712,7 +713,7 @@ mod tests {
                 after_context: 0,
                 max_bytes: None,
             },
-            source_sha256: original_envelope.digest_sha256.clone(),
+            source_sha256: original_envelope.content_sha256().unwrap().to_owned(),
             projection_version: 1,
             page_sha256: format!("{:x}", Sha256::digest(page.text.as_bytes())),
             body_bytes: "current-ui-evidence".len(),
@@ -1147,10 +1148,11 @@ mod tests {
                             .expires_at_unix_ms = Some(1)
                     }
                     4 => {
-                        let ContentRef::ImmutableBlob { size_bytes, .. } =
+                        let (ContentRef::ImmutableBlob { size_bytes, .. }
+                        | ContentRef::Projection { size_bytes, .. }) =
                             &mut message.data_envelope.as_mut().unwrap().content
                         else {
-                            panic!("expected projected blob")
+                            panic!("expected projected content")
                         };
                         *size_bytes += 1;
                     }

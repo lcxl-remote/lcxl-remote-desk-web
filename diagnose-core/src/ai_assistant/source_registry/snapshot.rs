@@ -249,7 +249,7 @@ fn native_read(source: &DataEnvelope) -> Option<RegisteredSourceContract> {
             .is_some_and(|id| id.starts_with("live-target:sha256:"))
         || !matches!(&source.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
             if blob_id.strip_prefix("native-read-snapshot-").is_some_and(|id| !id.is_empty())
-                && sha256 == &source.digest_sha256 && *size_bytes > 0 && media_type == "application/octet-stream")
+                && sha256.len() == 64 && *size_bytes > 0 && media_type == "application/octet-stream")
     {
         return None;
     }
@@ -274,18 +274,20 @@ fn native_control(source: &DataEnvelope) -> bool {
     if source.provenance.source_envelope_ids.is_empty() {
         return false;
     }
-    let ContentRef::ImmutableBlob {
-        blob_id,
-        sha256,
-        size_bytes,
-        media_type,
-    } = &source.content
-    else {
-        return false;
-    };
-    if sha256 != &source.digest_sha256 || *size_bytes == 0 {
+    if source.content.size_bytes() == 0 {
         return false;
     }
+    // Persisted status results are projections; request-only status
+    // projections and runtime control messages are content-addressed blobs.
+    let blob = match &source.content {
+        ContentRef::ImmutableBlob {
+            blob_id,
+            sha256,
+            media_type,
+            ..
+        } => Some((blob_id, sha256, media_type)),
+        _ => None,
+    };
     let provenance = &source.provenance;
     if provenance.source_provider_id == crate::dynamic_run::RUN_CONTROL_PROVIDER_ID {
         if provenance.source_object_id.is_some() {
@@ -315,16 +317,36 @@ fn native_control(source: &DataEnvelope) -> bool {
                 id.len() == 64
                     && provenance.source_envelope_ids.len() == 1
                     && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    && media_type == "text/plain"
-                    && blob_id == &format!("status-content-{:x}", Sha256::digest(sha256.as_bytes()))
+                    && match (&source.content, blob) {
+                        (
+                            ContentRef::Projection {
+                                projection,
+                                media_type,
+                                ..
+                            },
+                            _,
+                        ) => {
+                            projection == crate::model_message_labels::STATUS_RESULT_PROJECTION
+                                && media_type == "text/plain"
+                        }
+                        (_, Some((blob_id, sha256, media_type))) => {
+                            media_type == "text/plain"
+                                && *blob_id
+                                    == format!(
+                                        "status-content-{:x}",
+                                        Sha256::digest(sha256.as_bytes())
+                                    )
+                        }
+                        _ => false,
+                    }
             }
-            "delegation_state" => {
+            "delegation_state" => blob.is_some_and(|(blob_id, _, media_type)| {
                 source
                     .envelope_id
                     .strip_prefix("delegation-")
-                    .is_some_and(|id| blob_id == &format!("delegation-message-{id}"))
+                    .is_some_and(|id| *blob_id == format!("delegation-message-{id}"))
                     && media_type == "application/json"
-            }
+            }),
             _ => false,
         }
     } else if provenance.source_provider_id == "assistant-runtime-control" {
@@ -338,8 +360,10 @@ fn native_control(source: &DataEnvelope) -> bool {
         };
         source.envelope_id == format!("{prefix}-message-{id}")
             && provenance.source_envelope_ids.len() == 1
-            && blob_id == &format!("{prefix}-content-{id}")
-            && media_type == "text/plain;charset=utf-8"
+            && blob.is_some_and(|(blob_id, _, media_type)| {
+                *blob_id == format!("{prefix}-content-{id}")
+                    && media_type == "text/plain;charset=utf-8"
+            })
     } else {
         false
     }

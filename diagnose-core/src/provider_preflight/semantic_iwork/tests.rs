@@ -52,7 +52,11 @@ fn add_directory_source(
     .envelope;
     envelope.provenance.source_provider_id = crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
     envelope.provenance.source_tool_name = "inspect_files".into();
-    envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+    if let ContentRef::EphemeralObservation { size_bytes, .. }
+    | ContentRef::ImmutableBlob { size_bytes, .. } = &mut envelope.content
+    {
+        *size_bytes = text.len() as u64;
+    }
     let mut result = ChatMessage::tool_result("listing-result", "listing", text);
     result.data_envelope = Some(envelope);
     session.conversation.extend([
@@ -253,7 +257,6 @@ fn attachment(id: &str, kind: ContextAttachmentKind, reference: &ObjectRef) -> C
                 source_object_id: Some(id.into()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: "a".repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![destination],
             retention: RetentionBoundary {
@@ -624,7 +627,6 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
         if let Some(binding) = &binding {
             use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
             use crate::file_scope::{DirectoryConsentSource, DirectoryProposal};
-            use sha2::{Digest, Sha256};
             let mut session = crate::session::PersistedAgentSession::new(
                 "conversation",
                 "owner",
@@ -697,7 +699,6 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
                 .provider_id
                 .clone();
             envelope.provenance.source_tool_name = read_tool.into();
-            envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
             envelope.content = ContentRef::EphemeralObservation {
                 observation_id: "read".into(),
                 size_bytes: text.len() as u64,

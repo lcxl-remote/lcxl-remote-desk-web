@@ -110,7 +110,7 @@ async fn original_result_preserves_label_without_factory_or_new_input_binding() 
 
 #[tokio::test]
 async fn inconsistent_original_result_is_not_saved_acknowledged_or_relabelled() {
-    for corruption in ["bytes", "image", "size", "content-digest", "schema"] {
+    for corruption in ["bytes", "image", "size", "schema"] {
         let sess = MemSession::default();
         let model = model();
         let mut output = ToolRunOutput {
@@ -126,11 +126,6 @@ async fn inconsistent_original_result_is_not_saved_acknowledged_or_relabelled() 
             "size" => {
                 if let ContentRef::ImmutableBlob { size_bytes, .. } = &mut envelope.content {
                     *size_bytes += 1;
-                }
-            }
-            "content-digest" => {
-                if let ContentRef::ImmutableBlob { sha256, .. } = &mut envelope.content {
-                    *sha256 = "a".repeat(64);
                 }
             }
             "schema" => envelope.schema_version += 1,

@@ -52,7 +52,6 @@ pub struct RegisteredSourcePolicy {
     pub source_contract_revision: u64,
     pub contract: RegisteredSourceContract,
     pub envelope_id: String,
-    pub content_sha256: String,
     pub label_sha256: String,
     pub policy: SourceUsePolicy,
 }
@@ -182,7 +181,6 @@ fn registration(
         source_contract_revision: original_contract_revision,
         contract,
         envelope_id: envelope.envelope_id.clone(),
-        content_sha256: envelope.digest_sha256.clone(),
         label_sha256: crate::model_egress::sink_metadata_sha256(envelope)?,
         policy,
     })
@@ -288,9 +286,8 @@ fn canonical_user_blob(envelope: &DataEnvelope) -> bool {
     };
     envelope.sensitivity == Sensitivity::UserContent
         && envelope.envelope_id == format!("user-message-{id}")
-        && matches!(&envelope.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
-            if blob_id == &format!("session-message-{id}") && sha256 == &envelope.digest_sha256 && *size_bytes > 0
-                && media_type == "text/plain;charset=utf-8")
+        && matches!(&envelope.content, ContentRef::Message { message_id, size_bytes, media_type }
+            if message_id == id && *size_bytes > 0 && media_type == "text/plain;charset=utf-8")
 }
 
 fn canonical_interactive_home(envelope: &DataEnvelope) -> bool {
@@ -306,7 +303,7 @@ fn canonical_interactive_home(envelope: &DataEnvelope) -> bool {
         && envelope.retention.expires_at_unix_ms.is_some()
         && matches!(&envelope.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
             if blob_id == &format!("interactive-home-snapshot-{}", envelope.envelope_id)
-                && sha256 == &envelope.digest_sha256 && *size_bytes > 0
+                && sha256.len() == 64 && *size_bytes > 0
                 && media_type == "text/plain;charset=utf-8")
 }
 

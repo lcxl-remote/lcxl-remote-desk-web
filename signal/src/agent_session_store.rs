@@ -3111,7 +3111,6 @@ fn superseded_tool_result(
             source_object_id: None,
             source_envelope_ids: vec![parent.envelope_id.clone()],
         },
-        digest_sha256: digest,
         sensitivity: parent.sensitivity,
         allowed_destinations: parent.allowed_destinations.clone(),
         retention: parent.retention,
@@ -3924,7 +3923,6 @@ mod tests {
                 source_object_id: Some(message_id.into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "gateway".into(),
@@ -4870,7 +4868,6 @@ mod tests {
                     source_object_id: Some(format!("opaque-{id}")),
                     source_envelope_ids: Vec::new(),
                 },
-                digest_sha256: "a".repeat(64),
                 sensitivity: Sensitivity::UserContent,
                 allowed_destinations: Vec::new(),
                 retention: RetentionBoundary {
@@ -5424,7 +5421,6 @@ mod tests {
                 source_object_id: Some("device-1:docx-call-1".into()),
                 source_envelope_ids: vec!["merge-preview-envelope-1".into()],
             },
-            digest_sha256: "a".repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {

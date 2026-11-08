@@ -34,7 +34,6 @@ fn history() -> Vec<ChatMessage> {
             source_object_id: None,
             source_envelope_ids: vec![],
         },
-        digest_sha256: hash,
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations: vec![],
         retention: RetentionBoundary {

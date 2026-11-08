@@ -372,7 +372,6 @@ impl ReadCallPreflight {
             operation_scope: &self.operation_scope,
             export_destinations: &self.export_destinations,
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.canonical_input_digest_sha256,
             // Output size is unknown before dispatch. The runtime must enforce
             // the original grant's output limits before retaining any result.

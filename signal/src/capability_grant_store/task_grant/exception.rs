@@ -94,7 +94,6 @@ mod tests {
             operation_scope: &[],
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             byte_count: 1,
             item_count: 1,

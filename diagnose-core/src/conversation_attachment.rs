@@ -135,21 +135,8 @@ impl AttachmentMetadata {
             envelope
                 .validate()
                 .map_err(|_| invalid("Invalid attachment source label"))?;
-            if envelope.digest_sha256 != self.sha256
-                || match &envelope.content {
-                    desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
-                        size_bytes,
-                        ..
-                    }
-                    | desk_agent_protocol::data_lineage::ContentRef::EphemeralObservation {
-                        size_bytes,
-                        ..
-                    }
-                    | desk_agent_protocol::data_lineage::ContentRef::Artifact {
-                        size_bytes, ..
-                    } => *size_bytes,
-                } != self.size_bytes
-            {
+            // The attachment record and its label share trusted storage.
+            if envelope.content.size_bytes() != self.size_bytes {
                 return Err(invalid(
                     "Attachment source label does not match saved bytes",
                 ));

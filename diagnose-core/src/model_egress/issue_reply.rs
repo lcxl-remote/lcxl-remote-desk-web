@@ -47,7 +47,7 @@ pub(super) fn is_issue_reply_instruction(input: &DataEnvelope) -> bool {
             .allowed_destinations
             .iter()
             .any(|target| matches!(target, DestinationIdentity::ExternalIssue { .. }))
-        && input.digest_sha256 == hex_digest(INSTRUCTION.as_bytes())
+        && input.content_sha256() == Some(hex_digest(INSTRUCTION.as_bytes()).as_str())
 }
 
 /// The host has loaded the native output proof and rechecked its current source authority.

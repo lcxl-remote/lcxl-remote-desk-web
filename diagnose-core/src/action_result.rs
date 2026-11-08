@@ -351,18 +351,18 @@ impl ActionResultOrigin {
                 source_object_id: Some(self.source_object_id.clone()),
                 source_envelope_ids: self.source_envelope_ids.clone(),
             },
-            digest_sha256: digest,
             sensitivity: self.sensitivity,
             allowed_destinations: vec![],
             retention,
         };
         envelope.validate().map_err(|_| invalid())?;
         Ok(ActionResultReceipt {
-            schema_version: 1,
+            schema_version: 2,
             origin_digest_sha256: hash(&serde_json::to_vec(self).map_err(|_| invalid())?),
             action,
             attempt,
             received_at_unix_ms,
+            result_sha256: digest,
             envelope,
         })
     }
@@ -376,6 +376,9 @@ pub struct ActionResultReceipt {
     pub action: ActionIdentity,
     pub attempt: u32,
     pub received_at_unix_ms: u64,
+    /// Digest of the device result bytes. A replayed completion must report the
+    /// same result; an ephemeral label carries no digest of its own.
+    pub result_sha256: String,
     pub envelope: DataEnvelope,
 }
 

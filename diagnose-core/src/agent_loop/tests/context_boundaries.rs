@@ -496,7 +496,6 @@ async fn run_permission_compaction_case(mutation: u8) {
                 source_object_id: Some(message.message_id.clone()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::Public,
             allowed_destinations: vec![destination.clone()],
             retention: RetentionBoundary {

@@ -162,7 +162,6 @@ pub struct CapabilityGrantCall<'a> {
     pub operation_scope: &'a [String],
     pub export_destinations: &'a [DestinationIdentity],
     pub envelope_ids: &'a [String],
-    pub content_digests_sha256: &'a [String],
     pub canonical_input_digest_sha256: &'a str,
     pub byte_count: u64,
     pub item_count: u32,
@@ -386,12 +385,7 @@ fn match_capability_grant_inner(
     if !is_subset(call.export_destinations, &grant.export_destinations) {
         return Err(GrantMismatch::Destination);
     }
-    if !is_subset(call.envelope_ids, &grant.allowed_envelope_ids)
-        || !is_subset(
-            call.content_digests_sha256,
-            &grant.allowed_content_digests_sha256,
-        )
-    {
+    if !is_subset(call.envelope_ids, &grant.allowed_envelope_ids) {
         return Err(GrantMismatch::DataEnvelope);
     }
     if grant
@@ -453,7 +447,6 @@ mod tests {
             operation_scope: vec!["create_new".into()],
             export_destinations: Vec::new(),
             allowed_envelope_ids: vec!["envelope-1".into()],
-            allowed_content_digests_sha256: vec![digest('b')],
             use_policy: CapabilityGrantUsePolicy::OneShotExact,
             canonical_input_digest_sha256: Some(digest('a')),
             issued_by: CapabilityGrantIssuer::UserDecision,
@@ -551,7 +544,6 @@ mod tests {
         resources: &'a [String],
         operations: &'a [String],
         envelopes: &'a [String],
-        digests: &'a [String],
         canonical: &'a str,
     ) -> CapabilityGrantCall<'a> {
         CapabilityGrantCall {
@@ -571,7 +563,6 @@ mod tests {
             operation_scope: operations,
             export_destinations: &[],
             envelope_ids: envelopes,
-            content_digests_sha256: digests,
             canonical_input_digest_sha256: canonical,
             byte_count: 512,
             item_count: 1,
@@ -586,9 +577,8 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         let canonical = digest('c');
-        let current = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let current = call(&resources, &operations, &envelopes, &canonical);
         let mut approved = grant();
         assert!(
             unavailable_grant_message(std::slice::from_ref(&approved), &current)
@@ -621,11 +611,10 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         assert_eq!(
             match_capability_grant(
                 &grant(),
-                &call(&resources, &operations, &envelopes, &digests, &digest('a')),
+                &call(&resources, &operations, &envelopes, &digest('a')),
             ),
             Ok(())
         );
@@ -636,9 +625,8 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         let canonical = digest('a');
-        let mut current = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let mut current = call(&resources, &operations, &envelopes, &canonical);
         current.input_revision = 4;
         assert_eq!(match_capability_grant(&grant(), &current), Ok(()));
     }
@@ -648,11 +636,10 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         assert_eq!(
             match_capability_grant(
                 &grant(),
-                &call(&resources, &operations, &envelopes, &digests, &digest('c')),
+                &call(&resources, &operations, &envelopes, &digest('c')),
             ),
             Err(GrantMismatch::CanonicalInput)
         );
@@ -660,7 +647,7 @@ mod tests {
         assert_eq!(
             match_capability_grant(
                 &grant(),
-                &call(&widened, &operations, &envelopes, &digests, &digest('a')),
+                &call(&widened, &operations, &envelopes, &digest('a')),
             ),
             Err(GrantMismatch::ResourceScope)
         );
@@ -671,9 +658,8 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         let canonical = digest('a');
-        let mut current = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let mut current = call(&resources, &operations, &envelopes, &canonical);
         current.policy_revision = 8;
         assert_eq!(
             match_capability_grant(&grant(), &current),
@@ -713,9 +699,8 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         let canonical = digest('a');
-        let current_call = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let current_call = call(&resources, &operations, &envelopes, &canonical);
         let parent = task_parent();
         let mut granted = grant();
         granted.schema_version = CAPABILITY_GRANT_SCHEMA_VERSION;
@@ -788,9 +773,8 @@ mod tests {
         let resources = vec!["root:selected".into()];
         let operations = vec!["create_new".into()];
         let envelopes = vec!["envelope-1".into()];
-        let digests = vec![digest('b')];
         let canonical = digest('a');
-        let current_call = call(&resources, &operations, &envelopes, &digests, &canonical);
+        let current_call = call(&resources, &operations, &envelopes, &canonical);
         let parent = AiApprovalGrantProvenance {
             delegation_id: "delegation-1".into(),
             delegation_revision: 1,

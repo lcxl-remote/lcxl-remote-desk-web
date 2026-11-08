@@ -135,6 +135,8 @@ pub fn record_live_observation(
         } => (observation_id.clone(), Some(*expires_at_unix_ms)),
         ContentRef::ImmutableBlob { blob_id, .. } => (blob_id.clone(), None),
         ContentRef::Artifact { artifact_id, .. } => (artifact_id.clone(), None),
+        ContentRef::Message { message_id, .. } => (message_id.clone(), None),
+        ContentRef::Projection { .. } => (envelope.envelope_id.clone(), None),
     };
     let turn_id = session
         .current_turn_id
@@ -180,7 +182,7 @@ pub fn record_live_observation(
         display_summary: None,
         application_summary: window_summary,
         content: Some(envelope.content.clone()),
-        digest_sha256: Some(envelope.digest_sha256.clone()),
+        digest_sha256: envelope.content_sha256().map(str::to_owned),
         size_bytes: image.decoded_bytes as u64,
         media_type: Some(image.media_type.clone()),
         preview_data_url: Some(image_data_url.to_string()),
@@ -267,7 +269,7 @@ pub fn validate_set(frames: &[VisualEvidenceFrame]) -> Result<(), &'static str> 
             || frame
                 .digest_sha256
                 .as_ref()
-                .is_none_or(|digest| digest.len() != 64)
+                .is_some_and(|digest| digest.len() != 64)
             || frame.content.is_none()
             || !ids.insert(frame.evidence_id.as_str())
         {
@@ -349,7 +351,6 @@ mod tests {
                 source_object_id: Some("display-1".into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: "a".repeat(64),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {

@@ -143,7 +143,6 @@ impl ReadProjectionProof {
                     })
                     .collect(),
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![context.destination.clone()],
             retention: RetentionBoundary {

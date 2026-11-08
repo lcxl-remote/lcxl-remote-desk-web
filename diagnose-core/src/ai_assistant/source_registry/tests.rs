@@ -686,11 +686,15 @@ fn renamed_malformed_weakened_and_cyclic_controls_remain_unresolved() {
                     model_id: "model".into(),
                     profile_revision: 1,
                 }),
-            7 => {
-                if let ContentRef::ImmutableBlob { blob_id, .. } = &mut changed.content {
-                    *blob_id = "forged-runtime-body".into();
+            7 => match &mut changed.content {
+                ContentRef::Projection { projection, .. } => {
+                    *projection = "forged-runtime-body".into()
                 }
-            }
+                ContentRef::ImmutableBlob { blob_id, .. } => {
+                    *blob_id = "forged-runtime-body".into()
+                }
+                _ => unreachable!(),
+            },
             _ => changed
                 .provenance
                 .source_envelope_ids

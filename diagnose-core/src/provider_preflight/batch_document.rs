@@ -170,7 +170,7 @@ pub fn resolve_presentation_read_on_device(
     now: u64,
 ) -> Result<PresentationReadBinding, AgentError> {
     use crate::chat::ChatRole;
-    use sha2::{Digest, Sha256};
+
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let mut selected = None;
     for message in &session.conversation {
@@ -212,11 +212,7 @@ pub fn resolve_presentation_read_on_device(
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != call.name
             || envelope.provenance.source_provider_id != provider.wire.provider_id
-            || envelope.digest_sha256
-                != format!(
-                    "{:x}",
-                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
-                )
+            || envelope.content.size_bytes() != message.trusted_tool_result().text.len() as u64
         {
             continue;
         }
@@ -361,7 +357,6 @@ mod tests {
                 source_object_id: Some("device:read".into()),
                 source_envelope_ids: vec![],
             },
-            digest_sha256: hash,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![],
             retention: RetentionBoundary {

@@ -144,10 +144,9 @@ fn artifact_for_origin(
         label.provenance.source_provider_id = "fixture-device".into();
         label.provenance.source_tool_name = "read_recent_logs".into();
         label.provenance.source_object_id = None;
-        label.digest_sha256 = digest(&private.text);
         label.content = desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
             blob_id: "private-evidence".into(),
-            sha256: label.digest_sha256.clone(),
+            sha256: digest(&private.text),
             size_bytes: private.text.len() as u64,
             media_type: "text/plain".into(),
         };

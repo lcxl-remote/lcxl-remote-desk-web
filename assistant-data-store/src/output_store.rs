@@ -327,7 +327,9 @@ pub async fn find_head_on<C: ConnectionTrait>(
     let rows = head_query()
         .filter(archived::Column::ConversationId.eq(conversation))
         .filter(archived::Column::OutputEnvelopeId.eq(&output.envelope_id))
-        .filter(archived::Column::OutputDigestSha256.eq(&output.digest_sha256))
+        .filter(
+            archived::Column::OutputDigestSha256.eq(output.content_sha256().unwrap_or_default()),
+        )
         .order_by_asc(archived::Column::Id)
         .limit(2)
         .into_model::<ArchiveHead>()

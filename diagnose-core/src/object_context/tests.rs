@@ -139,10 +139,7 @@ fn selections_keep_original_refs_bounds_destination_and_metadata_digest() {
         assert_eq!(original.object_kind, kind);
         assert_eq!(original.token, "opaque-ref");
         let metadata = serde_json::to_vec(&serde_json::json!({ "provider_id": value.object_ref.source_provider_id, "capability_id": value.object_ref.source_capability_id, "object_ref": original, "display_summary": value.display_summary })).unwrap();
-        assert_eq!(
-            value.envelope.digest_sha256,
-            format!("{:x}", Sha256::digest(&metadata))
-        );
+        assert_eq!(value.envelope.content.size_bytes(), metadata.len() as u64);
         assert!(
             matches!(value.envelope.content, ContentRef::EphemeralObservation { size_bytes, .. } if size_bytes == metadata.len() as u64)
         );

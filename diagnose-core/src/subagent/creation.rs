@@ -514,8 +514,14 @@ impl CreationEnvelope {
             || label.provenance.source_object_id.as_deref() != Some(message.message_id.as_str())
             || !label.provenance.source_envelope_ids.is_empty()
             || label.allowed_destinations.as_slice() != [self.model_destination.clone()]
-            || !matches!(&label.content, desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob { size_bytes, .. }
-                if *size_bytes == message.text.len() as u64)
+            || label.content.size_bytes() != message.text.len() as u64
+            || !match &label.content {
+                desk_agent_protocol::data_lineage::ContentRef::Message { message_id, .. } => {
+                    *message_id == message.message_id
+                }
+                desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob { .. } => true,
+                _ => false,
+            }
         {
             return Err(super::invalid(
                 "delegation creation does not contain authentic owner input",

@@ -1679,7 +1679,6 @@ impl SignalAiAssistantTools {
             operation_scope: &operation_scope,
             export_destinations: &export_destinations,
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &canonical_input_digest_sha256,
             byte_count: 0,
             item_count: read_preflight
@@ -1751,7 +1750,6 @@ impl SignalAiAssistantTools {
                     operation_scope: operation_scope.clone(),
                     export_destinations: Vec::new(),
                     allowed_envelope_ids: Vec::new(),
-                    allowed_content_digests_sha256: Vec::new(),
                     use_policy: CapabilityGrantUsePolicy::Reusable,
                     canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
                     issued_by: CapabilityGrantIssuer::PolicyAuto,
@@ -2238,7 +2236,6 @@ impl SignalAiAssistantTools {
             operation_scope: &operation_scope,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &canonical_input_digest_sha256,
             byte_count: canonical_input_json.len() as u64,
             item_count: 1,
@@ -3369,7 +3366,6 @@ impl SignalAiAssistantTools {
                     operation_scope: &operation_scope,
                     export_destinations: &[],
                     envelope_ids: &[],
-                    content_digests_sha256: &[],
                     canonical_input_digest_sha256: &canonical_input_digest_sha256,
                     byte_count: canonical_input_json.len() as u64,
                     item_count: 1,
@@ -4918,7 +4914,6 @@ impl SignalAiAssistantTools {
                     operation_scope: operation_scope.clone(),
                     export_destinations: export_destinations.clone(),
                     allowed_envelope_ids: Vec::new(),
-                    allowed_content_digests_sha256: Vec::new(),
                     use_policy: CapabilityGrantUsePolicy::OneShotExact,
                     canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
                     issued_by: CapabilityGrantIssuer::PolicyAuto,
@@ -4999,7 +4994,6 @@ impl SignalAiAssistantTools {
                         source_object_id: Some(server_call_id.clone()),
                         source_envelope_ids: Vec::new(),
                     },
-                    digest_sha256: canonical_input_digest_sha256.clone(),
                     sensitivity: Sensitivity::Sensitive,
                     allowed_destinations: Vec::new(),
                     retention: RetentionBoundary {
@@ -5619,7 +5613,6 @@ impl SignalAiAssistantTools {
                 source_object_id: Some(server_call_id.clone()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: canonical_input_digest_sha256.clone(),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {
@@ -7238,7 +7231,6 @@ impl ToolSeam for SignalAiAssistantTools {
                 source_object_id: Some(format!("{}:{}", self.target_device_id, call.id)),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256,
             sensitivity: Sensitivity::Sensitive,
             // Effect authorization is not ExportData authorization. The model
             // egress projector must authorize the exact resolved destination.

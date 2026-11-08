@@ -95,7 +95,6 @@ pub fn projection_envelope(
         size_bytes: bytes.len() as u64,
         media_type: "application/octet-stream".into(),
     };
-    envelope.digest_sha256 = hash;
     envelope.provenance.source_envelope_ids = vec![parent.envelope_id.clone()];
     envelope
         .validate()
@@ -595,7 +594,6 @@ pub(crate) mod tests {
                 source_object_id: Some("call".into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: sha,
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {

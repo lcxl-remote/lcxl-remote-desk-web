@@ -53,7 +53,7 @@ pub(super) async fn accepted_inputs_on(
             continue;
         };
         if call.model_output_envelope_id.as_deref() != Some(output.envelope_id.as_str())
-            || call.model_output_digest_sha256.as_deref() != Some(output.digest_sha256.as_str())
+            || call.model_output_digest_sha256.as_deref() != output.content_sha256()
         {
             continue;
         }

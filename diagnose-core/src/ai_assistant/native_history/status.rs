@@ -93,7 +93,6 @@ impl NativeStatusHistoryProjection {
                 source_object_id: Some(native_id.clone()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: content_sha256,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: Vec::new(),
             retention: RetentionBoundary {

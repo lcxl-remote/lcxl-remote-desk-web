@@ -351,7 +351,6 @@ pub(super) async fn issue_on(
         operation_scope: call.operation_scope.to_vec(),
         export_destinations: call.export_destinations.to_vec(),
         allowed_envelope_ids: call.envelope_ids.to_vec(),
-        allowed_content_digests_sha256: call.content_digests_sha256.to_vec(),
         use_policy: CapabilityGrantUsePolicy::OneShotExact,
         canonical_input_digest_sha256: Some(call.canonical_input_digest_sha256.into()),
         issued_by: CapabilityGrantIssuer::TaskAuthorization(authority.provenance().clone()),

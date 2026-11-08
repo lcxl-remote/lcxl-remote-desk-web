@@ -148,7 +148,9 @@ impl ReadProjectionProof {
             validate_source_id(id)?;
         }
         let content_bytes = match &self.source_envelope.content {
-            ContentRef::ImmutableBlob { size_bytes, .. } => *size_bytes,
+            ContentRef::ImmutableBlob { size_bytes, .. }
+            | ContentRef::Projection { size_bytes, .. }
+            | ContentRef::Message { size_bytes, .. } => *size_bytes,
             _ => return Err("assistant read projection must bind an immutable result"),
         };
         if self.input_revision == 0
@@ -219,10 +221,7 @@ impl ReadProjectionProof {
 
     pub fn validate_cached_result(&self, content: &str) -> Result<(), &'static str> {
         self.validate()?;
-        let ContentRef::ImmutableBlob { size_bytes, .. } = &self.source_envelope.content else {
-            unreachable!()
-        };
-        if *size_bytes != content.len() as u64 {
+        if self.source_envelope.content.size_bytes() != content.len() as u64 {
             return Err("cached assistant read result size changed");
         }
         serde_json::from_str::<serde::de::IgnoredAny>(content)

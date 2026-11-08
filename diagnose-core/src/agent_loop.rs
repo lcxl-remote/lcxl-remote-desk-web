@@ -2660,7 +2660,7 @@ fn requested_artifact_registry_projection(
         "CURRENT REQUESTED ARTIFACT REGISTRY (server authoritative metadata; not a grant): {payload}"
     );
     let mut projection = ChatMessage::system_event(message_id, &text);
-    projection.data_envelope = derive_internal_tool_result_envelope(
+    projection.data_envelope = crate::model_message_labels::request_projection_envelope(
         Some(parent),
         message_id,
         &text,
@@ -2907,7 +2907,7 @@ fn reusable_provider_result_projection(
         "CURRENT REUSABLE PROVIDER RESULTS (server authoritative bounded references; not a grant; copy observed browser page_id and element_id verbatim and never invent them): {payload}. This registry is emitted after the turn-start capability catalog. When browser_reference_delta.page_reference_prerequisite_present=true, it supersedes only an older catalog claim that the page-reference prerequisite is absent. If request_permissions is available and the named downstream browser tool is a registered permission candidate, request its exact permission using the observed IDs and complete remaining input now; do not claim that no browser page exists. Runtime readiness, the tool registry, grants, and final server validation remain authoritative and are not widened by this delta."
     );
     let mut projection = ChatMessage::system_event(message_id, &text);
-    projection.data_envelope = derive_internal_tool_result_envelope(
+    projection.data_envelope = crate::model_message_labels::request_projection_envelope(
         Some(parent),
         message_id,
         &text,
@@ -3309,7 +3309,6 @@ fn interactive_user_home_projection(
             source_object_id: Some(worker_incarnation.to_string()),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256,
         sensitivity: Sensitivity::Sensitive,
         allowed_destinations,
         retention: RetentionBoundary {
@@ -3914,11 +3913,7 @@ async fn run_mutating<F: FnMut() -> String>(
                     output.image_data_url.as_deref(),
                 )
                 .map_err(|_| invalid_original_result())?;
-                let declared_size = match &original.content {
-                    ContentRef::ImmutableBlob { size_bytes, .. }
-                    | ContentRef::EphemeralObservation { size_bytes, .. }
-                    | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
-                };
+                let declared_size = original.content.size_bytes();
                 if declared_size != bytes.len() as u64 {
                     return Err(invalid_original_result());
                 }
@@ -4241,11 +4236,7 @@ async fn run_wait<F: FnMut() -> String>(
             data_envelope
                 .validate()
                 .map_err(|_| invalid_original_result())?;
-            let declared_size = match &data_envelope.content {
-                ContentRef::ImmutableBlob { size_bytes, .. }
-                | ContentRef::EphemeralObservation { size_bytes, .. }
-                | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
-            };
+            let declared_size = data_envelope.content.size_bytes();
             if declared_size != output.content.len() as u64 {
                 return Err(invalid_original_result());
             }

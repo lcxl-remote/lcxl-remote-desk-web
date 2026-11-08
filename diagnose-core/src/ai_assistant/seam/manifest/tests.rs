@@ -98,12 +98,8 @@ fn the_final_manifest_check_also_rejects_conflicting_labels_with_an_unchanged_bo
         .retention
         .expires_at_unix_ms = Some(1000);
     assert_eq!(
-        duplicate.data_envelope.as_ref().unwrap().digest_sha256,
-        request.messages[0]
-            .data_envelope
-            .as_ref()
-            .unwrap()
-            .digest_sha256
+        duplicate.data_envelope.as_ref().unwrap().content,
+        request.messages[0].data_envelope.as_ref().unwrap().content
     );
     request.messages.push(duplicate);
     assert!(manifest.validate_for(&session, &request).is_err());

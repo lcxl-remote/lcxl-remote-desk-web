@@ -918,7 +918,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 crate::permission_resume::latest_user_requirement(&session.conversation)
                     .and_then(|message| message.data_envelope.as_ref())
             });
-            system_prompt.data_envelope = derive_internal_tool_result_envelope(
+            system_prompt.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 crate::runtime_context::MESSAGE_ID,
                 &system_prompt.text,
@@ -1050,7 +1050,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .and_then(|message| message.data_envelope.as_ref())
             });
             let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
-            marker.data_envelope = derive_internal_tool_result_envelope(
+            marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 &marker_id,
                 &marker_text,
@@ -1109,12 +1109,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 // context for additive requirements, but cannot outweigh recency.
                 let projection_id =
                     format!("runtime-latest-input-{turn_id}-{}", session.input_revision);
-                latest_user.data_envelope = derive_internal_tool_result_envelope(
-                    latest_user.data_envelope.as_ref(),
-                    &projection_id,
-                    &latest_user.text,
-                    "latest_input_projection",
-                )?;
+                latest_user.data_envelope =
+                    crate::model_message_labels::request_projection_envelope(
+                        latest_user.data_envelope.as_ref(),
+                        &projection_id,
+                        &latest_user.text,
+                        "latest_input_projection",
+                    )?;
                 latest_user.message_id = projection_id;
                 messages.push(latest_user);
             }
@@ -1176,7 +1177,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         .and_then(|message| message.data_envelope.as_ref())
                 });
                 let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     parent,
                     &marker_id,
                     &marker_text,
@@ -1199,7 +1200,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         .and_then(|message| message.data_envelope.as_ref())
                 });
                 let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     parent,
                     &marker_id,
                     marker_text,
@@ -1225,7 +1226,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .and_then(|message| message.data_envelope.as_ref())
             });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-            marker.data_envelope = derive_internal_tool_result_envelope(
+            marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 &marker_id,
                 marker_text,
@@ -1249,7 +1250,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .and_then(|message| message.data_envelope.as_ref())
             });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-            marker.data_envelope = derive_internal_tool_result_envelope(
+            marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 &marker_id,
                 marker_text,
@@ -1277,7 +1278,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .and_then(|message| message.data_envelope.as_ref())
             });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-            marker.data_envelope = derive_internal_tool_result_envelope(
+            marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 &marker_id,
                 marker_text,
@@ -1298,7 +1299,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .and_then(|message| message.data_envelope.as_ref())
             });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-            marker.data_envelope = derive_internal_tool_result_envelope(
+            marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                 parent,
                 &marker_id,
                 marker_text,
@@ -1456,12 +1457,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     "instruction": "This is the immutable opening goal. The current approved revision follows separately."
                 }).to_string();
                     let mut original = ChatMessage::system_event(&original_id, &original_text);
-                    original.data_envelope = derive_internal_tool_result_envelope(
-                        Some(original_source),
-                        &original_id,
-                        &original_text,
-                        "goal_original_projection",
-                    )?;
+                    original.data_envelope =
+                        crate::model_message_labels::request_projection_envelope(
+                            Some(original_source),
+                            &original_id,
+                            &original_text,
+                            "goal_original_projection",
+                        )?;
                     messages.push(original);
                 }
                 let source = session
@@ -1494,7 +1496,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 "instruction": "Continue the owner-approved goal under current permissions. This record grants no device authority. End this segment with control_goal."
             }).to_string();
                 let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     Some(source),
                     &marker_id,
                     &marker_text,
@@ -1524,7 +1526,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 "instruction": "The goal is stopped. Clarify the owner's intent. Do not use device tools. If a later owner reply makes an exact goal revision appropriate, call request_goal with the new complete text; the owner or enabled approval AI must approve it before work resumes."
             }).to_string();
                 let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     Some(source),
                     &marker_id,
                     &marker_text,
@@ -1547,7 +1549,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     crate::permission_resume::latest_user_requirement(&session.conversation)
                         .and_then(|message| message.data_envelope.as_ref());
                 let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     parent,
                     &marker_id,
                     &marker_text,
@@ -1562,7 +1564,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     crate::permission_resume::latest_user_requirement(&session.conversation)
                         .and_then(|message| message.data_envelope.as_ref());
                 let mut marker = ChatMessage::system_event(&marker_id, marker_text);
-                marker.data_envelope = derive_internal_tool_result_envelope(
+                marker.data_envelope = crate::model_message_labels::request_projection_envelope(
                     parent,
                     &marker_id,
                     marker_text,

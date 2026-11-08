@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 36;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 37;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -3623,7 +3623,6 @@ mod tests {
                     source_object_id: Some(id.into()),
                     source_envelope_ids: Vec::new(),
                 },
-                digest_sha256: digest,
                 sensitivity: Sensitivity::Sensitive,
                 allowed_destinations: Vec::new(),
                 retention: RetentionBoundary {

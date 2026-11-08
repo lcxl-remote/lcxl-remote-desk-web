@@ -108,7 +108,6 @@ fn word_approval_requires_authenticated_read_selected_source_and_current_directo
     let mut envelope = original.object_attachments[0].envelope.clone();
     envelope.provenance.source_provider_id = windows_word::PROVIDER_ID.into();
     envelope.provenance.source_tool_name = windows_word::INSPECT_TOOL.into();
-    envelope.digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
     envelope.content = ContentRef::EphemeralObservation {
         observation_id: "read".into(),
         size_bytes: text.len() as u64,

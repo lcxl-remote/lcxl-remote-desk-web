@@ -1307,7 +1307,6 @@ mod tests {
                 source_object_id: Some(message_id.into()),
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "gateway".into(),

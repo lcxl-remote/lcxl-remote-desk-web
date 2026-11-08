@@ -100,7 +100,6 @@ impl LaunchCallPreflight {
             operation_scope: &self.operations,
             export_destinations: &[],
             envelope_ids: &[],
-            content_digests_sha256: &[],
             canonical_input_digest_sha256: &self.digest,
             byte_count: self.canonical.len() as u64,
             item_count: 1,

@@ -1401,7 +1401,6 @@ mod tests {
                     source_object_id: None,
                     source_envelope_ids: sources,
                 },
-                digest_sha256: digest.to_string().repeat(64),
                 sensitivity: Sensitivity::Sensitive,
                 allowed_destinations: Vec::new(),
                 retention: RetentionBoundary {
@@ -1552,7 +1551,6 @@ mod tests {
                     source_object_id: Some("private-object".into()),
                     source_envelope_ids: Vec::new(),
                 },
-                digest_sha256: "a".repeat(64),
                 sensitivity: Sensitivity::Sensitive,
                 allowed_destinations: vec![DestinationIdentity::Model {
                     connection_id: "private-connection".into(),

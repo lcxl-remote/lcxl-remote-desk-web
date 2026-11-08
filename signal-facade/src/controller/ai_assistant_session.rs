@@ -1302,7 +1302,6 @@ pub struct EvidenceNodeDto {
     pub content_sha256: Option<String>,
     pub size_bytes: u64,
     pub media_type: Option<String>,
-    pub envelope_digest_sha256: String,
     pub sensitivity: String,
     pub source_provider_id: String,
     pub source_tool_name: String,
@@ -1366,6 +1365,16 @@ fn evidence_node(envelope: &DataEnvelope) -> EvidenceNodeDto {
             *size_bytes,
             Some(media_type.clone()),
         ),
+        ContentRef::Message {
+            size_bytes,
+            media_type,
+            ..
+        } => ("message", None, *size_bytes, Some(media_type.clone())),
+        ContentRef::Projection {
+            size_bytes,
+            media_type,
+            ..
+        } => ("projection", None, *size_bytes, Some(media_type.clone())),
         ContentRef::EphemeralObservation { size_bytes, .. } => {
             ("ephemeral_observation", None, *size_bytes, None)
         }
@@ -1376,7 +1385,6 @@ fn evidence_node(envelope: &DataEnvelope) -> EvidenceNodeDto {
         content_sha256,
         size_bytes,
         media_type,
-        envelope_digest_sha256: envelope.digest_sha256.clone(),
         sensitivity: enum_wire_name(&envelope.sensitivity),
         source_provider_id: envelope.provenance.source_provider_id.clone(),
         source_tool_name: envelope.provenance.source_tool_name.clone(),

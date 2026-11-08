@@ -73,7 +73,6 @@ pub fn derive_conservatively(
             source_object_id: derivation.source_object_id.map(str::to_string),
             source_envelope_ids: source_envelope_ids.clone(),
         },
-        digest_sha256: derivation.digest_sha256.to_string(),
         sensitivity,
         allowed_destinations: destinations.into_iter().collect(),
         retention,
@@ -126,7 +125,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: Vec::new(),
             },
-            digest_sha256: digest('a'),
             sensitivity,
             allowed_destinations: destinations,
             retention: RetentionBoundary {

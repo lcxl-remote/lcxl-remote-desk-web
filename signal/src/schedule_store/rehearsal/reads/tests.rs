@@ -169,7 +169,6 @@ async fn fixture_with_text(
         operation_scope: authority.operation_scope.to_vec(),
         export_destinations: authority.export_destinations.to_vec(),
         allowed_envelope_ids: vec![],
-        allowed_content_digests_sha256: vec![],
         use_policy: CapabilityGrantUsePolicy::OneShotExact,
         canonical_input_digest_sha256: Some(authority.canonical_input_digest_sha256.into()),
         issued_by: CapabilityGrantIssuer::PolicyAuto,

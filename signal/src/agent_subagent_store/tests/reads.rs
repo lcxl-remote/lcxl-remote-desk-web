@@ -22,7 +22,6 @@ async fn read_work(
     let authority = ObservedCapabilityAuthority {
         target_session_id: None,
         envelope_ids: vec![],
-        content_digests_sha256: vec![],
         provider_id: "system.info".into(),
         capability_id: "system.info.read".into(),
         tool_name: "read_system_info".into(),

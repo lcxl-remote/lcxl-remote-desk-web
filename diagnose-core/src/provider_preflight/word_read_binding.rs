@@ -139,11 +139,7 @@ pub fn resolve_word_read_on_device(
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != call.name
             || envelope.provenance.source_provider_id != windows_word::PROVIDER_ID
-            || envelope.digest_sha256
-                != format!(
-                    "{:x}",
-                    Sha256::digest(message.trusted_tool_result().text.as_bytes())
-                )
+            || envelope.content.size_bytes() != message.trusted_tool_result().text.len() as u64
         {
             continue;
         }

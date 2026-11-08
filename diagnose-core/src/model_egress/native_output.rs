@@ -84,7 +84,7 @@ impl NativeModelOutputEvidence {
             model_export_authorization_id: export.into(),
             destination: audit.destination.clone(),
             output_envelope_id: output.envelope_id.clone(),
-            output_digest_sha256: output.digest_sha256.clone(),
+            output_digest_sha256: output.content_sha256().unwrap_or_default().to_owned(),
             output_label_sha256: model_output_label_sha256(output)?,
             input_lineage_sha256: model_input_lineage_sha256(inputs)?,
             input_snapshot_sha256: snapshot.fingerprint()?,
@@ -132,7 +132,7 @@ impl NativeModelOutputEvidence {
     ) -> Result<(), &'static str> {
         self.validate()?;
         if self.output_envelope_id != output.envelope_id
-            || self.output_digest_sha256 != output.digest_sha256
+            || output.content_sha256() != Some(self.output_digest_sha256.as_str())
             || !output.allowed_destinations.contains(&self.destination)
             || self.output_label_sha256 != model_output_label_sha256(output)?
             || self.input_lineage_sha256 != model_input_lineage_sha256(inputs)?
@@ -254,7 +254,7 @@ mod tests {
         let inputs = project_model_input_lineage(&audit, &[input]).unwrap();
         let hash = format!("{:x}", Sha256::digest(b"done"));
         let output = DataEnvelope {
-            schema_version: 1,
+            schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: "accepted-output".into(),
             content: ContentRef::ImmutableBlob {
                 blob_id: "output-body".into(),
@@ -268,7 +268,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: audit.envelope_ids.clone(),
             },
-            digest_sha256: hash,
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![destination],
             retention: RetentionBoundary {
@@ -311,7 +310,7 @@ mod tests {
                 _ => changed.provenance.source_object_id = Some("different-object".into()),
             }
             assert_eq!(changed.envelope_id, output.envelope_id);
-            assert_eq!(changed.digest_sha256, output.digest_sha256);
+            assert_eq!(changed.content, output.content);
             assert!(evidence.validate_sources(&inputs, &changed).is_err());
         }
         let mut changed_inputs = inputs.clone();

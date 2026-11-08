@@ -210,7 +210,9 @@ pub(crate) async fn find_reusing_on<C: ConnectionTrait>(
     let rows = archived::Entity::find()
         .filter(archived::Column::ConversationId.eq(conversation))
         .filter(archived::Column::OutputEnvelopeId.eq(&output.envelope_id))
-        .filter(archived::Column::OutputDigestSha256.eq(&output.digest_sha256))
+        .filter(
+            archived::Column::OutputDigestSha256.eq(output.content_sha256().unwrap_or_default()),
+        )
         .limit(2)
         .all(db)
         .await?;

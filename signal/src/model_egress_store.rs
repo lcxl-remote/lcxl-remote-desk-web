@@ -44,7 +44,10 @@ impl SignalModelEgressStore {
                 model_egress_receipt::Column::ContextConversationId.eq(&session.conversation_id),
             )
             .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
-            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .filter(
+                model_egress_receipt::Column::ModelOutputDigestSha256
+                    .eq(output.content_sha256().unwrap_or_default()),
+            )
             .limit(2)
             .all(db)
             .await?;
@@ -336,7 +339,7 @@ impl SignalModelEgressStore {
             // it neither reopens current sources nor republishes an archive.
             if row.completed_at.is_none_or(|at| at < row.authorized_at)
                 || row.model_output_envelope_id.as_deref() != Some(output.envelope_id.as_str())
-                || row.model_output_digest_sha256.as_deref() != Some(output.digest_sha256.as_str())
+                || row.model_output_digest_sha256.as_deref() != output.content_sha256()
                 || row.model_output_label_sha256.as_deref() != Some(output_label_sha256.as_str())
             {
                 return Err(ModelAdmissionError::AssistantDataChanged);
@@ -411,7 +414,7 @@ impl SignalModelEgressStore {
             )
             .col_expr(
                 model_egress_receipt::Column::ModelOutputDigestSha256,
-                Expr::value(Some(output.digest_sha256.clone())),
+                Expr::value(output.content_sha256().map(str::to_owned)),
             )
             .col_expr(
                 model_egress_receipt::Column::ModelOutputLabelSha256,
@@ -512,7 +515,10 @@ impl SignalModelEgressStore {
         let rows = model_egress_receipt::Entity::find()
             .filter(model_egress_receipt::Column::ContextConversationId.eq(conversation))
             .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
-            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .filter(
+                model_egress_receipt::Column::ModelOutputDigestSha256
+                    .eq(output.content_sha256().unwrap_or_default()),
+            )
             .limit(2)
             .all(db)
             .await?;
@@ -691,7 +697,10 @@ impl SignalModelEgressStore {
         let rows = model_egress_receipt::Entity::find()
             .filter(model_egress_receipt::Column::ExportAuthorizationId.eq(export_authorization_id))
             .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
-            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .filter(
+                model_egress_receipt::Column::ModelOutputDigestSha256
+                    .eq(output.content_sha256().unwrap_or_default()),
+            )
             .limit(2)
             .all(db)
             .await?;
@@ -758,7 +767,10 @@ impl SignalModelEgressStore {
         let rows = model_egress_receipt::Entity::find()
             .filter(model_egress_receipt::Column::ExportAuthorizationId.eq(export_authorization_id))
             .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
-            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .filter(
+                model_egress_receipt::Column::ModelOutputDigestSha256
+                    .eq(output.content_sha256().unwrap_or_default()),
+            )
             .limit(2)
             .all(db)
             .await?;
@@ -815,7 +827,7 @@ fn context_sources_from_row(
             && evidence.model_export_authorization_id == row.export_authorization_id
             && evidence.destination == audit.destination
             && evidence.output_envelope_id == output.envelope_id
-            && evidence.output_digest_sha256 == output.digest_sha256
+            && output.content_sha256() == Some(evidence.output_digest_sha256.as_str())
             && row.model_output_label_sha256.as_deref()
                 == Some(evidence.output_label_sha256.as_str())
             && evidence.provider_started_at_unix_ms == started
@@ -880,7 +892,7 @@ fn completed_output_parts(
         return Err(invalid());
     }
     if row.model_output_envelope_id.as_deref() != Some(output.envelope_id.as_str())
-        || row.model_output_digest_sha256.as_deref() != Some(output.digest_sha256.as_str())
+        || row.model_output_digest_sha256.as_deref() != output.content_sha256()
         || row.model_output_label_sha256.as_deref()
             != Some(
                 desk_diagnose_core::model_egress::model_output_label_sha256(output)
@@ -1029,7 +1041,7 @@ pub(crate) fn test_inputs(
         .envelope_ids
         .iter()
         .map(|id| DataEnvelope {
-            schema_version: 1,
+            schema_version: desk_agent_protocol::data_lineage::DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: id.clone(),
             content: ContentRef::ImmutableBlob {
                 blob_id: "test-input".into(),
@@ -1043,7 +1055,6 @@ pub(crate) fn test_inputs(
                 source_object_id: None,
                 source_envelope_ids: vec![],
             },
-            digest_sha256: "0".repeat(64),
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![audit.destination.clone()],
             retention: RetentionBoundary {
@@ -1132,7 +1143,6 @@ mod tests {
         let mut valid = output("output");
         let text = "actual model answer";
         let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
-        valid.digest_sha256 = hash.clone();
         valid.content = desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob {
             blob_id: "result".into(),
             sha256: hash,
@@ -1160,7 +1170,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             finished.model_output_digest_sha256.as_deref(),
-            Some(valid.digest_sha256.as_str())
+            valid.content_sha256()
         );
         assert_eq!(finished.state, STATE_SUCCEEDED);
         assert_eq!(
@@ -1195,7 +1205,7 @@ mod tests {
                         profile_revision: 1,
                     }),
             }
-            assert_eq!(changed.digest_sha256, valid.digest_sha256);
+            assert_eq!(changed.content, valid.content);
             assert!(
                 SignalModelEgressStore::read_context_output_on(&db, "conversation", &changed)
                     .await

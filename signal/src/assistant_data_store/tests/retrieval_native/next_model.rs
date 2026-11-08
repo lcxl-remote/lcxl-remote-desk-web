@@ -1,5 +1,4 @@
 use super::*;
-use desk_agent_protocol::data_lineage::ContentRef;
 use desk_diagnose_core::{
     ai_assistant::{
         history::serialized_tool_response_bytes,
@@ -136,10 +135,7 @@ impl Frame {
                 .collect(),
             total_bytes: selected
                 .iter()
-                .map(|envelope| match &envelope.content {
-                    ContentRef::ImmutableBlob { size_bytes, .. } => *size_bytes as usize,
-                    _ => panic!("expected immutable selected content"),
-                })
+                .map(|envelope| envelope.content.size_bytes() as usize)
                 .sum(),
         };
         use crate::model_egress_store::SignalModelEgressStore;

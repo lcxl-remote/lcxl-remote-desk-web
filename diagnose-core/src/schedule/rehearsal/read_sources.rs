@@ -140,7 +140,7 @@ pub fn verified_action_source(
         authority,
         &origin.tool_call_id,
         result,
-        &receipt.envelope.digest_sha256,
+        &receipt.result_sha256,
         ReadSourceDigest::ModelPayload,
     )
 }
@@ -240,7 +240,6 @@ fn project_tool_result_source(
         || envelope.provenance.source_tool_name != call.name
         || envelope.provenance.source_provider_id != authority.provider_id
         || receipt_digest != output_sha256
-        || payload_digest != envelope.digest_sha256
     {
         return Err(InvalidReadSource::Conflict);
     }
@@ -444,7 +443,6 @@ mod tests {
             authority: ObservedCapabilityAuthority {
                 target_session_id: None,
                 envelope_ids: vec![],
-                content_digests_sha256: vec![],
                 provider_id: envelope.provenance.source_provider_id.clone(),
                 capability_id: registry
                     .capability_for_tool(&call.name)
@@ -484,7 +482,7 @@ mod tests {
             .is_err()
         );
         assert!(verified_read_source(&messages, &read, ReadSourceDigest::ModelPayload).is_err());
-        read.output_sha256 = envelope.digest_sha256.clone();
+        read.output_sha256 = envelope.content_sha256().unwrap().to_owned();
         assert!(verified_read_source(&messages, &read, ReadSourceDigest::ModelPayload).is_ok());
         assert!(
             verified_read_source(

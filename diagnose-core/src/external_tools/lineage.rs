@@ -130,7 +130,6 @@ fn label_bound_issue_read(
             source_object_id: Some(id),
             source_envelope_ids: Vec::new(),
         },
-        digest_sha256: digest,
         sensitivity: if access.target.private || access.target.internal {
             Sensitivity::UserContent
         } else {
@@ -182,8 +181,8 @@ pub fn is_issue_read_label(label: &DataEnvelope) -> bool {
     label.sensitivity == sensitivity
         && matches!(&label.content,
         ContentRef::ImmutableBlob { blob_id,sha256,size_bytes,media_type }
-        if blob_id == &format!("{CONTENT_PREFIX}{}", &label.digest_sha256[..32])
-            && sha256 == &label.digest_sha256 && *size_bytes > 0 && *size_bytes <= MAX_READ_RESULT_BYTES as u64
+        if sha256.len() == 64 && blob_id == &format!("{CONTENT_PREFIX}{}", &sha256[..32])
+            && *size_bytes > 0 && *size_bytes <= MAX_READ_RESULT_BYTES as u64
             && media_type == MEDIA_TYPE)
 }
 

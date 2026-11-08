@@ -66,8 +66,7 @@ async fn observed_scope_stays_exact_through_prepare_intent_completion_and_reopen
     let changed_resources = vec!["root:unused".into()];
     let changed_operations = vec!["read".into()];
     let changed_envelopes = vec!["unexpected-envelope".into()];
-    let changed_digests = vec!["a".repeat(64)];
-    for case in 0..8 {
+    for case in 0..7 {
         let changed = || {
             let mut next = original();
             match case {
@@ -77,8 +76,7 @@ async fn observed_scope_stays_exact_through_prepare_intent_completion_and_reopen
                 3 => next.call.tool_schema_version = 2,
                 4 => next.call.effect = CapabilityEffect::ReadFile,
                 5 => next.call.risk_tier = CapabilityRiskTier::R3,
-                6 => next.call.envelope_ids = &changed_envelopes,
-                _ => next.call.content_digests_sha256 = &changed_digests,
+                _ => next.call.envelope_ids = &changed_envelopes,
             }
             next
         };

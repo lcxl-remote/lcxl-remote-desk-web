@@ -80,18 +80,21 @@ fn constraints_missing_from_thin_lineage_change_the_original_snapshot_fingerprin
                     profile_revision: 1,
                 }),
             4 => changed[0].provenance.source_object_id = Some("other-source-object".into()),
-            5 => {
-                let ContentRef::ImmutableBlob { blob_id, .. } = &mut changed[0].content else {
-                    panic!("fixture blob")
-                };
-                *blob_id = "other-immutable-reference".into();
-            }
-            _ => {
-                let ContentRef::ImmutableBlob { media_type, .. } = &mut changed[0].content else {
-                    panic!("fixture blob")
-                };
-                *media_type = "application/json".into();
-            }
+            5 => match &mut changed[0].content {
+                ContentRef::Message { message_id, .. } => *message_id = "other-message".into(),
+                ContentRef::ImmutableBlob { blob_id, .. } => {
+                    *blob_id = "other-immutable-reference".into()
+                }
+                _ => panic!("fixture content"),
+            },
+            _ => match &mut changed[0].content {
+                ContentRef::Message { media_type, .. }
+                | ContentRef::Projection { media_type, .. }
+                | ContentRef::ImmutableBlob { media_type, .. } => {
+                    *media_type = "application/json".into()
+                }
+                _ => panic!("fixture content"),
+            },
         }
         assert_eq!(
             project_model_input_lineage(&audit, &changed).unwrap(),
@@ -142,7 +145,7 @@ fn bounded_long_history_keeps_all_entries_and_checks_the_last_label() {
     audit.total_bytes = 11_100;
     let snapshot = NativeModelInputSnapshot::capture(&audit, &long).unwrap();
     assert_eq!(snapshot.envelopes.len(), 300);
-    long[299].digest_sha256 = "a".repeat(64);
+    long[299].envelope_id = "other-envelope".into();
     assert!(NativeModelInputSnapshot::capture(&audit, &long).is_err());
     // The limit applies to encoded metadata, not only each individual label.
     let oversized = vec![inputs[0].clone(); MAX_SOURCE_LINEAGE_BYTES / 128];

@@ -172,11 +172,7 @@ impl ImageAttachment {
         envelope
             .validate()
             .map_err(|_| error("Screenshot authorization is invalid"))?;
-        let declared_size = match &envelope.content {
-            ContentRef::ImmutableBlob { size_bytes, .. }
-            | ContentRef::Artifact { size_bytes, .. }
-            | ContentRef::EphemeralObservation { size_bytes, .. } => *size_bytes,
-        };
+        let declared_size = envelope.content.size_bytes();
         if declared_size != bytes.len() as u64 {
             return Err(error("Screenshot authorization does not match its content"));
         }
@@ -229,7 +225,6 @@ mod tests {
             chat::ChatMessage, image_input::validate_image_data_url, session::AgentSessionSurface,
         };
         use desk_agent_protocol::{AgentScope, ExecutionMode, data_lineage::*};
-        use sha2::{Digest, Sha256};
         let scope = AgentScope {
             granted: vec![],
             mode: ExecutionMode::SuggestOnly,
@@ -263,7 +258,6 @@ mod tests {
                 source_object_id: None,
                 source_envelope_ids: vec![],
             },
-            digest_sha256: format!("{:x}", Sha256::digest(&payload)),
             sensitivity: Sensitivity::Sensitive,
             allowed_destinations: vec![DestinationIdentity::Model {
                 connection_id: "model".into(),
