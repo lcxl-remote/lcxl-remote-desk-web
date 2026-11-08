@@ -15,8 +15,8 @@ use crate::entity::{
     agent_action_item, agent_approval_delegation, agent_approval_review, agent_approval_trace,
     agent_approval_trace_part, agent_capability_dispatch_outbox, agent_capability_grant,
     agent_exec_task, agent_goal_open_request, agent_goal_run, agent_grant_reservation,
-    agent_run_event, agent_session, approval_review_secret, device_code, host_remote_access_state,
-    model_egress_receipt, turn_usage,
+    agent_run_event, agent_session, device_code, host_remote_access_state, model_egress_receipt,
+    turn_usage,
 };
 use crate::error::DeskSignalError;
 use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
@@ -294,7 +294,6 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, turn_usage::Entity).await?;
     create_latest_probe_observation(db).await?;
     create_latest_approval_model_probe_observation(db).await?;
-    create_entity(db, &schema, approval_review_secret::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_assistant_origin::Entity).await?;
@@ -731,7 +730,6 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(turn_usage);
     check_entity!(model_probe_observation);
     check_entity!(approval_model_probe_observation);
-    check_entity!(approval_review_secret);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
     check_entity!(agent_assistant_origin);
@@ -979,7 +977,6 @@ mod tests {
             "turn_usage_hourly",
             "model_probe_observation",
             "approval_model_probe_observation",
-            "approval_review_secret",
             SCHEMA_LOCK_TABLE,
             "host_remote_access_state",
             "agent_session",

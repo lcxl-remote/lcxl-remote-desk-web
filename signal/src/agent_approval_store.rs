@@ -420,9 +420,7 @@ pub async fn claim_permission_review(
     now_unix_ms: u64,
 ) -> Result<Option<ClaimedPermissionReview>, ReviewStartError> {
     use desk_diagnose_core::approval_egress::authorize_permission_review_egress;
-    use desk_diagnose_core::approval_review::{
-        APPROVAL_REVIEW_STATUS_REVIEWING, candidate_context_hmac_sha256,
-    };
+    use desk_diagnose_core::approval_review::{APPROVAL_REVIEW_STATUS_REVIEWING, candidate_sha256};
     candidate.validate().map_err(|_| invalid())?;
     if lease_owner.trim().is_empty()
         || lease_owner.len() > 256
@@ -436,8 +434,7 @@ pub async fn claim_permission_review(
     {
         return Err(invalid().into());
     }
-    let key = crate::approval_review_secret::load_or_create(db).await?;
-    let context_hmac = candidate_context_hmac_sha256(&key, candidate).map_err(|_| invalid())?;
+    let candidate_digest = candidate_sha256(candidate).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, delegation_row::Entity).await?;
     let (_, session) = session_on(
         &txn,
@@ -470,7 +467,7 @@ pub async fn claim_permission_review(
             || existing.device_id != candidate.device_id
             || existing.delegation_id != candidate.delegation_id
             || existing.action_sha256 != candidate.action_sha256
-            || existing.context_hmac_sha256 != context_hmac
+            || existing.candidate_sha256 != candidate_digest
         {
             return Err(invalid().into());
         }
@@ -687,7 +684,7 @@ pub async fn claim_permission_review(
         source_kind: Set(source_kind.into()),
         source_id: Set(source_id),
         action_sha256: Set(candidate.action_sha256.clone()),
-        context_hmac_sha256: Set(context_hmac),
+        candidate_sha256: Set(candidate_digest),
         decision_json: Set(None),
         status: Set(APPROVAL_REVIEW_STATUS_REVIEWING.into()),
         lease_epoch: Set(1),
@@ -751,11 +748,10 @@ pub async fn settle_permission_review(
     use desk_diagnose_core::approval_review::{
         APPROVAL_REVIEW_STATUS_DENIED, APPROVAL_REVIEW_STATUS_EXPIRED,
         APPROVAL_REVIEW_STATUS_REVIEWING, APPROVAL_REVIEW_STATUS_UNAVAILABLE, ApprovalSource,
-        ApprovalVerdict, candidate_context_hmac_sha256,
+        ApprovalVerdict, candidate_sha256,
     };
     candidate.validate().map_err(|_| invalid())?;
-    let key = crate::approval_review_secret::load_or_create(db).await?;
-    let context_hmac = candidate_context_hmac_sha256(&key, candidate).map_err(|_| invalid())?;
+    let candidate_digest = candidate_sha256(candidate).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, review_row::Entity).await?;
     let row = review_row::Entity::find()
         .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
@@ -765,7 +761,7 @@ pub async fn settle_permission_review(
     if row.status != APPROVAL_REVIEW_STATUS_REVIEWING
         || row.lease_owner.as_deref() != Some(lease_owner)
         || row.lease_epoch != as_i64(lease_epoch)?
-        || row.context_hmac_sha256 != context_hmac
+        || row.candidate_sha256 != candidate_digest
         || row.action_sha256 != candidate.action_sha256
         || row.expires_at != as_i64(candidate.expires_at_unix_ms)?
         || row.reserved_tokens <= 0
@@ -1218,14 +1214,12 @@ pub(crate) async fn reviewed_permission_batch_on(
     unstarted_failures: &[desk_diagnose_core::dynamic_run::SystemPermissionDecisionEvidence],
     registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     surface: desk_agent_protocol::capability_provider::ProductSurface,
-    hmac_key: &[u8; 32],
     readiness_revision: u64,
     now_unix_ms: u64,
 ) -> Result<ReviewedPermissionBatch, DbErr> {
     use desk_diagnose_core::approval_egress::validate_permission_review_current;
     use desk_diagnose_core::approval_review::{
-        ApprovalReviewDecision, ApprovalVerdict, candidate_context_hmac_sha256,
-        permission_decision_from_reviews,
+        ApprovalReviewDecision, ApprovalVerdict, candidate_sha256, permission_decision_from_reviews,
     };
     if candidates.len() != request.items.len() || candidates.is_empty() {
         return Err(invalid());
@@ -1335,15 +1329,14 @@ pub(crate) async fn reviewed_permission_batch_on(
             failures.push(failure.clone());
             continue;
         };
-        let expected_hmac =
-            candidate_context_hmac_sha256(hmac_key, candidate).map_err(|_| invalid())?;
+        let expected_digest = candidate_sha256(candidate).map_err(|_| invalid())?;
         if row.delegation_id != delegation.delegation_id
             || row.model_config_revision <= 0
             || row.source_kind != APPROVAL_REVIEW_SOURCE_PERMISSION_ITEM
             || row.source_id
                 != permission_review_source_id(request_id, item_id).map_err(|_| invalid())?
             || row.action_sha256 != candidate.action_sha256
-            || row.context_hmac_sha256 != expected_hmac
+            || row.candidate_sha256 != expected_digest
             || row.lease_owner.is_some()
             || row.lease_deadline.is_some()
             || row.expires_at != as_i64(candidate.expires_at_unix_ms)?
@@ -1724,13 +1717,10 @@ async fn restore_review_context_on(
         .context_binding
         .restore(candidate, session)
         .map_err(|_| invalid())?;
-    let key = crate::approval_review_secret::load(txn)
-        .await?
-        .ok_or_else(|| invalid())?;
     if authority.candidate_id != candidate.candidate_id
-        || desk_diagnose_core::approval_review::candidate_context_hmac_sha256(&key, candidate)
+        || desk_diagnose_core::approval_review::candidate_sha256(candidate)
             .map_err(|_| invalid())?
-            != row.context_hmac_sha256
+            != row.candidate_sha256
     {
         return Err(invalid());
     }

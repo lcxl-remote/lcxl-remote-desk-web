@@ -666,7 +666,7 @@ async fn review_without_planner(
         },
         source_record_id: "original-request:item".into(),
         source_planning_lease_token: None,
-        context_hmac_sha256: "a".repeat(64),
+        candidate_sha256: "a".repeat(64),
         context_binding: desk_diagnose_core::approval_review::ReviewContextBinding {
             evidence_ids: vec![],
             current_authority: vec![],
@@ -697,7 +697,7 @@ async fn review_without_planner(
         source_kind: Set("permission_item".into()),
         source_id: Set("original-request:item".into()),
         action_sha256: Set("c".repeat(64)),
-        context_hmac_sha256: Set(authority.context_hmac_sha256.clone()),
+        candidate_sha256: Set(authority.candidate_sha256.clone()),
         call_authority_json: Set(Some(serde_json::to_string(&authority).unwrap())),
         status: Set("reviewing".into()),
         lease_epoch: Set(1),

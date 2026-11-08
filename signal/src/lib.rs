@@ -18,7 +18,6 @@ pub mod ai_assistant_gate;
 pub mod ai_assistant_orchestrator;
 pub mod approval_dispatch;
 pub mod approval_model_provider;
-pub mod approval_review_secret;
 pub mod approval_reviewer;
 pub mod assistant_data_config;
 pub mod assistant_data_store;

@@ -20,7 +20,7 @@ use desk_diagnose_core::approval_review::{
     APPROVAL_REVIEW_STATUS_APPROVED, APPROVAL_REVIEW_STATUS_DENIED, APPROVAL_REVIEW_STATUS_EXPIRED,
     APPROVAL_REVIEW_STATUS_REVIEWING, APPROVAL_REVIEW_STATUS_UNAVAILABLE, ApprovalAuthorityFact,
     ApprovalAuthorityStatus, ApprovalInputKind, ApprovalReviewCandidate, ApprovalReviewDecision,
-    ApprovalSource, ApprovalVerdict, SourceReviewInput, candidate_context_hmac_sha256,
+    ApprovalSource, ApprovalVerdict, SourceReviewInput, candidate_sha256,
     concrete_call_review_identity, source_review_candidate_for_device,
 };
 use desk_diagnose_core::chat::ToolCall;
@@ -397,10 +397,6 @@ async fn claim_inner(
     registry: &ProviderRegistry,
     now_unix_ms: u64,
 ) -> Result<ClaimState, DbErr> {
-    let key = desk_diagnose_core::future::boxed(|| async {
-        crate::approval_review_secret::load_or_create(db).await
-    })
-    .await?;
     let txn = desk_diagnose_core::future::boxed(|| async {
         crate::db::begin_write(db, delegation_row::Entity).await
     })
@@ -434,7 +430,7 @@ async fn claim_inner(
         initial
     };
     let candidate = &prepared.candidate;
-    let context_hmac = candidate_context_hmac_sha256(&key, candidate).map_err(|_| invalid())?;
+    let candidate_digest = candidate_sha256(candidate).map_err(|_| invalid())?;
     if let Some(row) = existing {
         if row.conversation_id != candidate.conversation_id
             || row.actor_id != candidate.owner_id
@@ -443,7 +439,7 @@ async fn claim_inner(
             || row.source_kind != APPROVAL_REVIEW_SOURCE_CONCRETE_CALL
             || row.source_id != subject.server_call_id
             || row.action_sha256 != candidate.action_sha256
-            || row.context_hmac_sha256 != context_hmac
+            || row.candidate_sha256 != candidate_digest
             || row.expires_at != as_i64(candidate.expires_at_unix_ms)?
         {
             return Err(invalid());
@@ -530,7 +526,7 @@ async fn claim_inner(
         source_kind: Set(APPROVAL_REVIEW_SOURCE_CONCRETE_CALL.into()),
         source_id: Set(subject.server_call_id.to_owned()),
         action_sha256: Set(candidate.action_sha256.clone()),
-        context_hmac_sha256: Set(context_hmac),
+        candidate_sha256: Set(candidate_digest),
         decision_json: Set(None),
         status: Set(APPROVAL_REVIEW_STATUS_REVIEWING.into()),
         lease_epoch: Set(1),
@@ -612,11 +608,7 @@ async fn settle_inner(
     actual_tokens: Option<u64>,
     now_unix_ms: u64,
 ) -> Result<ConcreteReviewResult, DbErr> {
-    let key = desk_diagnose_core::future::boxed(|| async {
-        crate::approval_review_secret::load_or_create(db).await
-    })
-    .await?;
-    let context_hmac = candidate_context_hmac_sha256(&key, candidate).map_err(|_| invalid())?;
+    let candidate_digest = candidate_sha256(candidate).map_err(|_| invalid())?;
     let txn = desk_diagnose_core::future::boxed(|| async {
         crate::db::begin_write(db, delegation_row::Entity).await
     })
@@ -637,7 +629,7 @@ async fn settle_inner(
         || row.device_id != subject.device_id
         || row.delegation_id != candidate.delegation_id
         || row.action_sha256 != candidate.action_sha256
-        || row.context_hmac_sha256 != context_hmac
+        || row.candidate_sha256 != candidate_digest
         || row.lease_owner.as_deref() != Some(claim.lease_owner.as_str())
         || row.lease_epoch != as_i64(claim.lease_epoch)?
         || row.reserved_tokens <= 0

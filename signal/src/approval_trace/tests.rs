@@ -75,7 +75,7 @@ async fn candidate(db: &DatabaseConnection, id: &str, conversation: &str, owner:
         source_kind: Set("permission_item".into()),
         source_id: Set(id.into()),
         action_sha256: Set("a".repeat(64)),
-        context_hmac_sha256: Set("b".repeat(64)),
+        candidate_sha256: Set("b".repeat(64)),
         status: Set("denied".into()),
         lease_epoch: Set(1),
         reserved_tokens: Set(0),

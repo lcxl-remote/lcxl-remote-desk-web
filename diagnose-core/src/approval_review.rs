@@ -19,7 +19,6 @@ use crate::session::{AgentSessionSurface, PersistedAgentSession};
 use desk_agent_protocol::capability_grant::CapabilityRiskTier;
 use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantIssuer};
 use desk_agent_protocol::capability_provider::{CapabilityDataCategory, ProductSurface};
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -911,7 +910,6 @@ impl ApprovalReviewCandidate {
             || self.descriptor_json.is_empty()
             || self.descriptor_json.len() > 32 * 1_024
             || !valid_digest(&self.action_sha256)
-            || format!("{:x}", Sha256::digest(self.action_json.as_bytes())) != self.action_sha256
         {
             return Err(ApprovalReviewError::InvalidCandidate);
         }
@@ -2099,20 +2097,18 @@ pub fn ai_review_denial_notice(
     }))
 }
 
-pub fn candidate_context_hmac_sha256(
-    key: &[u8],
+/// Digest of the complete reviewed candidate, including restored evidence and
+/// revisions not covered by `candidate_id`. A stored review applies only to a
+/// candidate with the same digest.
+pub fn candidate_sha256(
     candidate: &ApprovalReviewCandidate,
 ) -> Result<String, ApprovalReviewError> {
     candidate.validate()?;
-    if key.len() < 32 {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
     let bytes = serde_json::to_vec(candidate).map_err(|_| ApprovalReviewError::InvalidCandidate)?;
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(key).map_err(|_| ApprovalReviewError::InvalidContext)?;
-    mac.update(b"lcxl-ai-approval-review-v1\0");
-    mac.update(&bytes);
-    Ok(format!("{:x}", mac.finalize().into_bytes()))
+    let mut digest = Sha256::new();
+    digest.update(b"lcxl-ai-approval-review-v1\0");
+    digest.update(&bytes);
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 /// Three semantic cases exercise approval behavior for diagnostics. Probe
@@ -2700,26 +2696,25 @@ mod tests {
     }
 
     #[test]
-    fn audit_digest_binds_the_exact_context_and_a_private_key() {
+    fn candidate_digest_binds_fields_outside_the_candidate_id() {
         let candidate = candidate();
-        let first = candidate_context_hmac_sha256(&[1; 32], &candidate).unwrap();
-        assert_ne!(
-            first,
-            candidate_context_hmac_sha256(&[2; 32], &candidate).unwrap()
-        );
-        let mut changed = candidate;
+        let first = candidate_sha256(&candidate).unwrap();
+        assert_eq!(first, candidate_sha256(&candidate).unwrap());
+        let mut changed = candidate.clone();
         changed
             .context
             .current_user_requirement
             .push_str(" after review");
-        assert_ne!(
-            first,
-            candidate_context_hmac_sha256(&[1; 32], &changed).unwrap()
-        );
-        assert_eq!(
-            candidate_context_hmac_sha256(&[1; 8], &changed),
-            Err(ApprovalReviewError::InvalidContext)
-        );
+        assert_eq!(changed.candidate_id, candidate.candidate_id);
+        assert_ne!(first, candidate_sha256(&changed).unwrap());
+        let mut changed = candidate.clone();
+        changed.policy_revision += 1;
+        assert_eq!(changed.candidate_id, candidate.candidate_id);
+        assert_ne!(first, candidate_sha256(&changed).unwrap());
+        let mut changed = candidate.clone();
+        changed.input_revision += 1;
+        assert_eq!(changed.candidate_id, candidate.candidate_id);
+        assert_ne!(first, candidate_sha256(&changed).unwrap());
     }
 
     #[test]
@@ -3700,14 +3695,14 @@ mod tests {
         restored.context.omitted_evidence_count = 8;
         binding.restore(&mut restored, &session).unwrap();
         assert_eq!(
-            candidate_context_hmac_sha256(&[7; 32], &original).unwrap(),
-            candidate_context_hmac_sha256(&[7; 32], &restored).unwrap()
+            candidate_sha256(&original).unwrap(),
+            candidate_sha256(&restored).unwrap()
         );
         session.conversation[0].text.push_str("changed");
         binding.restore(&mut restored, &session).unwrap();
         assert_ne!(
-            candidate_context_hmac_sha256(&[7; 32], &original).unwrap(),
-            candidate_context_hmac_sha256(&[7; 32], &restored).unwrap()
+            candidate_sha256(&original).unwrap(),
+            candidate_sha256(&restored).unwrap()
         );
     }
 

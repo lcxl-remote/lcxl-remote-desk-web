@@ -13,7 +13,6 @@ pub mod agent_schedule;
 pub mod agent_schedule_run;
 pub mod agent_session;
 pub mod approval_model_probe_observation;
-pub mod approval_review_secret;
 pub mod device_code;
 pub mod host_remote_access_state;
 pub mod model_egress_receipt;

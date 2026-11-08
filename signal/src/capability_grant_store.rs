@@ -2257,7 +2257,7 @@ mod tests {
             source_kind: Set("concrete_call".into()),
             source_id: Set("call-1".into()),
             action_sha256: Set(identity.action_sha256.clone()),
-            context_hmac_sha256: Set("binding".into()),
+            candidate_sha256: Set("binding".into()),
             decision_json: Set(Some(serde_json::to_string(&decision).unwrap())),
             status: Set("approved".into()),
             lease_epoch: Set(1),

@@ -20,7 +20,7 @@ pub struct Model {
     pub action_sha256: String,
     /// Keyed digest of the transient approval context; never store a second
     /// copy of the user's messages, exact inputs or attachment contents.
-    pub context_hmac_sha256: String,
+    pub candidate_sha256: String,
     /// Frozen review lease and original task source; contains no prompt body.
     pub call_authority_json: Option<String>,
     pub delegation_reservation_id: Option<String>,

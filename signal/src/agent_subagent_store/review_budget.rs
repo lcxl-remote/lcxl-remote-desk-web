@@ -38,7 +38,7 @@ pub(crate) async fn validate_review_lease_on(
         || row.lease_owner.as_deref() != Some(authority.lease_owner.as_str())
         || row.lease_deadline != Some(authority.lease_deadline_ms as i64)
         || row.model_config_revision != authority.model_config_revision as i64
-        || row.context_hmac_sha256 != authority.context_hmac_sha256
+        || row.candidate_sha256 != authority.candidate_sha256
         || row.delegation_id != authority.delegation_id
         || row.source_id != authority.source_record_id
         || now_ms < 0
@@ -401,7 +401,7 @@ pub(crate) async fn reserve_review_attempt_on(
                 | desk_diagnose_core::approval_review::ApprovalSource::DirectoryProposal { .. }
         )
         .then_some(session.lease_token),
-        context_hmac_sha256: review.context_hmac_sha256.clone(),
+        candidate_sha256: review.candidate_sha256.clone(),
         context_binding: desk_diagnose_core::approval_review::ReviewContextBinding::from_candidate(
             candidate,
         ),

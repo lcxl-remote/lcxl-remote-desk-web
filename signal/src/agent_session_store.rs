@@ -61,7 +61,6 @@ enum PermissionDecisionAuthority<'a> {
     },
     Ai {
         candidates: &'a [desk_diagnose_core::approval_review::ApprovalReviewCandidate],
-        hmac_key: [u8; 32],
         unstarted_failures:
             &'a [desk_diagnose_core::dynamic_run::SystemPermissionDecisionEvidence],
     },
@@ -326,9 +325,6 @@ impl SignalAgentSessionStore {
         grant_context: PermissionGrantIssuanceContext<'_>,
         now: &str,
     ) -> Result<PermissionDecisionOutcome, AgentError> {
-        let hmac_key = crate::approval_review_secret::load_or_create(&self.db)
-            .await
-            .map_err(|_| internal("load approval review audit key failed"))?;
         self.decide_permission_request_with_authority(
             subject,
             request_id,
@@ -338,7 +334,6 @@ impl SignalAgentSessionStore {
             None,
             PermissionDecisionAuthority::Ai {
                 candidates,
-                hmac_key,
                 unstarted_failures,
             },
         )
@@ -482,7 +477,6 @@ impl SignalAgentSessionStore {
                 | PermissionDecisionAuthority::NoReview { .. } => None,
                 PermissionDecisionAuthority::Ai {
                     candidates,
-                    hmac_key,
                     unstarted_failures,
                 } => Some(
                     desk_diagnose_core::future::boxed(|| {
@@ -494,7 +488,6 @@ impl SignalAgentSessionStore {
                             unstarted_failures,
                             grant_context.registry,
                             grant_context.surface,
-                            hmac_key,
                             grant_context.readiness_revision,
                             grant_context.now_unix_ms,
                         )

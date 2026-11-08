@@ -249,7 +249,7 @@ pub struct ReviewCallAuthority {
     pub source: crate::approval_review::ApprovalSource,
     pub source_record_id: String,
     pub source_planning_lease_token: Option<u64>,
-    pub context_hmac_sha256: String,
+    pub candidate_sha256: String,
     pub context_binding: crate::approval_review::ReviewContextBinding,
     pub request_sha256: String,
     pub model_destination: desk_agent_protocol::data_lineage::DestinationIdentity,
@@ -302,9 +302,9 @@ impl ReviewCallAuthority {
             ]
             .iter()
             .any(|value| *value == 0 || *value > i64::MAX as u64)
-            || self.context_hmac_sha256.len() != 64
+            || self.candidate_sha256.len() != 64
             || !self
-                .context_hmac_sha256
+                .candidate_sha256
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || self.source.validate().is_err()
@@ -360,7 +360,7 @@ mod tests {
             },
             source_record_id: "request:item".into(),
             source_planning_lease_token: None,
-            context_hmac_sha256: "a".repeat(64),
+            candidate_sha256: "a".repeat(64),
             context_binding: crate::approval_review::ReviewContextBinding {
                 evidence_ids: vec![],
                 current_authority: vec![],

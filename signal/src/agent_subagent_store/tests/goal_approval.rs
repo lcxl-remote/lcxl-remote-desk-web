@@ -22,7 +22,6 @@ async fn fixture() -> (
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
         schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
-        schema.create_table_from_entity(crate::entity::approval_review_secret::Entity),
         schema.create_table_from_entity(crate::entity::approval_model_probe_observation::Entity),
         schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
         schema.create_table_from_entity(crate::entity::agent_capability_grant::Entity),
