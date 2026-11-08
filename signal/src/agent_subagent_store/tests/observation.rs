@@ -169,7 +169,6 @@ pub(super) async fn record_accepted_provider(
     let audit = desk_diagnose_core::sink_authorizer::SinkProjectionAudit {
         destination: policy.destination.clone(),
         envelope_ids: vec![input.envelope_id.clone()],
-        digests_sha256: vec![input.digest_sha256.clone()],
         total_bytes: 1024,
     };
     let receipts = crate::model_egress_store::SignalModelEgressStore::new(db.clone());

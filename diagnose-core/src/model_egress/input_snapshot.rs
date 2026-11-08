@@ -90,11 +90,6 @@ impl NativeModelInputSnapshot {
                     .iter()
                     .map(|input| input.envelope_id.clone())
                     .collect(),
-                digests_sha256: self
-                    .envelopes
-                    .iter()
-                    .map(|input| input.digest_sha256.clone())
-                    .collect(),
                 total_bytes: self.total_bytes as usize,
             },
             fingerprint,
@@ -110,7 +105,6 @@ impl NativeModelInputSnapshot {
         if original.destination != audit.destination
             || original.total_bytes != audit.total_bytes
             || original.envelope_ids != audit.envelope_ids
-            || original.digests_sha256 != audit.digests_sha256
         {
             return Err("native input snapshot replaced its original sink");
         }

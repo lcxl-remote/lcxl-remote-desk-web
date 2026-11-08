@@ -284,7 +284,6 @@ async fn prepare_call_set_on<C: ConnectionTrait>(
         )
         .filter(native::Column::DestinationJson.eq(row.destination_json))
         .filter(native::Column::EnvelopeIdsJson.eq(row.envelope_ids_json))
-        .filter(native::Column::DigestsSha256Json.eq(row.digests_sha256_json))
         .filter(native::Column::InputLineageJson.eq(row.input_lineage_json))
         .filter(native::Column::InputSnapshotJson.eq(row.input_snapshot_json))
         .filter(native::Column::ProjectionDigestSha256.eq(row.projection_digest_sha256))

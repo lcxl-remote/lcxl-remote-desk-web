@@ -1240,7 +1240,6 @@ pub(crate) mod tests {
                 profile_revision: 1,
             },
             envelope_ids: vec!["original-input".into()],
-            digests_sha256: vec!["a".repeat(64)],
             total_bytes: 10,
         };
         store.db.execute_unprepared("CREATE TRIGGER reject_model_intent BEFORE INSERT ON model_egress_receipt BEGIN SELECT RAISE(ABORT, 'injected'); END").await.unwrap();

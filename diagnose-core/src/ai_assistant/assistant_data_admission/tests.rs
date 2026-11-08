@@ -84,7 +84,6 @@ impl Fixture {
         let audit = SinkProjectionAudit {
             destination: destination.clone(),
             envelope_ids: vec![input.envelope_id.clone()],
-            digests_sha256: vec![input.digest_sha256.clone()],
             total_bytes: 23,
         };
         let input_snapshot = crate::model_egress::NativeModelInputSnapshot::capture(

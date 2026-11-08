@@ -264,11 +264,10 @@ impl ModelSeam for MeteredModel {
         })?;
         let receipt_id = dispatch.receipt_id;
         log::info!(
-            "[ai-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",
+            "[ai-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} total_bytes={}",
             receipt_id,
             authorized.audit.destination,
             authorized.audit.envelope_ids,
-            authorized.audit.digests_sha256,
             authorized.audit.total_bytes
         );
         let delegated = authorized.request.delegation_call.is_some();

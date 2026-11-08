@@ -19,10 +19,6 @@ fn snapshot(inputs: Vec<DataEnvelope>) -> crate::model_egress::NativeModelInputS
             .iter()
             .map(|input| input.envelope_id.clone())
             .collect(),
-        digests_sha256: inputs
-            .iter()
-            .map(|input| input.digest_sha256.clone())
-            .collect(),
         total_bytes: 32,
     };
     crate::model_egress::NativeModelInputSnapshot::capture(&audit, &inputs).unwrap()

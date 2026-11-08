@@ -223,10 +223,6 @@ pub(super) async fn native_on(
             .iter()
             .map(|value| value.envelope_id.clone())
             .collect(),
-        digests_sha256: envelopes
-            .iter()
-            .map(|value| value.digest_sha256.clone())
-            .collect(),
         total_bytes: envelopes
             .iter()
             .map(|value| match value.content {

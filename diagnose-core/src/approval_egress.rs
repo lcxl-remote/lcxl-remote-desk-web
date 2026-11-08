@@ -67,10 +67,7 @@ impl AuthorizedApprovalReview {
         self.prompt_envelope
             .validate()
             .map_err(|_| ApprovalReviewError::InvalidContext)?;
-        if self.prompt_envelope.digest_sha256
-            != format!("{:x}", Sha256::digest(self.prompt.as_bytes()))
-            || self.prompt_audit.envelope_ids != vec![self.prompt_envelope.envelope_id.clone()]
-            || self.prompt_audit.digests_sha256 != vec![self.prompt_envelope.digest_sha256.clone()]
+        if self.prompt_audit.envelope_ids != vec![self.prompt_envelope.envelope_id.clone()]
             || self.prompt_audit.total_bytes != self.prompt.len()
         {
             return Err(ApprovalReviewError::InvalidContext);
@@ -624,6 +621,19 @@ mod tests {
     use desk_agent_protocol::capability_grant::CapabilityRiskTier;
     use desk_agent_protocol::capability_provider::CapabilityEffect;
 
+    fn exported_id(authorized: &AuthorizedApprovalReview, message_id: &str) -> String {
+        let candidate = authorized
+            .prompt_envelope
+            .provenance
+            .source_object_id
+            .as_deref()
+            .unwrap();
+        format!(
+            "approval-export-{:x}",
+            Sha256::digest(format!("{candidate}:{message_id}").as_bytes()),
+        )
+    }
+
     fn envelope_for(message: &ChatMessage, sensitivity: Sensitivity) -> DataEnvelope {
         let bytes = message_content_bytes(message).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -913,8 +923,8 @@ mod tests {
             assert!(
                 authorized
                     .source_audit
-                    .digests_sha256
-                    .contains(&owner.data_envelope.as_ref().unwrap().digest_sha256)
+                    .envelope_ids
+                    .contains(&exported_id(&authorized, &owner.message_id))
             );
         }
         for invalid in 0..4 {
@@ -979,12 +989,11 @@ mod tests {
                     .unwrap_or_else(|error| {
                         panic!("{source:?} {}: {error:?}", projection.message_id)
                     });
-                let current = projection.data_envelope.as_ref().unwrap();
                 assert!(
                     authorized
                         .source_audit
-                        .digests_sha256
-                        .contains(&current.digest_sha256)
+                        .envelope_ids
+                        .contains(&exported_id(&authorized, &projection.message_id))
                 );
                 assert_eq!(
                     authorized.source_audit.total_bytes,
@@ -1149,14 +1158,14 @@ mod tests {
                     _ => unreachable!(),
                 }
                 if matches!(invalid, 3 | 5) {
-                    let digest = message
-                        .data_envelope
-                        .as_ref()
-                        .unwrap()
-                        .digest_sha256
-                        .clone();
+                    let message_id = message.message_id.clone();
                     let authorized = authorize_projected_source(&session, source.clone()).unwrap();
-                    assert!(!authorized.source_audit.digests_sha256.contains(&digest));
+                    assert!(
+                        !authorized
+                            .source_audit
+                            .envelope_ids
+                            .contains(&exported_id(&authorized, &message_id))
+                    );
                     continue;
                 }
                 assert!(

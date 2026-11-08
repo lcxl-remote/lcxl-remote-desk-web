@@ -148,7 +148,6 @@ async fn completion_before_parent_release_is_found_after_release_and_claimed_onc
     let audit = desk_diagnose_core::sink_authorizer::SinkProjectionAudit {
         destination: super::creation::destination(),
         envelope_ids: vec![label.envelope_id.clone()],
-        digests_sha256: vec![label.digest_sha256.clone()],
         total_bytes: ready_message.text.len(),
     };
     let lineage = desk_diagnose_core::model_egress::ModelInputLineage {

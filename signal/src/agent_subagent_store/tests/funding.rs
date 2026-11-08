@@ -353,7 +353,6 @@ pub(super) async fn insert_provider_usage(
         model_call_ordinal: Set(1),
         destination_json: Set("{}".into()),
         envelope_ids_json: Set("[]".into()),
-        digests_sha256_json: Set("[]".into()),
         input_lineage_json: Set("[]".into()),
         input_snapshot_json: Set("{}".into()),
         projection_digest_sha256: Set("digest".into()),

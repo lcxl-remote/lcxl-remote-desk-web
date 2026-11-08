@@ -678,7 +678,6 @@ mod tests {
         let audit = crate::sink_authorizer::SinkProjectionAudit {
             destination: call.destination.clone(),
             envelope_ids: vec![envelope.envelope_id.clone()],
-            digests_sha256: vec![envelope.digest_sha256.clone()],
             total_bytes: 24,
         };
         let inputs = crate::model_egress::project_model_input_lineage(

@@ -267,7 +267,6 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
         let audit = desk_diagnose_core::sink_authorizer::SinkProjectionAudit {
             destination: policy.destination.clone(),
             envelope_ids: vec![input.envelope_id.clone()],
-            digests_sha256: vec![input.digest_sha256.clone()],
             total_bytes: query_text.len(),
         };
         let schema = sea_orm::Schema::new(store.db.get_database_backend());

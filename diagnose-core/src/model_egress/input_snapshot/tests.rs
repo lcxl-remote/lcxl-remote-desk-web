@@ -31,10 +31,6 @@ fn fixture() -> (SinkProjectionAudit, Vec<DataEnvelope>) {
             .iter()
             .map(|input| input.envelope_id.clone())
             .collect(),
-        digests_sha256: inputs
-            .iter()
-            .map(|input| input.digest_sha256.clone())
-            .collect(),
         total_bytes: 74,
     };
     (audit, inputs)
@@ -121,9 +117,8 @@ fn capture_rejects_a_different_sink_set_order_or_non_model_recipient() {
             0 => changed.envelope_ids.swap(0, 1),
             1 => {
                 changed.envelope_ids.pop();
-                changed.digests_sha256.pop();
             }
-            2 => changed.digests_sha256[0] = "a".repeat(64),
+            2 => changed.envelope_ids[0] = "other-envelope".into(),
             3 => {
                 changed.destination = DestinationIdentity::EmailAccount {
                     account_id: "mail".into(),
@@ -144,10 +139,6 @@ fn bounded_long_history_keeps_all_entries_and_checks_the_last_label() {
     let (mut audit, inputs) = fixture();
     let mut long = vec![inputs[0].clone(); 300];
     audit.envelope_ids = long.iter().map(|input| input.envelope_id.clone()).collect();
-    audit.digests_sha256 = long
-        .iter()
-        .map(|input| input.digest_sha256.clone())
-        .collect();
     audit.total_bytes = 11_100;
     let snapshot = NativeModelInputSnapshot::capture(&audit, &long).unwrap();
     assert_eq!(snapshot.envelopes.len(), 300);

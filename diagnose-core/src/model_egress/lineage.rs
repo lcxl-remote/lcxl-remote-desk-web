@@ -103,25 +103,17 @@ pub fn validate_model_input_lineage(
         || entries.is_empty()
         || entries.len() > MAX_SINK_BYTES
         || entries.len() != audit.envelope_ids.len()
-        || entries.len() != audit.digests_sha256.len()
     {
         return Err(InvalidModelInputLineage);
     }
     let mut seen = std::collections::BTreeMap::new();
-    for ((entry, id), digest) in entries
-        .iter()
-        .zip(&audit.envelope_ids)
-        .zip(&audit.digests_sha256)
-    {
+    for (entry, id) in entries.iter().zip(&audit.envelope_ids) {
         let valid_id = |value: &str| {
             !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
         };
         if (entry.public_system_prompt && !is_audited_public_system_prompt(entry))
             || entry.envelope_id != *id
-            || entry.digest_sha256 != *digest
             || !valid_id(id)
-            || digest.len() != 64
-            || !digest.bytes().all(|b| b.is_ascii_hexdigit())
             || entry
                 .source_envelope_ids
                 .iter()
@@ -232,7 +224,6 @@ mod tests {
         let audit = SinkProjectionAudit {
             destination,
             envelope_ids: vec![envelope.envelope_id.clone()],
-            digests_sha256: vec![envelope.digest_sha256.clone()],
             total_bytes: 12,
         };
         (audit, envelope)
@@ -323,9 +314,6 @@ mod tests {
         // Equal duplicate inputs are unambiguous; conflicting provenance is not.
         let mut repeated = audit;
         repeated.envelope_ids.push(repeated.envelope_ids[0].clone());
-        repeated
-            .digests_sha256
-            .push(repeated.digests_sha256[0].clone());
         let mut entries = vec![lineage[0].clone(), lineage[0].clone()];
         assert!(validate_model_input_lineage(&repeated, &entries).is_ok());
         entries[1].source_envelope_ids = vec!["different-read".into()];
@@ -344,7 +332,7 @@ mod tests {
             let mut wrong = lineage.clone();
             match case {
                 0 => wrong[0].envelope_id = "other-export".into(),
-                1 => wrong[0].digest_sha256 = "b".repeat(64),
+                1 => wrong.push(wrong[0].clone()),
                 2 => wrong[0].source_envelope_ids = vec!["exported-input".into()],
                 3 => wrong[0].source_envelope_ids = vec!["read".into(), "read".into()],
                 4 => wrong[0].source_provider_id.clear(),

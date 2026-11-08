@@ -195,7 +195,6 @@ impl SignalModelEgressStore {
         desk_diagnose_core::model_egress::sink_metadata_sha256(&(
             &audit.destination,
             &audit.envelope_ids,
-            &audit.digests_sha256,
             &input_lineage,
             &input_snapshot,
             audit.total_bytes,
@@ -209,8 +208,6 @@ impl SignalModelEgressStore {
             .map_err(|error| DbErr::Custom(format!("encode model destination: {error}")))?;
         let envelope_ids_json = serde_json::to_string(&audit.envelope_ids)
             .map_err(|error| DbErr::Custom(format!("encode egress envelope ids: {error}")))?;
-        let digests_sha256_json = serde_json::to_string(&audit.digests_sha256)
-            .map_err(|error| DbErr::Custom(format!("encode egress digests: {error}")))?;
         let total_bytes = i64::try_from(audit.total_bytes)
             .map_err(|_| DbErr::Custom("model egress byte count exceeds i64".into()))?;
         let ordinal = i32::try_from(model_call_ordinal)
@@ -218,7 +215,6 @@ impl SignalModelEgressStore {
         let projection_digest_sha256 = projection_digest(
             &destination_json,
             &envelope_ids_json,
-            &digests_sha256_json,
             &input_lineage_json,
             &input_snapshot_json,
             total_bytes,
@@ -230,7 +226,6 @@ impl SignalModelEgressStore {
             model_call_ordinal: Set(ordinal),
             destination_json: Set(destination_json),
             envelope_ids_json: Set(envelope_ids_json),
-            digests_sha256_json: Set(digests_sha256_json),
             input_lineage_json: Set(input_lineage_json),
             input_snapshot_json: Set(input_snapshot_json),
             assistant_source_set_json: Set(None),
@@ -399,10 +394,6 @@ impl SignalModelEgressStore {
                 accepted_lists(&row.envelope_ids_json),
             )
             .col_expr(
-                model_egress_receipt::Column::DigestsSha256Json,
-                accepted_lists(&row.digests_sha256_json),
-            )
-            .col_expr(
                 model_egress_receipt::Column::InputLineageJson,
                 accepted_lists(&row.input_lineage_json),
             )
@@ -444,7 +435,6 @@ impl SignalModelEgressStore {
             )
             .filter(model_egress_receipt::Column::DestinationJson.eq(row.destination_json))
             .filter(model_egress_receipt::Column::EnvelopeIdsJson.eq(row.envelope_ids_json))
-            .filter(model_egress_receipt::Column::DigestsSha256Json.eq(row.digests_sha256_json))
             .filter(
                 model_egress_receipt::Column::ExportAuthorizationId.eq(row.export_authorization_id),
             )
@@ -942,7 +932,6 @@ fn receipt_inputs_reusing(
                 != projection_digest(
                     &row.destination_json,
                     &encode(serde_json::to_string(&audit.envelope_ids))?,
-                    &encode(serde_json::to_string(&audit.digests_sha256))?,
                     &encode(serde_json::to_string(&archived.inputs))?,
                     &encode(serde_json::to_string(&archived.input_snapshot))?,
                     row.total_bytes,
@@ -960,7 +949,6 @@ fn receipt_inputs_reusing(
         .destination_json
         .len()
         .checked_add(row.envelope_ids_json.len())
-        .and_then(|bytes| bytes.checked_add(row.digests_sha256_json.len()))
         .and_then(|bytes| bytes.checked_add(row.input_lineage_json.len()))
         .and_then(|bytes| bytes.checked_add(row.input_snapshot_json.len()))
         .and_then(|bytes| bytes.checked_add(8));
@@ -971,7 +959,6 @@ fn receipt_inputs_reusing(
     let audit = SinkProjectionAudit {
         destination: serde_json::from_str(&row.destination_json).map_err(|_| invalid())?,
         envelope_ids: serde_json::from_str(&row.envelope_ids_json).map_err(|_| invalid())?,
-        digests_sha256: serde_json::from_str(&row.digests_sha256_json).map_err(|_| invalid())?,
         total_bytes: usize::try_from(row.total_bytes).map_err(|_| invalid())?,
     };
     let inputs: Vec<desk_diagnose_core::model_egress::ModelInputLineage> =
@@ -982,7 +969,6 @@ fn receipt_inputs_reusing(
         != projection_digest(
             &row.destination_json,
             &row.envelope_ids_json,
-            &row.digests_sha256_json,
             &row.input_lineage_json,
             &row.input_snapshot_json,
             row.total_bytes,
@@ -1014,7 +1000,6 @@ fn ensure_single_update(rows_affected: u64, operation: &str) -> Result<(), DbErr
 fn projection_digest(
     destination_json: &str,
     envelope_ids_json: &str,
-    digests_sha256_json: &str,
     input_lineage_json: &str,
     input_snapshot_json: &str,
     total_bytes: i64,
@@ -1023,7 +1008,6 @@ fn projection_digest(
     for part in [
         destination_json,
         envelope_ids_json,
-        digests_sha256_json,
         input_lineage_json,
         input_snapshot_json,
     ] {
@@ -1044,13 +1028,12 @@ pub(crate) fn test_inputs(
     audit
         .envelope_ids
         .iter()
-        .zip(&audit.digests_sha256)
-        .map(|(id, digest)| DataEnvelope {
+        .map(|id| DataEnvelope {
             schema_version: 1,
             envelope_id: id.clone(),
             content: ContentRef::ImmutableBlob {
                 blob_id: "test-input".into(),
-                sha256: digest.clone(),
+                sha256: "0".repeat(64),
                 size_bytes: audit.total_bytes as u64,
                 media_type: "text/plain".into(),
             },
@@ -1060,7 +1043,7 @@ pub(crate) fn test_inputs(
                 source_object_id: None,
                 source_envelope_ids: vec![],
             },
-            digest_sha256: digest.clone(),
+            digest_sha256: "0".repeat(64),
             sensitivity: Sensitivity::UserContent,
             allowed_destinations: vec![audit.destination.clone()],
             retention: RetentionBoundary {
@@ -1088,7 +1071,6 @@ mod tests {
                 profile_revision: 3,
             },
             envelope_ids: vec!["user-1".into(), "tool-1".into()],
-            digests_sha256: vec!["a".repeat(64), "b".repeat(64)],
             total_bytes: 42,
         }
     }
@@ -1570,7 +1552,6 @@ mod tests {
         );
         // Accepted lists live only in the archive, and its projection digest binds them.
         row.envelope_ids_json.clear();
-        row.digests_sha256_json.clear();
         row.input_lineage_json.clear();
         row.input_snapshot_json.clear();
         assert_eq!(

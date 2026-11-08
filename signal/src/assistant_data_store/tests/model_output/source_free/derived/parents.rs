@@ -306,7 +306,6 @@ async fn acceptance_leaves_the_archive_as_the_only_copy_of_the_input_lists() {
     assert!(receipt.input_snapshot_json.is_empty());
     assert!(receipt.input_lineage_json.is_empty());
     assert!(receipt.envelope_ids_json.is_empty());
-    assert!(receipt.digests_sha256_json.is_empty());
     let sources = SignalModelEgressStore::read_context_output_on(&store.db, "root", &parent)
         .await
         .unwrap();

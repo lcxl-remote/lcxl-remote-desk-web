@@ -135,10 +135,6 @@ impl Frame {
                 .iter()
                 .map(|envelope| envelope.envelope_id.clone())
                 .collect(),
-            digests_sha256: selected
-                .iter()
-                .map(|envelope| envelope.digest_sha256.clone())
-                .collect(),
             total_bytes: selected
                 .iter()
                 .map(|envelope| match &envelope.content {

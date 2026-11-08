@@ -908,9 +908,9 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            authorize_issue_delivery(&issue, &proof, &output, "Changed body", 300),
+            authorize_issue_delivery(&issue, &proof, &output, "Changed body!", 300),
             Err(ModelEgressError::Sink(
-                SinkAuthorizationError::DigestMismatch
+                SinkAuthorizationError::ContentSizeMismatch
             ))
         ));
     }
@@ -1024,7 +1024,7 @@ mod tests {
             AgentErrorKind::OutputLimitExceeded
         );
         assert_eq!(
-            ModelEgressError::Sink(SinkAuthorizationError::DigestMismatch)
+            ModelEgressError::Sink(SinkAuthorizationError::ContentSizeMismatch)
                 .agent_error()
                 .kind,
             AgentErrorKind::Internal

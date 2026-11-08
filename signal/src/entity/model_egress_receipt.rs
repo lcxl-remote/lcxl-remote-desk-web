@@ -15,7 +15,6 @@ pub struct Model {
     pub model_call_ordinal: i32,
     pub destination_json: String,
     pub envelope_ids_json: String,
-    pub digests_sha256_json: String,
     pub input_lineage_json: String,
     #[sea_orm(column_type = "Text")]
     pub input_snapshot_json: String,

@@ -216,7 +216,6 @@ fn controls_keep_the_original_policy_across_an_actual_native_export_alias() {
     .unwrap();
     let mut audit = authorized.audit.clone();
     audit.envelope_ids.push(control.envelope_id.clone());
-    audit.digests_sha256.push(control.digest_sha256.clone());
     audit.total_bytes += 8;
     let original_snapshot = authorized.input_snapshot().unwrap();
     let snapshot = NativeModelInputSnapshot::capture_with_exports(

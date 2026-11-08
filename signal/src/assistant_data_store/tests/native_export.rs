@@ -110,10 +110,6 @@ fn batch_audit(proofs: &[ReadProjectionProof]) -> SinkProjectionAudit {
             .iter()
             .map(|proof| proof.source_envelope.envelope_id.clone())
             .collect(),
-        digests_sha256: proofs
-            .iter()
-            .map(|proof| proof.source_envelope.digest_sha256.clone())
-            .collect(),
         total_bytes: proofs.len() * 2,
     }
 }

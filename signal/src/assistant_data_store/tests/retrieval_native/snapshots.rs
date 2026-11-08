@@ -222,7 +222,6 @@ async fn exercise_accepted(
     let sink = SinkProjectionAudit {
         destination: frame.destination.clone(),
         envelope_ids: selected.iter().map(|e| e.envelope_id.clone()).collect(),
-        digests_sha256: selected.iter().map(|e| e.digest_sha256.clone()).collect(),
         total_bytes: selected
             .iter()
             .map(|e| match e.content {

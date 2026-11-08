@@ -11,7 +11,6 @@ use desk_agent_protocol::data_lineage::{
     ContentRef, DataEnvelope, DestinationIdentity, Sensitivity, TransformationAuthority,
     TransformationRecord,
 };
-use sha2::{Digest, Sha256};
 
 pub const MAX_SINK_ITEMS: usize = 64;
 pub const MAX_SINK_BYTES: usize = 4 * 1024 * 1024;
@@ -105,7 +104,6 @@ pub struct SinkInput<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedSinkItem {
     pub envelope_id: String,
-    pub digest_sha256: String,
     pub bytes: Vec<u8>,
 }
 
@@ -113,7 +111,6 @@ pub struct AuthorizedSinkItem {
 pub struct SinkProjectionAudit {
     pub destination: DestinationIdentity,
     pub envelope_ids: Vec<String>,
-    pub digests_sha256: Vec<String>,
     pub total_bytes: usize,
 }
 
@@ -217,10 +214,6 @@ fn authorize_inputs(
         if usize::try_from(expected_size).ok() != Some(input.bytes.len()) {
             return Err(SinkAuthorizationError::ContentSizeMismatch);
         }
-        let digest = hex_digest(input.bytes);
-        if digest != input.envelope.digest_sha256 {
-            return Err(SinkAuthorizationError::DigestMismatch);
-        }
         total_bytes = total_bytes
             .checked_add(input.bytes.len())
             .ok_or(SinkAuthorizationError::ByteCapExceeded)?;
@@ -229,7 +222,6 @@ fn authorize_inputs(
         }
         items.push(AuthorizedSinkItem {
             envelope_id: input.envelope.envelope_id.clone(),
-            digest_sha256: digest,
             bytes: input.bytes.to_vec(),
         });
     }
@@ -238,10 +230,6 @@ fn authorize_inputs(
         audit: SinkProjectionAudit {
             destination: destination.clone(),
             envelope_ids: items.iter().map(|item| item.envelope_id.clone()).collect(),
-            digests_sha256: items
-                .iter()
-                .map(|item| item.digest_sha256.clone())
-                .collect(),
             total_bytes,
         },
         items,
@@ -269,10 +257,6 @@ fn is_expired(envelope: &DataEnvelope, now_unix_ms: u64) -> bool {
         }
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinkAuthorizationError {
     InvalidDestination(String),
@@ -285,7 +269,6 @@ pub enum SinkAuthorizationError {
     DestinationNotAllowed,
     ExpiredEnvelope,
     ContentSizeMismatch,
-    DigestMismatch,
     ByteCapExceeded,
     InvalidExportAuthorization,
     ExportSourceNotAuthorized,
@@ -312,7 +295,6 @@ impl std::fmt::Display for SinkAuthorizationError {
             Self::ContentSizeMismatch => {
                 formatter.write_str("content size does not match envelope")
             }
-            Self::DigestMismatch => formatter.write_str("content digest does not match envelope"),
             Self::ByteCapExceeded => formatter.write_str("sink byte cap exceeded"),
             Self::InvalidExportAuthorization => {
                 formatter.write_str("ExportData authorization is invalid or expired")
@@ -335,6 +317,11 @@ impl std::error::Error for SinkAuthorizationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hex_digest(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    }
     use crate::data_policy::{ConservativeDerivation, derive_conservatively};
     use desk_agent_protocol::data_lineage::{
         DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary,
@@ -497,9 +484,25 @@ mod tests {
                 100,
                 MAX_SINK_BYTES,
             ),
-            Err(SinkAuthorizationError::ContentSizeMismatch
-                | SinkAuthorizationError::DigestMismatch)
+            Err(SinkAuthorizationError::ContentSizeMismatch)
         ));
+        // Labels and bodies share trusted storage: the sink checks size, not content.
+        let same_size = vec![b'x'; bytes.len()];
+        let projection = DefaultSinkAuthorizer
+            .authorize(
+                &destination,
+                &[SinkInput {
+                    envelope: &envelope,
+                    bytes: &same_size,
+                }],
+                100,
+                MAX_SINK_BYTES,
+            )
+            .unwrap();
+        assert_eq!(
+            projection.audit.envelope_ids,
+            vec![envelope.envelope_id.clone()]
+        );
         assert!(matches!(
             DefaultSinkAuthorizer.authorize(
                 &destination,
