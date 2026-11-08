@@ -2599,53 +2599,6 @@ impl PersistedAgentSession {
         result
     }
 
-    /// Reconcile a late execution result against an unknown outcome (§6.2): if the
-    /// execution machine is [`ExecutionState::OutcomeUnknown`] for `execution_id`,
-    /// replace the placeholder tool-result message (matched by its `message_id`)
-    /// text **in place** — never appending a second tool result for the same call —
-    /// and remove only this execution, preserving other tasks. Returns whether
-    /// a reconciliation happened (false if already resolved / a different
-    /// execution / not unknown). The durable result is written first by the caller;
-    /// this only mutates the conversation + execution state.
-    pub fn reconcile_late_result(
-        &mut self,
-        execution_id: &str,
-        result_text: impl Into<String>,
-        now: impl Into<String>,
-    ) -> bool {
-        let result_text = result_text.into();
-        let now = now.into();
-        self.with_execution(execution_id, |session| {
-            session.reconcile_late_result_single(execution_id, result_text, now)
-        })
-    }
-
-    fn reconcile_late_result_single(
-        &mut self,
-        execution_id: &str,
-        result_text: impl Into<String>,
-        now: impl Into<String>,
-    ) -> bool {
-        let placeholder_id = match &self.execution_state {
-            ExecutionState::OutcomeUnknown {
-                action,
-                placeholder_message_id,
-                ..
-            } if action.execution_id == execution_id => placeholder_message_id.clone(),
-            _ => return false,
-        };
-        if let Some(msg) = self
-            .conversation
-            .iter_mut()
-            .find(|m| m.message_id == placeholder_id)
-        {
-            msg.text = result_text.into();
-        }
-        self.execution_state = ExecutionState::None;
-        self.updated_at = now.into();
-        true
-    }
-
     /// Explicitly dispose one recoverable unknown outcome after the owner has
     /// checked the target. The exact durable action identity must match; this
     /// never claims success/failure and never authorizes a retry. A later result
@@ -2704,17 +2657,18 @@ impl PersistedAgentSession {
         // This is a new runtime receipt, not the original Provider result.
         // Derive a new identity/digest while preserving the original authority
         // and lineage. Never leave the old envelope attached to changed bytes.
-        let Ok(envelope) = crate::model_message_labels::internal_tool_result_envelope(
-            message.data_envelope.as_ref(),
-            message.tool_call_id.as_deref().unwrap(),
+        let call_id = message.tool_call_id.clone().unwrap();
+        if crate::model_message_labels::rewrite_message_content(
+            message,
+            &call_id,
             MANUALLY_DISPOSED_OUTCOME_UNKNOWN,
             "manual_outcome_disposition",
-        ) else {
+        )
+        .is_err()
+        {
             return false;
-        };
-        message.text = MANUALLY_DISPOSED_OUTCOME_UNKNOWN.to_string();
+        }
         message.image_data_url = None;
-        message.data_envelope = envelope;
         let now = now.into();
         self.manual_outcome_disposition = Some(ManualOutcomeDisposition {
             action,
@@ -2733,15 +2687,15 @@ impl PersistedAgentSession {
     /// background dispatch whose owner dies would block new mutation forever, because
     /// nothing else transitions it. Repurpose the running-task tool result (closing
     /// `tool_call_id`, written by the `Dispatched` arm) as the placeholder a late
-    /// real result can still replace in place via [`reconcile_late_result`] /
-    /// [`apply_completion`], rewriting its text to the unknown-outcome placeholder.
+    /// real result can still replace via [`apply_completion`], rewriting its text
+    /// and label to the unknown-outcome placeholder. A label that cannot be
+    /// derived is dropped, so model egress fails closed.
     ///
     /// Only acts when the machine is `Executing` for this `execution_id` **and** the
     /// running-task result closing `tool_call_id` is present (needed as the reconcile
     /// anchor); returns whether the transition happened. Pure: the caller persists
     /// under its own CAS.
     ///
-    /// [`reconcile_late_result`]: Self::reconcile_late_result
     /// [`apply_completion`]: Self::apply_completion
     pub fn mark_execution_unknown(
         &mut self,
@@ -2775,7 +2729,17 @@ impl PersistedAgentSession {
             .find(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
         {
             Some(msg) => {
-                msg.text = RECOVER_OUTCOME_UNKNOWN.to_string();
+                if crate::model_message_labels::rewrite_message_content(
+                    msg,
+                    tool_call_id,
+                    RECOVER_OUTCOME_UNKNOWN,
+                    "execution_outcome_unknown",
+                )
+                .is_err()
+                {
+                    msg.text = RECOVER_OUTCOME_UNKNOWN.to_string();
+                    msg.data_envelope = None;
+                }
                 msg.message_id.clone()
             }
             None => return false,
@@ -3024,7 +2988,7 @@ impl PersistedAgentSession {
     /// - [`NotExecuted`] — the command provably never ran: a plain "not executed"
     ///   result; execution machine cleared to [`None`] (a later turn may mutate).
     /// - [`OutcomeUnknown`] — dispatched with a recoverable identity: a placeholder
-    ///   a late real result can replace in place ([`reconcile_late_result`]); only
+    ///   a late real result can replace through [`apply_completion`]; only
     ///   read-only follow-up until then.
     /// - [`InterruptedUnknown`] — no recoverable identity: closed as interrupted and
     ///   the conversation is permanently barred from new mutation, without
@@ -3038,7 +3002,7 @@ impl PersistedAgentSession {
     /// [`OutcomeUnknown`]: RecoveryVerdict::OutcomeUnknown
     /// [`InterruptedUnknown`]: RecoveryVerdict::InterruptedUnknown
     /// [`None`]: ExecutionState::None
-    /// [`reconcile_late_result`]: Self::reconcile_late_result
+    /// [`apply_completion`]: Self::apply_completion
     /// [`SessionSeam`]: crate::seam::SessionSeam
     pub fn recover_session(&mut self, verdict: RecoveryVerdict, now: impl Into<String>) {
         let now = now.into();
@@ -4019,51 +3983,6 @@ mod tests {
         );
     }
 
-    /// A late result reconciles an unknown outcome: it replaces the placeholder
-    /// message text in place (no second tool result) and clears the execution
-    /// machine; a mismatched execution id or an already-resolved state is a no-op.
-    #[test]
-    fn reconcile_late_result_replaces_placeholder_in_place() {
-        let mut s = session();
-        s.conversation.push(crate::chat::ChatMessage::tool_result(
-            "ph-1",
-            "call-1",
-            "execution outcome unknown; the command may have executed; do not assume success",
-        ));
-        s.execution_state = ExecutionState::OutcomeUnknown {
-            action: ActionIdentity::agent_exec(7, "req-1", "exec-1"),
-            placeholder_message_id: "ph-1".into(),
-            since: "2026-06-20T00:00:00Z".into(),
-        };
-        let conv_len = s.conversation.len();
-
-        // A different execution id does not reconcile.
-        assert!(!s.reconcile_late_result("other", "ran ok", "2026-06-20T00:01:00Z"));
-        assert!(matches!(
-            s.execution_state,
-            ExecutionState::OutcomeUnknown { .. }
-        ));
-
-        // The matching id replaces the placeholder text in place and clears state.
-        assert!(s.reconcile_late_result("exec-1", "exit_code=0", "2026-06-20T00:02:00Z"));
-        assert_eq!(s.execution_state, ExecutionState::None);
-        assert_eq!(
-            s.conversation.len(),
-            conv_len,
-            "no second tool result appended"
-        );
-        let ph = s
-            .conversation
-            .iter()
-            .find(|m| m.message_id == "ph-1")
-            .unwrap();
-        assert_eq!(ph.text, "exit_code=0");
-        assert_eq!(ph.tool_call_id.as_deref(), Some("call-1"));
-
-        // A second reconcile is a no-op (already resolved).
-        assert!(!s.reconcile_late_result("exec-1", "again", "2026-06-20T00:03:00Z"));
-    }
-
     /// An event is appended once and keyed by its `event_id`; a redelivery of the
     /// same event finds it present and is a no-op (the durable queue may deliver
     /// more than once). A different event_id appends a second message.
@@ -4232,6 +4151,48 @@ mod tests {
     /// (its text is rewritten to the unknown-outcome placeholder) and letting a late
     /// real result still land in place.
     #[test]
+    fn mark_execution_unknown_relabels_or_drops_the_anchor_label() {
+        let owner = crate::model_message_labels::model_bound_user_message(
+            "owner".into(),
+            "run it".into(),
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap()
+        .data_envelope
+        .unwrap();
+        for valid in [true, false] {
+            let mut s = session();
+            let mut running =
+                crate::chat::ChatMessage::background_task_running("run-1", "call-1", "exec_t9");
+            let mut label = owner.clone();
+            if !valid {
+                label.envelope_id.clear();
+            }
+            running.data_envelope = Some(label.clone());
+            s.conversation.push(running);
+            s.execution_state = ExecutionState::Executing {
+                action: ActionIdentity::agent_exec(8, "exec_t9", "e9"),
+            };
+            assert!(s.mark_execution_unknown("e9", "call-1", "2026-06-20T00:00:00Z"));
+            let anchor = &s.conversation[0];
+            assert_eq!(anchor.text, RECOVER_OUTCOME_UNKNOWN);
+            match &anchor.data_envelope {
+                Some(new) if valid => {
+                    assert_ne!(new.envelope_id, label.envelope_id);
+                    assert_eq!(new.provenance.source_envelope_ids, vec![label.envelope_id]);
+                }
+                None if !valid => {}
+                other => panic!("unexpected label {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn mark_execution_unknown_transitions_and_anchors_the_placeholder() {
         let mut s = session();
         // The dispatch closed the call with a running-task placeholder.
@@ -4265,16 +4226,6 @@ mod tests {
             .find(|m| m.message_id == "run-1")
             .unwrap();
         assert_eq!(anchor.text, RECOVER_OUTCOME_UNKNOWN);
-
-        // A late real result reconciles the anchor in place.
-        assert!(s.reconcile_late_result("e9", "exit_code=0", "2026-06-20T00:01:00Z"));
-        assert_eq!(s.execution_state, ExecutionState::None);
-        let anchor = s
-            .conversation
-            .iter()
-            .find(|m| m.message_id == "run-1")
-            .unwrap();
-        assert_eq!(anchor.text, "exit_code=0");
     }
 
     #[test]
@@ -4595,15 +4546,10 @@ mod tests {
             message.tool_call_id.as_deref() == Some("read-before")
                 && message.text == RECOVER_NOT_EXECUTED
         }));
-        // A late result for exec-9 reconciles the placeholder in place.
-        assert!(s.reconcile_late_result("exec-9", "exit_code=0", "t3"));
-        assert_eq!(s.execution_state, ExecutionState::None);
-        let closed = s
-            .conversation
-            .iter()
-            .find(|m| m.tool_call_id.as_deref() == Some("call-z"))
-            .unwrap();
-        assert_eq!(closed.text, "exit_code=0");
+        assert!(matches!(
+            s.execution_state,
+            ExecutionState::OutcomeUnknown { .. }
+        ));
     }
 
     /// The session round-trips through serde (manager persistence).

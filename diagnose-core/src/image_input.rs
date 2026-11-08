@@ -202,7 +202,7 @@ fn remove_image(message: &mut ChatMessage) {
         return;
     }
     // Derive only from a receipt whose original payload is still verifiable.
-    // Invalid receipts keep their old binding and fail closed at model egress.
+    // An invalid receipt loses its label, so model egress fails closed.
     let source = message
         .data_envelope
         .as_ref()
@@ -226,6 +226,7 @@ fn remove_image(message: &mut ChatMessage) {
         }
         message.text.push_str(IMAGE_NOT_RETAINED_PLACEHOLDER);
     }
+    message.data_envelope = None;
     if let Some(mut envelope) = source {
         let Ok(bytes) = crate::model_egress::message_content_bytes(message) else {
             return;
@@ -362,7 +363,8 @@ mod tests {
         let mut tampered = message.clone();
         tampered.text.push_str("tampered");
         strip_session_images(std::slice::from_mut(&mut tampered));
-        assert_eq!(tampered.data_envelope, Some(original.clone()));
+        // An unverifiable receipt loses its label instead of keeping it on changed text.
+        assert_eq!(tampered.data_envelope, None);
         strip_session_images(std::slice::from_mut(&mut message));
         let projected = message.data_envelope.as_ref().unwrap();
         assert_ne!(projected.envelope_id, original.envelope_id);
@@ -397,20 +399,6 @@ mod tests {
             crate::sink_authorizer::MAX_SINK_BYTES,
         )
         .unwrap();
-        let corrupted_bytes = crate::model_egress::message_content_bytes(&tampered).unwrap();
-        assert!(
-            crate::sink_authorizer::authorize_model_history(
-                &original.allowed_destinations[0],
-                &[crate::sink_authorizer::SinkInput {
-                    envelope: tampered.data_envelope.as_ref().unwrap(),
-                    bytes: &corrupted_bytes
-                }],
-                1,
-                crate::sink_authorizer::MAX_SINK_BYTES
-            )
-            .is_err()
-        );
-
         let once = message.clone();
         strip_session_images(std::slice::from_mut(&mut message));
         assert_eq!(message, once);

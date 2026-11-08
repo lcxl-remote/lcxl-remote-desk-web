@@ -4371,14 +4371,12 @@ async fn run_wait<F: FnMut() -> String>(
                 Some(ExecutionState::Executing { .. })
             ) {
                 let original = &mut session.conversation[index];
-                original.data_envelope =
-                    crate::model_message_labels::internal_tool_result_envelope(
-                        original.data_envelope.as_ref(),
-                        &original_call_id,
-                        OUTCOME_UNKNOWN_PLACEHOLDER,
-                        "background_task_outcome_unknown",
-                    )?;
-                original.text = OUTCOME_UNKNOWN_PLACEHOLDER.into();
+                crate::model_message_labels::rewrite_message_content(
+                    original,
+                    &original_call_id,
+                    OUTCOME_UNKNOWN_PLACEHOLDER,
+                    "background_task_outcome_unknown",
+                )?;
                 session
                     .execution_state
                     .insert(ExecutionState::OutcomeUnknown {

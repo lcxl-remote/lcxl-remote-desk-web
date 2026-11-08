@@ -185,6 +185,23 @@ pub fn internal_tool_result_envelope(
     Ok(Some(envelope))
 }
 
+/// Replace a persisted message body in place. The new label derives from the
+/// current label and the rewrite kind, so one envelope id never names two
+/// bodies, including when rewrites return to an earlier body. On error the
+/// message is left unchanged.
+pub(crate) fn rewrite_message_content(
+    message: &mut ChatMessage,
+    call_id: &str,
+    text: &str,
+    rewrite_kind: &str,
+) -> Result<(), AgentError> {
+    let envelope =
+        internal_tool_result_envelope(message.data_envelope.as_ref(), call_id, text, rewrite_kind)?;
+    message.text = text.into();
+    message.data_envelope = envelope;
+    Ok(())
+}
+
 /// A history page is a deterministic projection of several older message
 /// envelopes plus the model's current tool call. Its authority is the strict
 /// intersection of every input destination, its sensitivity is the maximum,
@@ -415,6 +432,38 @@ mod tests {
         .unwrap()
         .data_envelope
         .unwrap()
+    }
+
+    #[test]
+    fn rewrites_never_reuse_an_envelope_id_for_another_body() {
+        let mut message = ChatMessage::tool_result("result", "call", "original");
+        message.data_envelope = Some(source("owner"));
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(message.data_envelope.clone().unwrap().envelope_id);
+        // A -> B -> A still yields a fresh label at every step.
+        for (text, kind) in [
+            ("unknown", "execution_outcome_unknown"),
+            ("disposed", "manual_outcome_disposition"),
+            ("unknown", "execution_outcome_unknown"),
+        ] {
+            rewrite_message_content(&mut message, "call", text, kind).unwrap();
+            assert_eq!(message.text, text);
+            assert!(seen.insert(message.data_envelope.clone().unwrap().envelope_id));
+        }
+        let mut invalid = message.clone();
+        invalid
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .allowed_destinations
+            .clear();
+        invalid.data_envelope.as_mut().unwrap().envelope_id.clear();
+        let before = invalid.clone();
+        assert!(rewrite_message_content(&mut invalid, "call", "other", "kind").is_err());
+        assert_eq!(
+            invalid, before,
+            "a failed rewrite leaves the message unchanged"
+        );
     }
 
     #[test]
