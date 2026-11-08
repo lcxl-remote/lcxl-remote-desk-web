@@ -802,8 +802,6 @@ impl ModelSeam for CompressionScriptModel {
     ) -> Result<crate::model_context::CompressorProvenanceV1, AgentError> {
         Ok(crate::model_context::CompressorProvenanceV1 {
             source_context_key: self.source.as_str().to_string(),
-            provider_identity_sha256: "a".repeat(64),
-            model_identity_sha256: "b".repeat(64),
             connection_revision: 1,
             model_profile_revision: 1,
             prompt_version: crate::model_context::CONTEXT_SUMMARY_PROMPT_VERSION.into(),
@@ -3139,8 +3137,8 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
         .safety
         .as_ref()
         .expect("the independently frozen safety receiver must be correlated");
-    assert_eq!(safety_audit.provider_identity_sha256, "a".repeat(64));
-    assert_eq!(safety_audit.model_identity_sha256, "b".repeat(64));
+    assert_eq!(safety_audit.connection_id, "safety-connection");
+    assert_eq!(safety_audit.model_id, "safety-model");
     assert_eq!(safety_audit.connection_revision, 3);
     assert_eq!(usage.tokens.input_tokens, Some(10));
     assert!(*summary_context_cost > 0);
@@ -7198,8 +7196,7 @@ fn safety_context() -> crate::content_safety::SafetyContext {
         original_allowed_intent: "diagnose the device".into(),
         policy_revision: 7,
         safety_model_id: "safety-model".into(),
-        safety_provider_identity_sha256: "a".repeat(64),
-        safety_model_identity_sha256: "b".repeat(64),
+        safety_connection_id: "safety-connection".into(),
         safety_connection_revision: 3,
         safety_model_profile_revision: 4,
         safety_prompt_version: crate::content_safety::CONTENT_SAFETY_PROMPT_VERSION.into(),

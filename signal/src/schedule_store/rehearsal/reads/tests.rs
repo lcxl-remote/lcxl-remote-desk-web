@@ -830,8 +830,6 @@ async fn model_sources_fixture(compressed: bool) {
         turn.provider_meta.data_envelope = Some(output);
         let provenance = CompressorProvenanceV1::for_call(
             &context,
-            "a".repeat(64),
-            "b".repeat(64),
             1,
             format!("{:x}", Sha256::digest(b"source-compression")),
             "2026-09-07T00:00:00Z",

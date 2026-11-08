@@ -62,9 +62,9 @@ pub struct ContextCheckpointV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompressorProvenanceV1 {
+    /// Binds protocol, connection, endpoint and model; the revisions below
+    /// change whenever the endpoint or model profile changes.
     pub source_context_key: String,
-    pub provider_identity_sha256: String,
-    pub model_identity_sha256: String,
     pub connection_revision: u64,
     pub model_profile_revision: i64,
     pub prompt_version: String,
@@ -77,8 +77,6 @@ pub struct CompressorProvenanceV1 {
 impl CompressorProvenanceV1 {
     pub fn for_call(
         policy: &PinnedContextPolicy,
-        provider_identity_sha256: String,
-        model_identity_sha256: String,
         connection_revision: u64,
         provider_call_key: String,
         created_at: &str,
@@ -86,8 +84,6 @@ impl CompressorProvenanceV1 {
     ) -> Self {
         Self {
             source_context_key: policy.source_context_key.as_str().into(),
-            provider_identity_sha256,
-            model_identity_sha256,
             connection_revision,
             model_profile_revision: policy.profile_revision,
             prompt_version: CONTEXT_SUMMARY_PROMPT_VERSION.into(),
@@ -1168,9 +1164,7 @@ fn validate_compressor_provenance(
 fn validate_provenance_shape(compressor: &CompressorProvenanceV1) -> Result<(), ModelContextError> {
     let is_sha256 =
         |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
-    if !is_sha256(&compressor.provider_identity_sha256)
-        || !is_sha256(&compressor.model_identity_sha256)
-        || !is_sha256(&compressor.provider_call_key)
+    if !is_sha256(&compressor.provider_call_key)
         || compressor.connection_revision == 0
         || compressor.model_profile_revision < 1
         || compressor.created_at.trim().is_empty()
@@ -1454,8 +1448,6 @@ mod tests {
     fn provenance(turn_id: &str) -> CompressorProvenanceV1 {
         CompressorProvenanceV1 {
             source_context_key: source("same").as_str().to_string(),
-            provider_identity_sha256: "a".repeat(64),
-            model_identity_sha256: "b".repeat(64),
             connection_revision: 1,
             model_profile_revision: 1,
             prompt_version: CONTEXT_SUMMARY_PROMPT_VERSION.into(),
@@ -1463,6 +1455,23 @@ mod tests {
             provider_call_key: "c".repeat(64),
             created_at: "2026-08-23T00:00:00Z".into(),
             created_turn_id: turn_id.into(),
+        }
+    }
+
+    #[test]
+    fn compressor_provenance_binds_revisions_without_identity_hashes() {
+        let valid = provenance("turn");
+        assert!(validate_provenance_shape(&valid).is_ok());
+        let encoded = serde_json::to_value(&valid).unwrap();
+        assert!(encoded.get("provider_identity_sha256").is_none());
+        assert!(encoded.get("model_identity_sha256").is_none());
+        for case in 0..2 {
+            let mut invalid = valid.clone();
+            match case {
+                0 => invalid.connection_revision = 0,
+                _ => invalid.model_profile_revision = 0,
+            }
+            assert!(validate_provenance_shape(&invalid).is_err(), "case {case}");
         }
     }
 

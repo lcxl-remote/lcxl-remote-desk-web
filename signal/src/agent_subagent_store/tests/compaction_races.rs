@@ -72,8 +72,6 @@ pub(super) fn plan(session: &PersistedAgentSession) -> (CompressionPlan, Validat
     let raw = serde_json::json!({"reported_observations":[{"text":"Synthetic historical padding was recorded.","source_message_ids":["old-history-0"]}]}).to_string();
     let provenance = CompressorProvenanceV1::for_call(
         &policy,
-        "a".repeat(64),
-        "b".repeat(64),
         1,
         "c".repeat(64),
         &chrono::Utc::now().to_rfc3339(),

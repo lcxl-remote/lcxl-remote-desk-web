@@ -370,11 +370,12 @@ pub struct ContextCompressionAuditContext {
 }
 
 /// Credential-free identity of the independently frozen content-safety
-/// receiver. This is absent when content safety is disabled for the turn.
+/// receiver: ids plus the revisions that change whenever the endpoint or model
+/// changes. This is absent when content safety is disabled for the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextCompressionSafetyAuditContext {
-    pub provider_identity_sha256: String,
-    pub model_identity_sha256: String,
+    pub connection_id: String,
+    pub model_id: String,
     pub connection_revision: i64,
     pub model_profile_revision: i64,
     pub policy_revision: u64,

@@ -146,8 +146,6 @@ impl ModelSeam for RebuildingModel<'_> {
         .unwrap();
         Ok(crate::model_context::CompressorProvenanceV1::for_call(
             &policy,
-            "a".repeat(64),
-            "b".repeat(64),
             1,
             format!("{:064x}", self.requests.borrow().len()),
             created_at,

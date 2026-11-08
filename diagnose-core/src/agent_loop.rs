@@ -222,8 +222,8 @@ fn compression_audit_context(
         ContentSafetyMode::Disabled => None,
         ContentSafetyMode::Enforced { context, .. } => {
             Some(crate::seam::ContextCompressionSafetyAuditContext {
-                provider_identity_sha256: context.safety_provider_identity_sha256.clone(),
-                model_identity_sha256: context.safety_model_identity_sha256.clone(),
+                connection_id: context.safety_connection_id.clone(),
+                model_id: context.safety_model_id.clone(),
                 connection_revision: context.safety_connection_revision,
                 model_profile_revision: context.safety_model_profile_revision,
                 policy_revision: context.policy_revision,

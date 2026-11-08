@@ -1070,8 +1070,6 @@ impl ModelSeam for SignalModelSeam {
         Ok(
             desk_diagnose_core::model_context::CompressorProvenanceV1::for_call(
                 policy,
-                format!("{:x}", Sha256::digest(self.base_url.as_bytes())),
-                format!("{:x}", Sha256::digest(self.model.as_bytes())),
                 self.connection_revision,
                 format!("{:x}", Sha256::digest(key.as_bytes())),
                 created_at,

@@ -293,8 +293,6 @@ fn plan(conversation: &[ChatMessage], state: &ModelContextState) -> CompressionP
 fn provenance() -> CompressorProvenanceV1 {
     CompressorProvenanceV1 {
         source_context_key: context_policy().source_context_key.as_str().into(),
-        provider_identity_sha256: "a".repeat(64),
-        model_identity_sha256: "b".repeat(64),
         connection_revision: 1,
         model_profile_revision: 1,
         prompt_version: CONTEXT_SUMMARY_PROMPT_VERSION.into(),

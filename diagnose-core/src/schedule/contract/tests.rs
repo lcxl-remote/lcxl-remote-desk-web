@@ -1526,8 +1526,6 @@ fn compressed_answer_preserves_original_read_scope() {
     );
     let provenance = CompressorProvenanceV1::for_call(
         &context,
-        "a".repeat(64),
-        "b".repeat(64),
         1,
         "c".repeat(64),
         "2026-09-07T00:00:00Z",
