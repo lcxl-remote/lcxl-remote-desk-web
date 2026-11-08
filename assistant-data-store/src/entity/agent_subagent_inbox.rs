@@ -11,8 +11,6 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub event_id: String,
-    #[sea_orm(unique)]
-    pub dedup_key_sha256: String,
     #[sea_orm(indexed)]
     pub root_conversation_id: String,
     #[sea_orm(indexed)]

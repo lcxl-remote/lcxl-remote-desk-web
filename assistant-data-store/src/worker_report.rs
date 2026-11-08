@@ -19,7 +19,6 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect, Set,
 };
-use sha2::{Digest, Sha256};
 
 fn invalid() -> DbErr {
     DbErr::Custom("invalid delegated worker report".into())
@@ -529,17 +528,16 @@ pub async fn append_report_on<C: ConnectionTrait>(
         content,
         receipt_refs,
     } = submission;
-    let key = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&("worker-report", &run.binding.task_id, generation, origin))
-                .map_err(|_| invalid())?
-        )
+    // The unique event id is the report identity, so a retried submission
+    // finds its original report on every instance.
+    let report_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::WorkerReport,
+        &(&run.binding.task_id, generation, origin),
     );
     let query = report_rows(run);
     if let Some(row) = query
         .clone()
-        .filter(inbox::Column::DedupKeySha256.eq(&key))
+        .filter(inbox::Column::EventId.eq(&report_id))
         .one(txn)
         .await?
     {
@@ -558,7 +556,6 @@ pub async fn append_report_on<C: ConnectionTrait>(
         .await?
         .unwrap_or(0);
     let seq = previous.checked_add(1).ok_or_else(invalid)?;
-    let report_id = format!("worker-report-{key}");
     let question_id = (content.kind == ReportKind::NeedsInput).then(|| report_id.clone());
     let report = WorkerReport {
         report_id,
@@ -584,7 +581,6 @@ pub async fn append_report_on<C: ConnectionTrait>(
         .map_err(|_| invalid())?;
     inbox::ActiveModel {
         event_id: Set(stored.report.report_id.clone()),
-        dedup_key_sha256: Set(key),
         root_conversation_id: Set(run.binding.root_conversation_id.clone()),
         group_id: Set(run.binding.group_id.clone()),
         task_id: Set(run.binding.task_id.clone()),

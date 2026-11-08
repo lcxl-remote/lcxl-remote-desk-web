@@ -340,14 +340,13 @@ async fn root_wait_scan_skips_unreadable_active_and_duplicate_parents_without_lo
         let mut hint: group_row::ActiveModel = original.clone().into();
         hint.id = sea_orm::NotSet;
         hint.group_id = Set(name.into());
-        hint.source_key_sha256 = Set(name.into());
         hint.root_conversation_id = Set(root.into());
         hint.actor_id = Set(actor.into());
         hint.insert(&db).await.unwrap();
         let mut child: run_row::ActiveModel = original_child.clone().into();
         child.id = sea_orm::NotSet;
         child.task_id = Set(format!("hint-{name}"));
-        child.creation_key_sha256 = Set(format!("hint-key-{name}"));
+        child.origin_ref = Set(format!("hint-key-{name}"));
         child.child_conversation_id = Set(format!("hint-child-{name}"));
         child.group_id = Set(name.into());
         child.insert(&db).await.unwrap();

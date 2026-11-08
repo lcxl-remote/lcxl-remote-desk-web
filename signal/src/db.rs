@@ -579,6 +579,16 @@ async fn create_subagent_indexes<C: ConnectionTrait + crate::config::ConfigConne
             .to_owned(),
         Index::create()
             .if_not_exists()
+            .unique()
+            .name("uq_subagent_creation_origin")
+            .table(run::Entity)
+            .col(run::Column::RootConversationId)
+            .col(run::Column::GroupId)
+            .col(run::Column::OriginKind)
+            .col(run::Column::OriginRef)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
             .name("idx_subagent_inbox_pending")
             .table(inbox::Entity)
             .col(inbox::Column::RootConversationId)

@@ -71,6 +71,49 @@ pub struct AcceptedOwnerSource<'a> {
     pub main_request_id: Option<&'a str>,
 }
 
+/// Server-owned origin of one delegated task creation. An idempotent retry
+/// derives the same child conversation, task and default worker identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreationOrigin<'a> {
+    pub kind: &'static str,
+    pub root_conversation_id: &'a str,
+    pub group_id: &'a str,
+    pub actor_id: &'a str,
+    pub device_id: &'a str,
+    pub intent: &'a str,
+}
+
+impl CreationOrigin<'_> {
+    pub const NATIVE_TOOL: &'static str = "subagent_creation";
+    pub const FIRST_DISPATCH: &'static str = "workbench_first_dispatch";
+
+    fn id(&self, kind: crate::native_ids::Kind) -> String {
+        crate::native_ids::stable(
+            kind,
+            &(
+                self.kind,
+                self.root_conversation_id,
+                self.group_id,
+                self.actor_id,
+                self.device_id,
+                self.intent,
+            ),
+        )
+    }
+
+    pub fn child_conversation_id(&self) -> String {
+        self.id(crate::native_ids::Kind::ChildConversation)
+    }
+
+    pub fn task_id(&self) -> String {
+        self.id(crate::native_ids::Kind::Task)
+    }
+
+    pub fn default_worker_id(&self) -> String {
+        self.id(crate::native_ids::Kind::Worker)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskCreationEnvelope {
@@ -607,23 +650,21 @@ impl CreationEnvelope {
             .collect()
     }
 
-    pub fn source_key(&self) -> Result<String, AgentError> {
+    /// The group id is the unique identity of this delegation source, so a
+    /// concurrent initialization on any instance converges on one group.
+    pub fn group_id(&self) -> Result<String, AgentError> {
         self.validate()?;
-        Ok(format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    "delegation_source",
-                    &self.root_conversation_id,
-                    &self.actor_id,
-                    &self.device_id,
-                    &self.source,
-                    &self.main_request_id,
-                    self.parent_input_revision,
-                    self.parent_control_revision,
-                ))
-                .map_err(|_| super::invalid("invalid delegation source identity"))?
-            )
+        Ok(crate::native_ids::stable(
+            crate::native_ids::Kind::DelegationGroup,
+            &(
+                &self.root_conversation_id,
+                &self.actor_id,
+                &self.device_id,
+                &self.source,
+                &self.main_request_id,
+                self.parent_input_revision,
+                self.parent_control_revision,
+            ),
         ))
     }
 
@@ -699,7 +740,7 @@ impl CreationEnvelope {
             return Err(super::invalid("delegation source expired"));
         }
         let group = DelegationGroup {
-            group_id: format!("dg-{}", self.source_key()?),
+            group_id: self.group_id()?,
             root_conversation_id: self.root_conversation_id.clone(),
             actor_id: self.actor_id.clone(),
             device_id: self.device_id.clone(),

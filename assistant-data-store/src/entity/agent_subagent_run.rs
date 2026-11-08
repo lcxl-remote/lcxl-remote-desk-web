@@ -24,8 +24,11 @@ pub struct Model {
     pub group_id: String,
     pub actor_id: String,
     pub device_id: String,
-    #[sea_orm(unique)]
-    pub creation_key_sha256: String,
+    /// With the root conversation and group, uniquely identifies the creation
+    /// (`subagent_creation` + model call id, or `workbench_first_dispatch` +
+    /// request id).
+    pub origin_kind: String,
+    pub origin_ref: String,
     pub creation_arguments_sha256: String,
     pub creation_envelope_json: String,
     #[sea_orm(indexed)]

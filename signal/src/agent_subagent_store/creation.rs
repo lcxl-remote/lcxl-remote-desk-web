@@ -6,7 +6,7 @@ use desk_diagnose_core::{
     session::TriggerOrigin,
     subagent::{
         DelegatedTaskBinding,
-        creation::{TaskCreationEnvelope, first_dispatch_context, task_context},
+        creation::{CreationOrigin, TaskCreationEnvelope, first_dispatch_context, task_context},
         tools::{self, Operation, SpawnRequest},
     },
 };
@@ -151,13 +151,11 @@ async fn worker_exists_on(
     .is_some())
 }
 
-fn requested_worker_id(request: &SpawnRequest, creation_key: &str) -> String {
-    request.worker_id.clone().unwrap_or_else(|| {
-        desk_diagnose_core::native_ids::stable(
-            desk_diagnose_core::native_ids::Kind::Worker,
-            &creation_key,
-        )
-    })
+fn requested_worker_id(request: &SpawnRequest, origin: &CreationOrigin<'_>) -> String {
+    request
+        .worker_id
+        .clone()
+        .unwrap_or_else(|| origin.default_worker_id())
 }
 
 async fn create_request_on(
@@ -168,39 +166,27 @@ async fn create_request_on(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AiAssistantSubAgentSummary, DbErr> {
     let (kind, intent) = match origin {
-        SpawnOrigin::NativeTool(call) => ("subagent_creation", call.id.as_str()),
-        SpawnOrigin::FirstDispatch(request_id) => ("workbench_first_dispatch", request_id),
+        SpawnOrigin::NativeTool(call) => (CreationOrigin::NATIVE_TOOL, call.id.as_str()),
+        SpawnOrigin::FirstDispatch(request_id) => (CreationOrigin::FIRST_DISPATCH, request_id),
     };
     let group_id = held
         .delegation_group_id
         .as_deref()
         .ok_or_else(|| invalid())?;
-    let creation_key = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                kind,
-                &held.conversation_id,
-                group_id,
-                &held.actor_id,
-                &held.device_id,
-                intent,
-            ))
-            .map_err(|_| invalid())?
-        )
-    );
+    let creation_origin = CreationOrigin {
+        kind,
+        root_conversation_id: &held.conversation_id,
+        group_id,
+        actor_id: &held.actor_id,
+        device_id: &held.device_id,
+        intent,
+    };
     let arguments_sha256 = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(request).map_err(|_| invalid())?)
     );
-    let child_id = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::ChildConversation,
-        &creation_key,
-    );
-    let task_id = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::Task,
-        &creation_key,
-    );
+    let child_id = creation_origin.child_conversation_id();
+    let task_id = creation_origin.task_id();
     let original_row = desk_diagnose_core::future::boxed(|| async {
         group_row::Entity::find()
             .filter(group_row::Column::GroupId.eq(group_id))
@@ -225,7 +211,10 @@ async fn create_request_on(
     .await?;
     if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
         run_row::Entity::find()
-            .filter(run_row::Column::CreationKeySha256.eq(&creation_key))
+            .filter(run_row::Column::RootConversationId.eq(&held.conversation_id))
+            .filter(run_row::Column::GroupId.eq(group_id))
+            .filter(run_row::Column::OriginKind.eq(kind))
+            .filter(run_row::Column::OriginRef.eq(intent))
             .one(txn)
             .await
     })
@@ -236,7 +225,7 @@ async fn create_request_on(
             || run.binding.task_id != task_id
             || run.child_conversation_id != child_id
             || (held.agent_role.issue_source().is_none()
-                && run.worker_id != requested_worker_id(request, &creation_key))
+                && run.worker_id != requested_worker_id(request, &creation_origin))
             || run.binding.group_id != group_id
             || run.binding.root_conversation_id != held.conversation_id
             || run.actor_id != held.actor_id
@@ -274,7 +263,7 @@ async fn create_request_on(
     };
     let worker_id = preferred
         .clone()
-        .unwrap_or_else(|| requested_worker_id(request, &creation_key));
+        .unwrap_or_else(|| requested_worker_id(request, &creation_origin));
     if matches!(origin, SpawnOrigin::NativeTool(_))
         && preferred.is_none()
         && let Some(worker_id) = &request.worker_id
@@ -448,7 +437,8 @@ async fn create_request_on(
             group_id: Set(group.group_id.clone()),
             actor_id: Set(held.actor_id.clone()),
             device_id: Set(held.device_id.clone()),
-            creation_key_sha256: Set(creation_key),
+            origin_kind: Set(kind.into()),
+            origin_ref: Set(intent.into()),
             creation_arguments_sha256: Set(arguments_sha256),
             creation_envelope_json: Set(serde_json::to_string(&context).map_err(|_| invalid())?),
             state: Set(run.state.as_str().into()),

@@ -1834,7 +1834,7 @@ fn timer_delegation_uses_its_frozen_target_and_preserves_owner_group_and_lineage
     assert_eq!(timer.targets, std::slice::from_ref(&target));
     assert_eq!(timer.owner_requirement, owner.owner_requirement);
     assert_eq!(timer.model_destination, owner.model_destination);
-    assert_ne!(timer.source_key().unwrap(), owner.source_key().unwrap());
+    assert_ne!(timer.group_id().unwrap(), owner.group_id().unwrap());
     assert_eq!(timer.select_targets(&["a".into()]).unwrap(), [target]);
     assert!(timer.select_targets(&["b".into()]).is_err());
     crate::ai_assistant::scheduled_retrieval::restore_owner_retrieval(&mut parent).unwrap();

@@ -666,7 +666,7 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         scheduled_policy().destination,
     )
     .unwrap();
-    session.delegation_group_id = Some(format!("dg-{}", creation.source_key().unwrap()));
+    session.delegation_group_id = Some(creation.group_id().unwrap());
     session.conversation[0] = creation.owner_requirement.clone();
     session.version = 2;
     let mut deps = deps(&mem, &model_seam, &tools, &[], &clock);

@@ -3,7 +3,6 @@ use super::*;
 use desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentEvent;
 use desk_diagnose_core::subagent::control::synchronize_session;
 use sea_orm::sea_query::OnConflict;
-use sha2::{Digest, Sha256};
 
 pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
@@ -123,18 +122,16 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
     {
         return Err(invalid());
     }
-    let key = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                &group.root_conversation_id,
-                &run.binding.task_id,
-                run.state_revision,
-            ))
-            .map_err(|_| invalid())?
-        )
+    // One immutable event per task-state revision; the unique event id is
+    // its identity on every instance.
+    let event_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::SubagentEvent,
+        &(
+            &group.root_conversation_id,
+            &run.binding.task_id,
+            run.state_revision,
+        ),
     );
-    let event_id = format!("subagent-event-{key}");
     let event = AiAssistantSubAgentEvent {
         event_id: event_id.clone(),
         task: run.summary(),
@@ -146,8 +143,7 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
     };
     let event_json = serde_json::to_string(&event).map_err(|_| invalid())?;
     inbox::Entity::insert(inbox::ActiveModel {
-        event_id: Set(event_id),
-        dedup_key_sha256: Set(key.clone()),
+        event_id: Set(event_id.clone()),
         root_conversation_id: Set(group.root_conversation_id.clone()),
         group_id: Set(group.group_id.clone()),
         task_id: Set(run.binding.task_id.clone()),
@@ -172,7 +168,7 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
         ..Default::default()
     })
     .on_conflict(
-        OnConflict::column(inbox::Column::DedupKeySha256)
+        OnConflict::column(inbox::Column::EventId)
             .do_nothing()
             .to_owned(),
     )
@@ -180,7 +176,7 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
     .exec(db)
     .await?;
     let persisted = inbox::Entity::find()
-        .filter(inbox::Column::DedupKeySha256.eq(&key))
+        .filter(inbox::Column::EventId.eq(&event_id))
         .one(db)
         .await?
         .ok_or_else(|| invalid())?;

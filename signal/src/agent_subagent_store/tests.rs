@@ -694,7 +694,6 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     };
     group_row::ActiveModel {
         group_id: Set(group_id.into()),
-        source_key_sha256: Set(source.source_key().unwrap()),
         root_conversation_id: Set("root".into()),
         actor_id: Set("1".into()),
         device_id: Set("1".into()),
@@ -752,7 +751,8 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         group_id: Set(group_id.into()),
         actor_id: Set("1".into()),
         device_id: Set("1".into()),
-        creation_key_sha256: Set(format!("creation-{task_id}")),
+        origin_kind: Set("subagent_creation".into()),
+        origin_ref: Set(format!("creation-{task_id}")),
         creation_arguments_sha256: Set("arguments".into()),
         creation_envelope_json: Set(serde_json::to_string(&context).unwrap()),
         state: Set(run.state.as_str().into()),
@@ -985,4 +985,53 @@ async fn seed_unreadable_session(db: &DatabaseConnection) -> session_row::Model 
     let stored = row.insert(db).await.unwrap();
     assert!(PersistedAgentSession::decode_json(&stored.state_json).is_err());
     stored
+}
+
+fn creation_origin_row(task: &str, group: &str, kind: &str, origin: &str) -> run_row::ActiveModel {
+    run_row::ActiveModel {
+        task_id: Set(task.into()),
+        child_conversation_id: Set(format!("child-{task}")),
+        worker_id: Set("worker".into()),
+        root_conversation_id: Set("root".into()),
+        group_id: Set(group.into()),
+        actor_id: Set("1".into()),
+        device_id: Set("1".into()),
+        origin_kind: Set(kind.into()),
+        origin_ref: Set(origin.into()),
+        creation_arguments_sha256: Set("arguments".into()),
+        creation_envelope_json: Set("{}".into()),
+        state: Set("queued".into()),
+        input_revision: Set(1),
+        control_revision: Set(1),
+        source_epoch: Set(1),
+        state_revision: Set(1),
+        state_json: Set("{}".into()),
+        deadline_ms: Set(10_000),
+        created_at: Set(1),
+        updated_at: Set(1),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn creation_origin_is_unique_per_root_group_and_kind() {
+    let db = database().await;
+    creation_origin_row("a", "group-1", "subagent_creation", "call-1")
+        .insert(&db)
+        .await
+        .unwrap();
+    assert!(
+        creation_origin_row("b", "group-1", "subagent_creation", "call-1")
+            .insert(&db)
+            .await
+            .is_err()
+    );
+    creation_origin_row("c", "group-2", "subagent_creation", "call-1")
+        .insert(&db)
+        .await
+        .unwrap();
+    creation_origin_row("d", "group-1", "workbench_first_dispatch", "call-1")
+        .insert(&db)
+        .await
+        .unwrap();
 }

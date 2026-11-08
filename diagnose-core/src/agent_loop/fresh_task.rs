@@ -26,8 +26,7 @@ fn validate_source_context(
         || source.parent_input_revision != session.input_revision
         || source.parent_control_revision > session.control_revision
         || source.model_destination != *destination
-        || session.delegation_group_id.as_deref()
-            != Some(format!("dg-{}", source.source_key()?).as_str())
+        || session.delegation_group_id.as_deref() != Some(source.group_id()?.as_str())
         || session.conversation.first() != Some(&source.owner_requirement)
     {
         return Err(crate::subagent::invalid("published source context changed"));

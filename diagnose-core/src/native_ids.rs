@@ -40,6 +40,9 @@ pub enum Kind {
     IssueAdmission,
     IssueComment,
     IssueWork,
+    SubagentEvent,
+    WorkerReport,
+    DelegationGroup,
 }
 
 impl Kind {
@@ -79,6 +82,9 @@ impl Kind {
             Self::IssueAdmission => "admission",
             Self::IssueComment => "comment",
             Self::IssueWork => "issue-work",
+            Self::SubagentEvent => "sev",
+            Self::WorkerReport => "wr",
+            Self::DelegationGroup => "dg",
         }
     }
 }

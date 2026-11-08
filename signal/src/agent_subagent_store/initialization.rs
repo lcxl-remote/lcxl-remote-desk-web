@@ -24,7 +24,7 @@ pub(crate) fn decode_creation(row: &group_row::Model) -> Result<CreationEnvelope
         || creation.source != group.source
         || creation.parent_input_revision != group.parent_input_revision
         || creation.parent_control_revision > group.parent_control_revision
-        || creation.source_key().map_err(|_| invalid())? != row.source_key_sha256
+        || creation.group_id().map_err(|_| invalid())? != row.group_id
         || creation.model_destination != model
     {
         return Err(invalid());
@@ -181,9 +181,9 @@ async fn persist_source_group_inner(
             DbErr::Custom(format!("initialize delegation group: {}", error.message))
         })
     };
-    let key = creation.source_key().map_err(|_| invalid())?;
+    let group_id = creation.group_id().map_err(|_| invalid())?;
     if let Some(existing) = group_row::Entity::find()
-        .filter(group_row::Column::SourceKeySha256.eq(&key))
+        .filter(group_row::Column::GroupId.eq(&group_id))
         .one(db)
         .await?
     {
@@ -218,7 +218,6 @@ async fn persist_source_group_inner(
     };
     group_row::ActiveModel {
         group_id: Set(group.group_id.clone()),
-        source_key_sha256: Set(key),
         root_conversation_id: Set(group.root_conversation_id.clone()),
         actor_id: Set(group.actor_id.clone()),
         device_id: Set(group.device_id.clone()),
