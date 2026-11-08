@@ -278,9 +278,12 @@ async fn rehearsal_read_report_observes_uncommitted_evidence_and_preserves_rollb
             .await
             .unwrap();
         assert_eq!(report.reads.len(), 1);
-        assert_eq!(report.session_sha256, original.session_sha256);
+        assert_eq!(
+            (report.session_row_id, report.session_version),
+            (original.session_row_id, original.session_version)
+        );
         let mut changed: rehearsal::ActiveModel = rehearsal.clone().into();
-        changed.completed_session_sha256 = Set(Some("0".repeat(64)));
+        changed.completed_session_row_id = Set(Some(-1));
         changed.update(&txn).await.unwrap();
         assert!(
             ScheduleStore::read_rehearsal_reads_on(&txn, 1, &rehearsal.rehearsal_id)
@@ -295,7 +298,10 @@ async fn rehearsal_read_report_observes_uncommitted_evidence_and_preserves_rollb
         .read_rehearsal_reads(1, &rehearsal.rehearsal_id)
         .await
         .unwrap();
-    assert_eq!(restored.session_sha256, original.session_sha256);
+    assert_eq!(
+        (restored.session_row_id, restored.session_version),
+        (original.session_row_id, original.session_version)
+    );
     assert_eq!(
         restored.reads[0].output_sha256,
         original.reads[0].output_sha256
@@ -869,16 +875,13 @@ async fn model_sources_fixture(compressed: bool) {
     let mut updated: agent_session::ActiveModel = row.into();
     updated.state_json = Set(encoded.clone());
     updated.update(&store.db).await.unwrap();
-    let mut frozen: rehearsal::ActiveModel = rehearsal.clone().into();
-    frozen.completed_session_sha256 = Set(Some(digest(&encoded)));
-    frozen.update(&store.db).await.unwrap();
     let definition = TaskContract {
         schema_version: 1,
         schedule_id: rehearsal.schedule_id.clone(),
         task_revision: rehearsal.task_revision as u64,
         contract_revision: 1,
         target_device_id: rehearsal.target_device_id.clone(),
-        prompt_sha256: rehearsal.prompt_sha256.clone(),
+        prompt_sha256: digest(&rehearsal.prompt),
         permissions: vec![],
         steps: vec![],
         exception_mode: TaskExceptionMode::Deny,

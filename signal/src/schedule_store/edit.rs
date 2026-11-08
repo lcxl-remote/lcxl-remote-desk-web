@@ -265,12 +265,7 @@ impl ScheduleStore {
             patch.prompt_retention_json = Set(if row.kind == "fresh_task" {
                 Some(
                     desk_diagnose_core::future::send_phase(|| {
-                        Self::owner_prompt_retention_on(
-                            &txn,
-                            &prompt_actor,
-                            &row.target_device_id,
-                            prompt,
-                        )
+                        Self::owner_prompt_retention_on(&txn, &prompt_actor, &row.target_device_id)
                     })
                     .await?,
                 )

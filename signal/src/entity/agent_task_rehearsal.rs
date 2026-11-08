@@ -18,7 +18,6 @@ pub struct Model {
     pub target_device_id: String,
     /// Immutable requirement snapshot; later task edits do not rewrite a rehearsal.
     pub prompt: String,
-    pub prompt_sha256: String,
     pub locale: Option<String>,
     pub model_id: Option<i32>,
     #[sea_orm(unique)]
@@ -29,13 +28,15 @@ pub struct Model {
     pub status: String,
     #[sea_orm(unique)]
     pub creation_identity: String,
-    pub creation_payload_sha256: String,
+    /// The schedule row revision the creation request expected.
+    pub expected_revision: i64,
     /// Admission time, not evidence that a tool or model completed.
     pub started_at: Option<i64>,
     /// A frozen reference to the answered session, not a permission approval.
     pub finished_at: Option<i64>,
     pub completed_session_version: Option<i64>,
-    pub completed_session_sha256: Option<String>,
+    /// Session row id; a recreated conversation gets a new row.
+    pub completed_session_row_id: Option<i64>,
     pub answer_message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,

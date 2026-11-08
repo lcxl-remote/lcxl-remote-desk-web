@@ -27,14 +27,15 @@ pub const PUBLISHED_INPUT_TOOL: &str = "scheduled-occurrence-input";
 pub struct TaskPromptRetention {
     pub actor_id: String,
     pub target_device_id: String,
-    pub prompt_sha256: String,
     pub policy: SourceUsePolicy,
     pub dependencies: Vec<HistoryDependency>,
     pub model_source: Option<NativeDerivedInputPolicy>,
 }
 
 impl TaskPromptRetention {
-    pub fn owner(actor: &str, device: &str, prompt: &str, revision: u64) -> Self {
+    /// The retention record is written in the same row update as the prompt
+    /// it describes, so it carries no prompt digest.
+    pub fn owner(actor: &str, device: &str, revision: u64) -> Self {
         let mut policy = owner_text_policy(revision, false);
         // A published requirement is not a new assertion of a stable fact.
         policy.independent_fact_allowed = false;
@@ -42,26 +43,17 @@ impl TaskPromptRetention {
         Self {
             actor_id: actor.into(),
             target_device_id: device.into(),
-            prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())),
             policy,
             dependencies: Vec::new(),
             model_source: None,
         }
     }
 
-    pub fn validate(
-        &self,
-        actor: &str,
-        device: &str,
-        prompt_hash: &str,
-    ) -> Result<(), &'static str> {
+    pub fn validate(&self, actor: &str, device: &str) -> Result<(), &'static str> {
         if self.actor_id != actor
             || self.target_device_id != device
-            || self.prompt_sha256 != prompt_hash
             || actor.is_empty()
             || device.is_empty()
-            || prompt_hash.len() != 64
-            || !prompt_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
             || self.policy.independent_fact_allowed
             || self.dependencies.len() > 128
         {
@@ -75,7 +67,7 @@ impl TaskPromptRetention {
                 return Err("task prompt belongs to another actor");
             }
         } else if !self.dependencies.is_empty()
-            || self.policy != Self::owner(actor, device, "", self.policy.policy_revision).policy
+            || self.policy != Self::owner(actor, device, self.policy.policy_revision).policy
         {
             return Err("owner task prompt changed its original policy");
         }
@@ -200,41 +192,22 @@ mod tests {
     use super::*;
     #[test]
     fn owner_requirement_is_retained_without_becoming_a_stable_fact() {
-        let original = TaskPromptRetention::owner("1", "device", "review a report", 2);
-        original
-            .validate("1", "device", &original.prompt_sha256)
-            .unwrap();
+        let original = TaskPromptRetention::owner("1", "device", 2);
+        original.validate("1", "device").unwrap();
         assert!(original.policy.history_retention_allowed);
         assert!(!original.policy.independent_fact_allowed);
         for changed in ["2", "device"] {
-            assert!(
-                original
-                    .validate(changed, "device", &original.prompt_sha256)
-                    .is_err()
-            );
+            assert!(original.validate(changed, "device").is_err());
         }
-        assert!(
-            original
-                .validate("1", "another-device", &original.prompt_sha256)
-                .is_err()
-        );
-        assert!(original.validate("1", "device", &"a".repeat(64)).is_err());
+        assert!(original.validate("1", "another-device").is_err());
         let mut forged = original.clone();
         forged.policy.independent_fact_allowed = true;
         forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
-        assert!(
-            forged
-                .validate("1", "device", &original.prompt_sha256)
-                .is_err()
-        );
+        assert!(forged.validate("1", "device").is_err());
         let mut forged = original.clone();
         forged.policy.content_hard_expires_at_unix_ms = Some(10);
         forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
-        assert!(
-            forged
-                .validate("1", "device", &original.prompt_sha256)
-                .is_err()
-        );
+        assert!(forged.validate("1", "device").is_err());
     }
 
     #[test]

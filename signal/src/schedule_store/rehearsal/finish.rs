@@ -59,7 +59,6 @@ impl ScheduleStore {
             || Some(row.lease_token) != i64::try_from(session.lease_token).ok()
             || row.lease_deadline.is_some()
             || original.started_at.is_none()
-            || original.prompt_sha256 != digest(&original.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -75,10 +74,9 @@ impl ScheduleStore {
         };
         let message =
             answered_message(&session, &source, answer).ok_or(ScheduleStoreError::Conflict)?;
-        let snapshot = digest(&row.state_json);
         if original.status == "completed" {
             return if original.completed_session_version == Some(row.version)
-                && original.completed_session_sha256.as_deref() == Some(snapshot.as_str())
+                && original.completed_session_row_id == Some(row.id)
                 && original.answer_message_id.as_deref() == Some(message.message_id.as_str())
                 && original.finished_at.is_some()
             {
@@ -156,7 +154,7 @@ impl ScheduleStore {
                 status: Set("completed".into()),
                 finished_at: Set(Some(now)),
                 completed_session_version: Set(Some(row.version)),
-                completed_session_sha256: Set(Some(snapshot)),
+                completed_session_row_id: Set(Some(row.id)),
                 answer_message_id: Set(Some(message.message_id.clone())),
                 updated_at: Set(now),
                 ..Default::default()

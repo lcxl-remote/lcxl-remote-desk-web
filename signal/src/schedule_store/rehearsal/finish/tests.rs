@@ -161,10 +161,7 @@ async fn answered_rehearsal_freezes_original_snapshot_without_granting_authority
         .unwrap();
     assert_eq!(completed.status, "completed");
     assert_eq!(completed.completed_session_version, Some(row.version));
-    assert_eq!(
-        completed.completed_session_sha256,
-        Some(digest(&row.state_json))
-    );
+    assert_eq!(completed.completed_session_row_id, Some(row.id));
     assert_eq!(completed.answer_message_id.as_deref(), Some("answer"));
     assert!(completed.finished_at >= completed.started_at);
     let task = store.read(1, &started.schedule_id).await.unwrap();

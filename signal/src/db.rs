@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 52;
+const SIGNAL_SCHEMA_VERSION: i32 = 53;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 

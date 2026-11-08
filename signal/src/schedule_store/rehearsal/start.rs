@@ -32,7 +32,6 @@ impl ScheduleStore {
             || task.task_revision != row.task_revision
             || task.target_device_id != row.target_device_id
             || task.prompt != row.prompt
-            || digest(&row.prompt) != row.prompt_sha256
             || task.model_id != row.model_id
             || task.locale != row.locale
             || !row.client_conversation_id.starts_with("rehearsal_")

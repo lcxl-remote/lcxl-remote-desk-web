@@ -282,12 +282,7 @@ impl ScheduleStore {
         {
             Some(
                 desk_diagnose_core::future::send_phase(|| {
-                    Self::owner_prompt_retention_on(
-                        db,
-                        &prompt_actor,
-                        &request.target_device_id,
-                        &request.prompt,
-                    )
+                    Self::owner_prompt_retention_on(db, &prompt_actor, &request.target_device_id)
                 })
                 .await?,
             )

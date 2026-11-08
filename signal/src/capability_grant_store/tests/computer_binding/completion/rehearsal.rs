@@ -152,6 +152,7 @@ async fn report_fixture_with_aliases(read: bool, aliased: bool) {
         .unwrap()
         .unwrap();
     let state = session.encode_json_for_storage().unwrap();
+    let session_row_id = row.id;
     let mut frozen: agent_session::ActiveModel = row.into();
     frozen.state_json = Set(state.clone());
     frozen.update(db).await.unwrap();
@@ -164,18 +165,17 @@ async fn report_fixture_with_aliases(read: bool, aliased: bool) {
         task_revision: Set(task.task_revision),
         target_device_id: Set(task.target_device_id.clone()),
         prompt: Set(task.prompt.clone()),
-        prompt_sha256: Set(format!("{:x}", Sha256::digest(task.prompt.as_bytes()))),
         locale: Set(None),
         model_id: Set(None),
         client_conversation_id: Set("rehearsal-client".into()),
         conversation_id: Set(session.conversation_id.clone()),
         status: Set("completed".into()),
         creation_identity: Set("observation-creation".into()),
-        creation_payload_sha256: Set("a".repeat(64)),
+        expected_revision: Set(1),
         started_at: Set(Some(original.created_at.timestamp_millis())),
         finished_at: Set(Some(finished)),
         completed_session_version: Set(Some(session.version)),
-        completed_session_sha256: Set(Some(format!("{:x}", Sha256::digest(state.as_bytes())))),
+        completed_session_row_id: Set(Some(session_row_id)),
         answer_message_id: Set(Some("answer".into())),
         created_at: Set(original.created_at.timestamp_millis()),
         updated_at: Set(finished),
@@ -388,8 +388,11 @@ async fn report_fixture_with_aliases(read: bool, aliased: bool) {
         .await
         .unwrap()
         .unwrap();
+    // A later save advances the session version under CAS.
+    let version = row.version;
     let mut changed: agent_session::ActiveModel = row.into();
     changed.state_json = Set(format!("{state} "));
+    changed.version = Set(version + 1);
     changed.update(&txn).await.unwrap();
     assert!(
         ScheduleStore::read_rehearsal_actions_on(&txn, 1, &rehearsal.rehearsal_id)

@@ -23,7 +23,6 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let identity = digest(&json(&(owner, client_key))?);
-        let payload = digest(&json(&(schedule_id, expected_revision))?);
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let existing = rehearsal::Entity::find()
             .filter(rehearsal::Column::OwnerUserId.eq(owner))
@@ -31,7 +30,9 @@ impl ScheduleStore {
             .one(&txn)
             .await?;
         if let Some(existing) = existing {
-            if existing.creation_payload_sha256 != payload {
+            if existing.schedule_id != schedule_id
+                || existing.expected_revision != expected_revision
+            {
                 return Err(ScheduleStoreError::Conflict);
             }
             // Idempotent reads cannot restart an old rehearsal or restore a task.
@@ -109,7 +110,6 @@ impl ScheduleStore {
             owner_user_id: Set(owner),
             task_revision: Set(task.task_revision),
             target_device_id: Set(task.target_device_id),
-            prompt_sha256: Set(digest(&task.prompt)),
             prompt: Set(task.prompt),
             locale: Set(task.locale),
             model_id: Set(task.model_id),
@@ -117,7 +117,7 @@ impl ScheduleStore {
             conversation_id: Set(conversation_id),
             status: Set("pending".into()),
             creation_identity: Set(identity),
-            creation_payload_sha256: Set(payload),
+            expected_revision: Set(expected_revision),
             created_at: Set(now),
             updated_at: Set(now),
             ..Default::default()

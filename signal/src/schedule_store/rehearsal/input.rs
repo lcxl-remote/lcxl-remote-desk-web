@@ -54,7 +54,7 @@ pub(crate) async fn validate_rehearsal_input_on(
     if current.status != "running"
         || current.started_at.is_none()
         || current.conversation_id != row.conversation_id
-        || current.prompt_sha256 != digest(&message.text)
+        || current.prompt != message.text
     {
         return Err(ScheduleStoreError::Conflict);
     }

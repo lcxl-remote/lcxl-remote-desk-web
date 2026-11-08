@@ -62,9 +62,8 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::NotFound)?;
         let session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let snapshot = digest(&row.state_json);
         if source.status != "completed"
-            || source.completed_session_sha256.as_deref() != Some(snapshot.as_str())
+            || source.completed_session_row_id != Some(row.id)
             || source.completed_session_version != Some(row.version)
             || session.version != row.version
             || row.actor_id != owner.to_string()
@@ -90,7 +89,8 @@ impl ScheduleStore {
             .await?;
         let mut report = RehearsalReadReport {
             rehearsal_id: source.rehearsal_id,
-            session_sha256: snapshot,
+            session_row_id: row.id,
+            session_version: row.version,
             reads: Vec::new(),
             unconfirmed_read_call_ids: Vec::new(),
             other_tool_call_ids: Vec::new(),

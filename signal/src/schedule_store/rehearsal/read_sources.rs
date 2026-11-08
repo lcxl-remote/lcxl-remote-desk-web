@@ -31,7 +31,7 @@ impl ScheduleStore {
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if digest(&row.state_json) != report.session_sha256 {
+        if (row.id, row.version) != (report.session_row_id, report.session_version) {
             return Err(ScheduleStoreError::Conflict);
         }
         let session = PersistedAgentSession::decode_json(&row.state_json)
@@ -119,8 +119,7 @@ impl ScheduleStore {
             || task.task_revision != source.task_revision
             || definition.target_device_id != source.target_device_id
             || task.target_device_id != source.target_device_id
-            || definition.prompt_sha256 != source.prompt_sha256
-            || digest(&source.prompt) != source.prompt_sha256
+            || definition.prompt_sha256 != digest(&source.prompt)
             || task.prompt != source.prompt
         {
             return Err(ScheduleStoreError::Conflict);
@@ -130,7 +129,7 @@ impl ScheduleStore {
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if source.completed_session_sha256.as_deref() != Some(digest(&row.state_json).as_str())
+        if source.completed_session_row_id != Some(row.id)
             || source.completed_session_version != Some(row.version)
         {
             return Err(ScheduleStoreError::Conflict);
@@ -138,7 +137,7 @@ impl ScheduleStore {
         let session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let actions = Self::read_rehearsal_actions_on(txn, owner, rehearsal_id).await?;
-        if actions.session_sha256 != digest(&row.state_json)
+        if (actions.session_row_id, actions.session_version) != (row.id, row.version)
             || !actions.unconfirmed_tool_call_ids.is_empty()
         {
             return Err(ScheduleStoreError::Conflict);

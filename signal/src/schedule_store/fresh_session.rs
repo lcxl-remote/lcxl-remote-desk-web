@@ -14,7 +14,6 @@ impl ScheduleStore {
         db: &DatabaseTransaction,
         actor: &str,
         device: &str,
-        prompt: &str,
     ) -> Result<String, ScheduleStoreError> {
         let policy = {
             use crate::config::ConfigConnection;
@@ -23,11 +22,10 @@ impl ScheduleStore {
         let proof = desk_diagnose_core::schedule::published_input::TaskPromptRetention::owner(
             actor,
             device,
-            prompt,
             policy.revision,
         );
         proof
-            .validate(actor, device, &super::digest(prompt))
+            .validate(actor, device)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         super::json(&proof)
     }
@@ -63,12 +61,11 @@ impl ScheduleStore {
                 .map_err(data::AssistantStoreError::Invalid)?;
             let dependencies = Vec::new();
             let proof = desk_diagnose_core::schedule::published_input::TaskPromptRetention {
-                actor_id: session.actor_id.clone(), target_device_id: task.target_device_id.clone(),
-                prompt_sha256: super::digest(&task.prompt), policy: source_policy, dependencies,
+                actor_id: session.actor_id.clone(), target_device_id: task.target_device_id.clone(), policy: source_policy, dependencies,
                 model_source: Some(desk_diagnose_core::ai_assistant::source_registry::NativeDerivedInputPolicy::from_archive(&archive.proof)
                     .map_err(data::AssistantStoreError::Invalid)?),
             };
-            proof.validate(&session.actor_id, &task.target_device_id, &super::digest(&task.prompt)).map_err(data::AssistantStoreError::Invalid)?;
+            proof.validate(&session.actor_id, &task.target_device_id).map_err(data::AssistantStoreError::Invalid)?;
             Ok(Some(serde_json::to_string(&proof).map_err(|_| data::AssistantStoreError::Invalid("invalid task prompt proof"))?))
         }.await;
         let proof = result.map_err(|error| match error {
@@ -161,7 +158,7 @@ impl ScheduleStore {
         let proof: TaskPromptRetention =
             serde_json::from_str(raw).map_err(|_| ScheduleStoreError::Invalid)?;
         proof
-            .validate(actor, device, &super::digest(&task.prompt))
+            .validate(actor, device)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let (_, contract) = super::publication::load_contract(
             db,
@@ -590,10 +587,14 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let current = store.read(1, &task.schedule_id).await.unwrap();
-            assert_ne!(
+            // The retention record carries no prompt digest; the run snapshot
+            // still binds the prompt text and task revision directly.
+            assert_eq!(
                 current.prompt_retention_json.as_deref(),
                 Some(original.as_str())
             );
+            assert_ne!(current.prompt, task.prompt);
+            assert_ne!(current.task_revision, task.task_revision);
             let worker = std::thread::Builder::new()
                 .name("published-input-small-stack".into())
                 .stack_size(stack_bytes)

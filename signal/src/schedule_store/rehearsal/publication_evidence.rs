@@ -24,7 +24,6 @@ impl ScheduleStore {
             || source.task_revision != task.task_revision
             || source.target_device_id != task.target_device_id
             || source.prompt != task.prompt
-            || source.prompt_sha256 != digest(&task.prompt)
             || source.locale != task.locale
             || source.model_id != task.model_id
             || source.answer_message_id.is_none()
@@ -45,7 +44,8 @@ impl ScheduleStore {
 
         let actions =
             Self::read_rehearsal_actions_on(txn, task.owner_user_id, rehearsal_id).await?;
-        if actions.session_sha256 != reads.session_sha256
+        if (actions.session_row_id, actions.session_version)
+            != (reads.session_row_id, reads.session_version)
             || !actions.unconfirmed_tool_call_ids.is_empty()
         {
             return Err(ScheduleStoreError::Conflict);
@@ -80,7 +80,7 @@ impl ScheduleStore {
             evidence_sha256: digest(&json(&(
                 &task.schedule_id,
                 task.task_revision,
-                &source.prompt_sha256,
+                source.task_revision,
                 &reads,
                 &actions,
             ))?),
@@ -155,7 +155,7 @@ impl ScheduleStore {
                     .one(txn)
                     .await?
                     .ok_or(ScheduleStoreError::Conflict)?;
-                if digest(&row.state_json) != actions.session_sha256 {
+                if (row.id, row.version) != (actions.session_row_id, actions.session_version) {
                     return Err(ScheduleStoreError::Conflict);
                 }
                 let session = PersistedAgentSession::decode_json(&row.state_json)

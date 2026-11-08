@@ -695,7 +695,7 @@ async fn ai_task_prompt_keeps_original_copy_policy_and_rolls_back_on_small_stack
                     }
                     let raw = task.prompt_retention_json.as_deref().unwrap();
                     let proof: desk_diagnose_core::schedule::published_input::TaskPromptRetention = serde_json::from_str(raw).unwrap();
-                    proof.validate(&session.actor_id, &session.device_id, &proof.prompt_sha256).unwrap();
+                    proof.validate(&session.actor_id, &session.device_id).unwrap();
                     assert_eq!(proof.policy.no_copy, !capture_input);
                     assert_eq!(proof.policy.derived_visible_text_allowed, capture_input);
                     assert!(!proof.policy.independent_fact_allowed);

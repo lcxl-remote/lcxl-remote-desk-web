@@ -117,7 +117,7 @@ async fn run_case(failed: bool) {
         completed.status,
         if failed { "failed" } else { "completed" }
     );
-    assert!(completed.completed_session_sha256.is_some());
+    assert!(completed.completed_session_row_id.is_some());
     let task = store.read(1, &task.schedule_id).await.unwrap();
     assert_eq!(
         task.status,

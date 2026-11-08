@@ -24,7 +24,9 @@ pub(crate) async fn read(
         );
     }
     let actions = ScheduleStore::read_rehearsal_actions_on(&txn, owner, rehearsal_id).await?;
-    if actions.session_sha256 != reads.session_sha256 {
+    if (actions.session_row_id, actions.session_version)
+        != (reads.session_row_id, reads.session_version)
+    {
         return Err(ScheduleStoreError::Conflict);
     }
     unconfirmed.extend(actions.unconfirmed_tool_call_ids);

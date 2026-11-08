@@ -47,7 +47,8 @@ impl ScheduleStore {
         let actions = Self::read_rehearsal_actions_on(&txn, owner, &source.rehearsal_id).await?;
         if !reads.unconfirmed_read_call_ids.is_empty()
             || !actions.unconfirmed_tool_call_ids.is_empty()
-            || reads.session_sha256 != actions.session_sha256
+            || (reads.session_row_id, reads.session_version)
+                != (actions.session_row_id, actions.session_version)
         {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -56,7 +57,9 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if digest(&session_row.state_json) != actions.session_sha256 {
+        if (session_row.id, session_row.version)
+            != (actions.session_row_id, actions.session_version)
+        {
             return Err(ScheduleStoreError::Conflict);
         }
         let session = PersistedAgentSession::decode_json(&session_row.state_json)

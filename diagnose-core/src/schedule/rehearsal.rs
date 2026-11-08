@@ -98,7 +98,10 @@ pub struct ObservedRehearsalRead {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RehearsalReadReport {
     pub rehearsal_id: String,
-    pub session_sha256: String,
+    /// The answered session row and its CAS version; a recreated session gets
+    /// a new row id, so the pair names one frozen state.
+    pub session_row_id: i64,
+    pub session_version: i64,
     pub reads: Vec<ObservedRehearsalRead>,
     /// Consumption without completion is not an observed successful read.
     pub unconfirmed_read_call_ids: Vec<String>,

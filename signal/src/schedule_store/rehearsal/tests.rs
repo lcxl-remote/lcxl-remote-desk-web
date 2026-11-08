@@ -25,7 +25,6 @@ async fn rehearsal_reservation_is_fresh_idempotent_and_owner_bound() {
     assert_eq!(first.status, "pending");
     assert_eq!(first.task_revision, task.task_revision);
     assert_eq!(first.prompt, task.prompt);
-    assert_eq!(first.prompt_sha256, digest(&task.prompt));
     assert!(
         desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
             &first.client_conversation_id
