@@ -21,6 +21,10 @@ pub(super) async fn write_on(
     let source_policy = json(capture.source_policy)?;
     let dependencies = json(&capture.dependencies)?;
     let retention_proof = json(&prepared.proof)?;
+    let original_sha256 = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(capture.content.as_bytes())
+    );
     let state_json = capture.native.map(json).transpose()?;
     let native_time = capture
         .native
@@ -109,7 +113,7 @@ pub(super) async fn write_on(
             + capture.root_conversation_id.len()
             + capture.native_id.len()
             + kind.len()
-            + prepared.proof.original_content_sha256.len()
+            + original_sha256.len()
             + source_policy.len()
             + capture.statement_timezone.len()
             + 6 * 8) as i64;
@@ -204,7 +208,7 @@ pub(super) async fn write_on(
                 root_conversation_id: Set(capture.root_conversation_id.into()),
                 native_id: Set(capture.native_id.into()),
                 kind: Set(kind.clone()),
-                original_sha256: Set(prepared.proof.original_content_sha256.clone()),
+                original_sha256: Set(original_sha256.clone()),
                 accepted_input_seq: Set(signed(capture.accepted_input_seq)?),
                 history_admitted: Set(true),
                 deletion_generation: Set(1),

@@ -198,10 +198,6 @@ pub struct HistoryRetentionProof {
     pub origin_id: String,
     pub original_envelope_id: String,
     pub accepted_input_seq: u64,
-    pub original_content_sha256: String,
-    pub retained_content_sha256: String,
-    pub production_dependencies_sha256: String,
-    pub native_metadata_sha256: String,
     /// The origin's policy at capture; the origin row's policy never changes
     /// after insertion, so readers compare values.
     pub source_policy: SourceUsePolicy,
@@ -247,9 +243,10 @@ pub struct PreparedHistoryCapture {
     pub redacted: bool,
 }
 
-pub fn history_dependencies_sha256(
+/// Shape, uniqueness and size check for history producer dependencies.
+pub fn validate_history_dependencies(
     dependencies: &[HistoryDependency],
-) -> Result<String, &'static str> {
+) -> Result<(), &'static str> {
     if dependencies.len() > desk_agent_protocol::data_lineage::MAX_LINEAGE_ITEMS {
         return Err("too many history producer dependencies");
     }
@@ -276,7 +273,8 @@ pub fn history_dependencies_sha256(
             return Err("invalid history producer dependency");
         }
     }
-    crate::model_egress::sink_metadata_sha256(&ordered)
+    crate::model_egress::sink_metadata_size(&ordered)?;
+    Ok(())
 }
 
 /// Original scheduled output, owner supplements and native state observations
@@ -330,7 +328,7 @@ pub fn prepare_capture(
     if !valid_statement_timezone(capture.statement_timezone) {
         return Err("invalid assistant statement timezone");
     }
-    let production_dependencies_sha256 = history_dependencies_sha256(capture.dependencies)?;
+    validate_history_dependencies(capture.dependencies)?;
     let original_content_sha256 = format!("{:x}", Sha256::digest(capture.content.as_bytes()));
     if let Some(native) = capture.native {
         native.validate(
@@ -344,7 +342,6 @@ pub fn prepare_capture(
     ) {
         return Err("native history source is missing its original metadata proof");
     }
-    let native_metadata_sha256 = super::native_history::metadata_sha256(capture.native)?;
     for identity in [
         capture.actor_id,
         capture.conversation_id,
@@ -439,10 +436,6 @@ pub fn prepare_capture(
             origin_id: origin_id.clone(),
             original_envelope_id: capture.envelope.envelope_id.clone(),
             accepted_input_seq: capture.accepted_input_seq,
-            original_content_sha256,
-            retained_content_sha256: content_sha256.clone(),
-            production_dependencies_sha256,
-            native_metadata_sha256,
             source_policy: capture.source_policy.clone(),
             recorded_at_unix_ms: capture.recorded_at_unix_ms,
             statement_timezone: capture.statement_timezone.into(),
@@ -599,23 +592,9 @@ mod tests {
         };
         let a = source("A");
         let b = source("B");
-        let original = history_dependencies_sha256(&[a.clone(), b.clone()]).unwrap();
-        assert_eq!(
-            original,
-            history_dependencies_sha256(&[b, a.clone()]).unwrap()
-        );
-        assert_ne!(
-            original,
-            history_dependencies_sha256(std::slice::from_ref(&a)).unwrap()
-        );
-        let mut changed = a.clone();
-        changed.origin_deletion_generation += 1;
-        assert_ne!(
-            history_dependencies_sha256(std::slice::from_ref(&a)).unwrap(),
-            history_dependencies_sha256(&[changed]).unwrap()
-        );
+        validate_history_dependencies(&[a.clone(), b]).unwrap();
         let mut conflicting = a.clone();
         conflicting.content_sha256 = "b".repeat(64);
-        assert!(history_dependencies_sha256(&[a, conflicting]).is_err());
+        assert!(validate_history_dependencies(&[a, conflicting]).is_err());
     }
 }

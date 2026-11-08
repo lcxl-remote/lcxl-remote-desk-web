@@ -10,10 +10,9 @@ use desk_agent_protocol::ai_assistant::source::{
     validate_source_id,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 2;
+pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 3;
 
 /// An authenticated independent copy keeps the origin's hard constraints,
 /// rather than the original chat fragment's temporary read availability.
@@ -23,7 +22,6 @@ pub struct RetainedMemoryOrigin {
     pub origin_id: String,
     pub deletion_generation: u64,
     pub accepted_input_seq: u64,
-    pub content_sha256: String,
     /// The origin row's policy, including its hard content deadline.
     pub policy: SourceUsePolicy,
 }
@@ -42,7 +40,6 @@ pub struct MemoryEvidenceSnapshot<'a> {
     pub origin_kind: AssistantSourceKind,
     pub origin_deletion_generation: u64,
     pub origin_accepted_input_seq: u64,
-    pub origin_content_sha256: &'a str,
     pub recorded_at_unix_ms: u64,
     pub statement_timezone: &'a str,
     pub origin_policy: &'a SourceUsePolicy,
@@ -67,14 +64,9 @@ pub struct MemoryEvidenceRetentionProof {
     pub origin_kind: AssistantSourceKind,
     pub origin_deletion_generation: u64,
     pub origin_accepted_input_seq: u64,
-    pub origin_content_sha256: String,
-    pub retained_content_sha256: String,
-    pub retained_bytes: u32,
-    /// The origin row's policy; the evidence policy lives in this proof's own row.
+    /// The origin row's policy. The body, source lists and evidence policy
+    /// live in this proof's own row and are read from there.
     pub origin_policy: SourceUsePolicy,
-    pub known_sources_sha256: String,
-    pub forget_sources_sha256: String,
-    pub production_dependencies_sha256: String,
     pub retained_origins: Vec<RetainedMemoryOrigin>,
     pub recorded_at_unix_ms: u64,
     pub statement_timezone: String,
@@ -86,22 +78,14 @@ impl MemoryEvidenceRetentionProof {
         if source.body.trim().is_empty() {
             return Err("invalid independent memory evidence body");
         }
-        Self::from_identity(
-            source,
-            &format!("{:x}", Sha256::digest(source.body.as_bytes())),
-            source.body.len() as u32,
-        )
+        Self::from_identity(source)
     }
 
-    fn from_identity(
-        source: &MemoryEvidenceSnapshot<'_>,
-        retained_sha256: &str,
-        retained_bytes: u32,
-    ) -> Result<Self, &'static str> {
+    fn from_identity(source: &MemoryEvidenceSnapshot<'_>) -> Result<Self, &'static str> {
         validate_source_id(source.actor_id)?;
         validate_policy(source.origin_policy)?;
         validate_policy(source.evidence_policy)?;
-        let (known, forget) = source_links(
+        let (known, _) = source_links(
             source.known_sources,
             source.forget_sources,
             source.origin_id,
@@ -115,12 +99,9 @@ impl MemoryEvidenceRetentionProof {
             || source.origin_accepted_input_seq == 0
             || source.origin_accepted_input_seq > source.memory_accepted_input_seq
             || source.origin_deletion_generation == 0
-            || !hash(source.origin_content_sha256)
             || source.recorded_at_unix_ms == 0
             || source.recorded_at_unix_ms > i64::MAX as u64
             || !valid_statement_timezone(source.statement_timezone)
-            || !hash(retained_sha256)
-            || retained_bytes == 0
             || known.is_empty()
             || !known
                 .iter()
@@ -202,13 +183,7 @@ impl MemoryEvidenceRetentionProof {
             origin_kind: source.origin_kind,
             origin_deletion_generation: source.origin_deletion_generation,
             origin_accepted_input_seq: source.origin_accepted_input_seq,
-            origin_content_sha256: source.origin_content_sha256.into(),
-            retained_content_sha256: retained_sha256.into(),
-            retained_bytes,
             origin_policy: source.origin_policy.clone(),
-            known_sources_sha256: digest(&known)?,
-            forget_sources_sha256: digest(&forget)?,
-            production_dependencies_sha256: digest(&dependencies)?,
             retained_origins,
             recorded_at_unix_ms: source.recorded_at_unix_ms,
             statement_timezone: source.statement_timezone.into(),
@@ -236,11 +211,8 @@ impl MemoryEvidenceRetentionProof {
         known: &[KnownMemorySource],
         forget: &[KnownMemorySource],
     ) -> Result<Vec<KnownMemorySource>, &'static str> {
-        let (known, forget) = source_links(known, forget, &self.origin_id)?;
-        if self.schema_version != MEMORY_EVIDENCE_PROOF_VERSION
-            || self.known_sources_sha256 != digest(&known)?
-            || self.forget_sources_sha256 != digest(&forget)?
-        {
+        let (_, forget) = source_links(known, forget, &self.origin_id)?;
+        if self.schema_version != MEMORY_EVIDENCE_PROOF_VERSION {
             return Err("memory forgetting source proof changed");
         }
         Ok(forget)
@@ -253,12 +225,10 @@ impl MemoryEvidenceRetentionProof {
     pub fn validate_identity(
         &self,
         source: &MemoryEvidenceSnapshot<'_>,
-        retained_sha256: &str,
-        retained_bytes: u32,
         row_expiry: Option<u64>,
         now: u64,
     ) -> Result<(), &'static str> {
-        if self != &Self::from_identity(source, retained_sha256, retained_bytes)? {
+        if self != &Self::from_identity(source)? {
             return Err("independent memory evidence identity changed");
         }
         self.validate_lifetime(row_expiry, now)
@@ -327,7 +297,6 @@ pub fn canonical_retained_origins(
             || origin.deletion_generation == 0
             || origin.accepted_input_seq == 0
             || origin.accepted_input_seq > i64::MAX as u64
-            || !hash(&origin.content_sha256)
             || validate_policy(&origin.policy).is_err()
             || origin
                 .policy
@@ -365,11 +334,6 @@ fn canonical_dependencies(
     Ok(values)
 }
 
-fn digest(value: &impl Serialize) -> Result<String, &'static str> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "invalid memory evidence proof input")?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
 fn hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -383,7 +347,6 @@ mod tests {
         memory: String,
         evidence: String,
         origin: String,
-        original_hash: String,
         role: SourceRefRole,
         kind: AssistantSourceKind,
         origin_seq: u64,
@@ -396,7 +359,10 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let origin = native_ids::stable(Kind::AssistantOrigin, &"assertion");
-            let original_hash = format!("{:x}", Sha256::digest(b"I prefer Chinese"));
+            let original_hash = format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(b"I prefer Chinese")
+            );
             Self {
                 memory: native_ids::stable(Kind::Memory, &"language"),
                 evidence: native_ids::stable(Kind::AssistantSource, &"evidence"),
@@ -407,7 +373,6 @@ mod tests {
                     content_sha256: original_hash.clone(),
                 }],
                 origin,
-                original_hash,
                 role: SourceRefRole::Evidence,
                 kind: AssistantSourceKind::Input,
                 origin_seq: 4,
@@ -430,7 +395,6 @@ mod tests {
                 origin_kind: self.kind,
                 origin_deletion_generation: self.generation,
                 origin_accepted_input_seq: self.origin_seq,
-                origin_content_sha256: &self.original_hash,
                 recorded_at_unix_ms: 100,
                 statement_timezone: "UTC",
                 origin_policy: &self.policy,
@@ -464,23 +428,18 @@ mod tests {
                 .unwrap(),
             vec![first.clone()]
         );
+        // Forgetting sources must stay within the origin and the known set.
+        let mut foreign = second.clone();
+        foreign.origin_id = native_ids::stable(Kind::AssistantOrigin, &"foreign-origin");
         assert!(
             proof
-                .forgetting_sources(&data.known, std::slice::from_ref(&second))
+                .forgetting_sources(&data.known, std::slice::from_ref(&foreign))
                 .is_err()
         );
         snapshot.forget_sources = std::slice::from_ref(&second);
+        // The source lists live in the proof's own row and are read from there.
         let other = MemoryEvidenceRetentionProof::from_snapshot(&snapshot).unwrap();
-        assert_eq!(proof.known_sources_sha256, other.known_sources_sha256);
-        assert_eq!(
-            proof.production_dependencies_sha256,
-            other.production_dependencies_sha256
-        );
-        assert_ne!(proof.forget_sources_sha256, other.forget_sources_sha256);
-        assert!(proof.validate_snapshot(&snapshot, None, 1000).is_err());
-        snapshot.forget_sources = std::slice::from_ref(&first);
-        snapshot.known_sources = std::slice::from_ref(&first);
-        assert!(proof.validate_snapshot(&snapshot, None, 1000).is_err());
+        assert_eq!(proof, other);
     }
 
     #[test]
@@ -531,34 +490,6 @@ mod tests {
         );
         data.origin_seq = 4;
         data.generation = 2;
-        assert!(
-            proof
-                .validate_snapshot(&data.snapshot(), None, 1000)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn retained_content_and_full_production_dependencies_cannot_be_replaced_or_trimmed() {
-        let mut data = Fixture::new();
-        data.dependencies.push(HistoryDependency {
-            source_id: native_ids::stable(Kind::AssistantSource, &"background"),
-            source_revision: 2,
-            origin_id: native_ids::stable(Kind::AssistantOrigin, &"background"),
-            origin_deletion_generation: 1,
-            policy_revision: 1,
-            content_sha256: "a".repeat(64),
-            expires_at_unix_ms: None,
-        });
-        let proof = MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).unwrap();
-        data.body = "Invented preference".into();
-        assert!(
-            proof
-                .validate_snapshot(&data.snapshot(), None, 1000)
-                .is_err()
-        );
-        data.body = "I prefer Chinese".into();
-        data.dependencies.clear();
         assert!(
             proof
                 .validate_snapshot(&data.snapshot(), None, 1000)
@@ -643,8 +574,6 @@ mod tests {
     fn retained_identity_survives_body_cleanup_without_becoming_a_body_read_proof() {
         let mut data = Fixture::new();
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).unwrap();
-        let hash = proof.retained_content_sha256.clone();
-        let bytes = proof.retained_bytes;
         data.body.clear();
         assert!(
             proof
@@ -652,37 +581,12 @@ mod tests {
                 .is_err()
         );
         proof
-            .validate_identity(&data.snapshot(), &hash, bytes, None, 1000)
+            .validate_identity(&data.snapshot(), None, 1000)
             .unwrap();
-        assert!(
-            proof
-                .validate_identity(&data.snapshot(), &"a".repeat(64), bytes, None, 1000)
-                .is_err()
-        );
-        assert!(
-            proof
-                .validate_identity(&data.snapshot(), &hash, bytes + 1, None, 1000)
-                .is_err()
-        );
         data.generation += 1;
         assert!(
             proof
-                .validate_identity(&data.snapshot(), &hash, bytes, None, 1000)
-                .is_err()
-        );
-        data.generation -= 1;
-        data.dependencies.push(HistoryDependency {
-            source_id: native_ids::stable(Kind::AssistantSource, &"new-hidden-dependency"),
-            source_revision: 1,
-            origin_id: native_ids::stable(Kind::AssistantOrigin, &"new-hidden-dependency"),
-            origin_deletion_generation: 1,
-            policy_revision: 1,
-            content_sha256: "b".repeat(64),
-            expires_at_unix_ms: None,
-        });
-        assert!(
-            proof
-                .validate_identity(&data.snapshot(), &hash, bytes, None, 1000)
+                .validate_identity(&data.snapshot(), None, 1000)
                 .is_err()
         );
     }
@@ -694,57 +598,27 @@ mod tests {
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).unwrap();
         data.body.clear();
         proof
-            .validate_identity(
-                &data.snapshot(),
-                &proof.retained_content_sha256,
-                proof.retained_bytes,
-                Some(1000),
-                999,
-            )
+            .validate_identity(&data.snapshot(), Some(1000), 999)
             .unwrap();
         assert!(
             proof
-                .validate_identity(
-                    &data.snapshot(),
-                    &proof.retained_content_sha256,
-                    proof.retained_bytes,
-                    None,
-                    999
-                )
+                .validate_identity(&data.snapshot(), None, 999)
                 .is_err()
         );
         assert!(
             proof
-                .validate_identity(
-                    &data.snapshot(),
-                    &proof.retained_content_sha256,
-                    proof.retained_bytes,
-                    Some(1001),
-                    999
-                )
+                .validate_identity(&data.snapshot(), Some(1001), 999)
                 .is_err()
         );
         assert!(
             proof
-                .validate_identity(
-                    &data.snapshot(),
-                    &proof.retained_content_sha256,
-                    proof.retained_bytes,
-                    Some(1000),
-                    1000
-                )
+                .validate_identity(&data.snapshot(), Some(1000), 1000)
                 .is_err()
         );
         data.policy.no_copy = true;
         assert!(
             proof
-                .validate_identity(
-                    &data.snapshot(),
-                    &proof.retained_content_sha256,
-                    proof.retained_bytes,
-                    Some(1000),
-                    999
-                )
+                .validate_identity(&data.snapshot(), Some(1000), 999)
                 .is_err()
         );
     }
@@ -759,7 +633,6 @@ mod tests {
             origin_id: source.origin_id.clone(),
             deletion_generation: 2,
             accepted_input_seq: 3,
-            content_sha256: "a".repeat(64),
             policy: data.policy.clone(),
         };
         data.known.push(source);
@@ -831,7 +704,6 @@ mod tests {
                 origin_id,
                 deletion_generation: 1,
                 accepted_input_seq: 1,
-                content_sha256: "b".repeat(64),
                 policy: data.policy.clone(),
             });
         }

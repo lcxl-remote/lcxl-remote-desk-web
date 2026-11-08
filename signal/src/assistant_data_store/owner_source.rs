@@ -249,7 +249,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     let Ok(proof) = serde_json::from_str::<HistoryRetentionProof>(&row.retention_proof_json) else {
         return Ok(unavailable(&row.source_id));
     };
-    let native_without_owner_input = match super::history_native::read(row, &proof) {
+    let native_without_owner_input = match super::history_native::read(row) {
         Ok(native) => super::history_native::zero_input_allowed(row, native.as_ref()),
         Err(_) => return Ok(unavailable(&row.source_id)),
     };
@@ -259,7 +259,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         || (proof.accepted_input_seq == 0 && !native_without_owner_input)
         || proof.accepted_input_seq != unsigned(original.accepted_input_seq)?
         || proof.device_ref != row.device_ref
-        || proof.original_content_sha256 != original.original_sha256
         || proof.source_policy != policy
         || proof.recorded_at_unix_ms != unsigned(row.recorded_at_ms)?
         || proof.statement_timezone != row.statement_timezone
@@ -275,10 +274,8 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     else {
         return Ok(unavailable(&row.source_id));
     };
-    if desk_diagnose_core::ai_assistant::source::history_dependencies_sha256(&dependencies)
-        .ok()
-        .as_deref()
-        != Some(proof.production_dependencies_sha256.as_str())
+    if desk_diagnose_core::ai_assistant::source::validate_history_dependencies(&dependencies)
+        .is_err()
     {
         return Ok(unavailable(&row.source_id));
     }

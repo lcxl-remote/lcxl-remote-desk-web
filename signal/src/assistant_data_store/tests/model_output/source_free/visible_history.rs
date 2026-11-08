@@ -814,9 +814,7 @@ async fn native_inventory_save_retains_a_verified_empty_snapshot_once_without_ex
         .unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    let proof: desk_diagnose_core::ai_assistant::source::HistoryRetentionProof =
-        serde_json::from_str(&row.retention_proof_json).unwrap();
-    let metadata = crate::assistant_data_store::history_native::read(row, &proof)
+    let metadata = crate::assistant_data_store::history_native::read(row)
         .unwrap()
         .unwrap();
     let summary = metadata

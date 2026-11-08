@@ -514,8 +514,7 @@ async fn native_inventory_parent_observation_is_captured_after_original_result_a
         .await
         .unwrap();
     assert!(completed.iter().any(|row| {
-        let proof = serde_json::from_str(&row.retention_proof_json).unwrap();
-        crate::assistant_data_store::read_native_history(row, &proof).unwrap().unwrap().status_snapshot.unwrap().items
+        crate::assistant_data_store::read_native_history(row).unwrap().unwrap().status_snapshot.unwrap().items
             .iter().any(|item| item.kind == desk_diagnose_core::ai_assistant::native_history::NativeHistoryTaskKind::Subagent && item.state == "completed")
     }));
     assert!(
@@ -526,8 +525,7 @@ async fn native_inventory_parent_observation_is_captured_after_original_result_a
 
     for state in ["queued", "running"] {
         assert!(completed.iter().any(|row| {
-            let proof = serde_json::from_str(&row.retention_proof_json).unwrap();
-            crate::assistant_data_store::read_native_history(row, &proof).unwrap().unwrap().status_snapshot.unwrap().items
+            crate::assistant_data_store::read_native_history(row).unwrap().unwrap().status_snapshot.unwrap().items
                 .iter().any(|item| item.kind == desk_diagnose_core::ai_assistant::native_history::NativeHistoryTaskKind::Subagent && item.state == state)
         }), "original child transition must be retained: {state}");
     }
@@ -573,8 +571,7 @@ async fn native_inventory_parent_observation_is_captured_after_original_result_a
         .iter()
         .max_by_key(|row| row.admitted_generation)
         .unwrap();
-    let proof = serde_json::from_str(&latest.retention_proof_json).unwrap();
-    let snapshot = crate::assistant_data_store::read_native_history(latest, &proof)
+    let snapshot = crate::assistant_data_store::read_native_history(latest)
         .unwrap()
         .unwrap()
         .status_snapshot

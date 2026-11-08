@@ -222,7 +222,6 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         origin_kind: kind,
         origin_deletion_generation: unsigned(primary.deletion_generation)?,
         origin_accepted_input_seq: unsigned(primary.accepted_input_seq)?,
-        origin_content_sha256: &primary.original_sha256,
         recorded_at_unix_ms: unsigned(row.observed_at_ms)?,
         statement_timezone: &row.statement_timezone,
         origin_policy: &primary_policy,
@@ -234,14 +233,9 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     let expiry = row.expires_at_ms.map(unsigned).transpose()?;
     let valid = match mode {
         EvidenceReadMode::Body => proof.validate_snapshot(&snapshot, expiry, now),
-        EvidenceReadMode::RetainedIdentity | EvidenceReadMode::OwnerHistoryIdentity => proof
-            .validate_identity(
-                &snapshot,
-                &row.content_sha256,
-                row.retained_bytes as u32,
-                expiry,
-                now,
-            ),
+        EvidenceReadMode::RetainedIdentity | EvidenceReadMode::OwnerHistoryIdentity => {
+            proof.validate_identity(&snapshot, expiry, now)
+        }
     };
     if valid.is_err()
         || !retained_origins_allowed_on(
@@ -406,7 +400,6 @@ pub(crate) fn retained_origins_allowed_on<
                 || unsigned(original.deletion_generation)? != saved.deletion_generation
                 || unsigned(original.accepted_input_seq)? != saved.accepted_input_seq
                 || saved.accepted_input_seq > input_seq
-                || original.original_sha256 != saved.content_sha256
                 || (!original.device_ref.is_empty()
                     && super::memory::source_device_on(db, actor, &original.device_ref)
                         .await?

@@ -337,10 +337,24 @@ pub struct NativeHistoryMetadata {
 }
 
 impl NativeHistoryMetadata {
+    /// Capture-time check: the metadata must describe exactly this body.
     pub fn validate(
         &self,
         kind: AssistantSourceKind,
         original_hash: &str,
+        recorded_at: u64,
+    ) -> Result<(), &'static str> {
+        if self.projected_content_sha256 != original_hash {
+            return Err("invalid original native history binding");
+        }
+        self.validate_stored(kind, recorded_at)
+    }
+
+    /// Read-time check of a stored row; the row's columns are trusted, so the
+    /// body binding established at capture is not recomputed.
+    pub fn validate_stored(
+        &self,
+        kind: AssistantSourceKind,
         recorded_at: u64,
     ) -> Result<(), &'static str> {
         if self.format_version != 1
@@ -348,7 +362,6 @@ impl NativeHistoryMetadata {
             || recorded_at >= i64::MAX as u64
             || !valid_hash(&self.native_proof_sha256)
             || !valid_hash(&self.projected_content_sha256)
-            || self.projected_content_sha256 != original_hash
         {
             return Err("invalid original native history binding");
         }
@@ -378,32 +391,20 @@ impl NativeHistoryMetadata {
     }
 }
 
-pub fn metadata_sha256(value: Option<&NativeHistoryMetadata>) -> Result<String, &'static str> {
-    crate::model_egress::sink_metadata_sha256(&value)
-}
-
-/// Called for owner and model reads alike. Indexed time/state cannot be
-/// changed independently of the original body and retention proof.
+/// Called for owner and model reads alike. The indexed time columns are
+/// derived from the stored metadata in the same row and must agree with it.
 pub fn read_metadata(
     kind: AssistantSourceKind,
-    original_hash: &str,
     recorded_at: u64,
     raw: Option<&str>,
     columns: &NativeHistoryTimeColumns,
-    expected_hash: &str,
 ) -> Result<Option<NativeHistoryMetadata>, &'static str> {
     let value: Option<NativeHistoryMetadata> = raw
         .map(|raw| {
             let value: NativeHistoryMetadata = serde_json::from_str(raw)
                 .map_err(|_| "invalid native history metadata encoding")?;
-            value.validate(kind, original_hash, recorded_at)?;
-            if serde_json::to_string(&value)
-                .map_err(|_| "invalid native history metadata encoding")?
-                != raw
-            {
-                return Err("native history metadata changed its original encoding");
-            }
-            Ok(value)
+            value.validate_stored(kind, recorded_at)?;
+            Ok::<_, &'static str>(value)
         })
         .transpose()?;
     if value.is_none()
@@ -411,14 +412,13 @@ pub fn read_metadata(
             kind,
             AssistantSourceKind::Receipt | AssistantSourceKind::NativeStatus
         )
-        || metadata_sha256(value.as_ref())? != expected_hash
         || value
             .as_ref()
             .map(NativeHistoryMetadata::columns)
             .unwrap_or_default()
             != *columns
     {
-        return Err("native history metadata changed its original proof or columns");
+        return Err("native history metadata disagrees with its columns");
     }
     Ok(value)
 }

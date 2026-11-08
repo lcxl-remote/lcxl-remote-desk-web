@@ -82,28 +82,18 @@ fn source_navigation_uses_only_unique_original_result_envelopes_including_extern
 fn receipt_intervals_are_bound_to_original_metadata_and_cannot_become_exact_send_times() {
     let metadata = metadata();
     let raw = serde_json::to_string(&metadata).unwrap();
-    let hash = metadata_sha256(Some(&metadata)).unwrap();
     let columns = metadata.columns();
     let read = |value: &str, columns: &NativeHistoryTimeColumns| {
-        read_metadata(
-            AssistantSourceKind::Receipt,
-            &"b".repeat(64),
-            200,
-            Some(value),
-            columns,
-            &hash,
-        )
+        read_metadata(AssistantSourceKind::Receipt, 200, Some(value), columns)
     };
     assert_eq!(read(&raw, &columns).unwrap(), Some(metadata.clone()));
-    for case in 0..6 {
+    for case in 0..4 {
         let mut changed = metadata.clone();
         let mut indexed = columns.clone();
         match case {
             0 => indexed.at_unix_ms = Some(200),
             1 => indexed.from_unix_ms = Some(101),
             2 => indexed.basis = Some("native_recorded".into()),
-            3 => changed.native_proof_sha256 = "c".repeat(64),
-            4 => changed.projected_content_sha256 = "c".repeat(64),
             _ => {
                 changed.time = Some(NativeHistoryTime::Exact {
                     at_unix_ms: 200,
@@ -116,25 +106,13 @@ fn receipt_intervals_are_bound_to_original_metadata_and_cannot_become_exact_send
             "case {case}"
         );
     }
-    assert!(
-        read_metadata(
-            AssistantSourceKind::Input,
-            &"b".repeat(64),
-            200,
-            Some(&raw),
-            &columns,
-            &hash
-        )
-        .is_err()
-    );
+    assert!(read_metadata(AssistantSourceKind::Input, 200, Some(&raw), &columns).is_err());
     assert!(
         read_metadata(
             AssistantSourceKind::Receipt,
-            &"b".repeat(64),
             200,
             None,
-            &NativeHistoryTimeColumns::default(),
-            &metadata_sha256(None).unwrap()
+            &NativeHistoryTimeColumns::default()
         )
         .is_err()
     );
@@ -225,10 +203,6 @@ fn capture_binds_native_projection_bytes_and_keeps_the_original_source_policy_re
     let prepared = prepare_capture(&capture, &platform).unwrap().unwrap();
     assert!(prepared.index.partial);
     assert_eq!(prepared.proof.source_policy.policy_revision, 1);
-    assert_eq!(
-        prepared.proof.native_metadata_sha256,
-        metadata_sha256(Some(&native)).unwrap()
-    );
     let wrong = HistoryCapture {
         content: "A model says this was sent",
         ..capture

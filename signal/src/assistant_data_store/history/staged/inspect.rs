@@ -1,6 +1,5 @@
 use super::*;
 use crate::assistant_data_store::unsigned;
-use desk_diagnose_core::ai_assistant::source::HistoryRetentionProof;
 
 pub(super) async fn inspect_on(
     txn: &DatabaseTransaction,
@@ -30,7 +29,11 @@ pub(super) async fn inspect_on(
             || row.native_id != capture.native_id
             || row.accepted_input_seq != signed(capture.accepted_input_seq)?
             || row.kind != kind
-            || row.original_sha256 != prepared.proof.original_content_sha256)
+            || row.original_sha256
+                != format!(
+                    "{:x}",
+                    <sha2::Sha256 as sha2::Digest>::digest(capture.content.as_bytes())
+                ))
     {
         return Err(AdmissionFailure::Policy);
     }
@@ -91,10 +94,14 @@ pub(super) async fn inspect_on(
             {
                 return Err(AdmissionFailure::Policy);
             }
-            let proof: HistoryRetentionProof = serde_json::from_str(&row.retention_proof_json)
+            // A replay must carry the same native metadata as the stored row.
+            let state_json = capture
+                .native
+                .map(serde_json::to_string)
+                .transpose()
                 .map_err(|_| AdmissionFailure::Policy)?;
-            if proof.native_metadata_sha256 != prepared.proof.native_metadata_sha256
-                || super::super::super::history_native::read(&row, &proof).is_err()
+            if row.state_json != state_json
+                || super::super::super::history_native::read(&row).is_err()
             {
                 return Err(AdmissionFailure::Policy);
             }

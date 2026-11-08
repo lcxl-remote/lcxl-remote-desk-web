@@ -2,7 +2,7 @@
 
 use super::contract::ValidatedTaskContract;
 use crate::ai_assistant::{
-    source::{history_dependencies_sha256, owner_text_policy, validate_policy},
+    source::{owner_text_policy, validate_history_dependencies, validate_policy},
     source_registry::NativeDerivedInputPolicy,
 };
 use crate::chat::{ChatMessage, ChatRole};
@@ -59,7 +59,7 @@ impl TaskPromptRetention {
             return Err("invalid original task prompt retention binding");
         }
         validate_policy(&self.policy)?;
-        history_dependencies_sha256(&self.dependencies)?;
+        validate_history_dependencies(&self.dependencies)?;
         if let Some(parent) = &self.model_source {
             parent.validate()?;
             if parent.actor_id != actor {

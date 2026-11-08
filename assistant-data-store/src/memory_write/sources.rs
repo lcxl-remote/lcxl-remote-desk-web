@@ -128,7 +128,6 @@ pub async fn load_on<C: ConnectionTrait>(
         || proof.origin_id != row.origin_id
         || proof.device_ref != row.device_ref
         || proof.accepted_input_seq != input.accepted_input_seq as u64
-        || proof.original_content_sha256 != input.original_sha256
         || proof.source_policy != policy
         || policy.policy_revision
             != data
@@ -148,13 +147,9 @@ pub async fn load_on<C: ConnectionTrait>(
     }
     let dependencies: Vec<HistoryDependency> = serde_json::from_str(&row.dependencies_json)
         .map_err(|_| AssistantStoreError::Inaccessible)?;
-    if proof.production_dependencies_sha256
-        != desk_diagnose_core::ai_assistant::source::history_dependencies_sha256(&dependencies)
-            .map_err(AssistantStoreError::Invalid)?
-    {
-        return Err(AssistantStoreError::SourceUnavailable);
-    }
-    crate::history_native::read(&row, &proof)?;
+    desk_diagnose_core::ai_assistant::source::validate_history_dependencies(&dependencies)
+        .map_err(AssistantStoreError::Invalid)?;
+    crate::history_native::read(&row)?;
     let dependency = HistoryDependency {
         source_id: row.source_id.clone(),
         source_revision: row.revision as u64,

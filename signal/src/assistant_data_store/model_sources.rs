@@ -374,9 +374,7 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
                 {
                     return Err(AssistantStoreError::Inaccessible);
                 }
-                let proof: HistoryRetentionProof = serde_json::from_str(&row.retention_proof_json)
-                    .map_err(|_| AssistantStoreError::Inaccessible)?;
-                super::history_native::read(&row, &proof)?;
+                super::history_native::read(&row)?;
                 if !fact_evidence {
                     let history_scope = scope.ok_or(AssistantStoreError::Inaccessible)?;
                     deadline = earlier(
@@ -757,16 +755,12 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         .map_err(|_| AssistantStoreError::Inaccessible)?;
     let proof: HistoryRetentionProof = serde_json::from_str(&row.retention_proof_json)
         .map_err(|_| AssistantStoreError::Inaccessible)?;
-    let native = super::history_native::read(row, &proof)?;
+    let native = super::history_native::read(row)?;
     let native_without_owner_input =
         super::history_native::zero_input_allowed(row, native.as_ref());
     let dependencies = decode_dependencies(&row.dependencies_json)?;
-    if desk_diagnose_core::ai_assistant::source::history_dependencies_sha256(&dependencies)
-        .map_err(AssistantStoreError::Invalid)?
-        != proof.production_dependencies_sha256
-    {
-        return Err(AssistantStoreError::Inaccessible);
-    }
+    desk_diagnose_core::ai_assistant::source::validate_history_dependencies(&dependencies)
+        .map_err(AssistantStoreError::Invalid)?;
     if !super::source_lifecycle::origin_readable_on(db, actor, &original).await?
         || !original.history_admitted
         || original.device_ref != row.device_ref
@@ -785,7 +779,6 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         || proof.device_ref != row.device_ref
         || (proof.accepted_input_seq == 0 && !native_without_owner_input)
         || proof.accepted_input_seq != unsigned(original.accepted_input_seq)?
-        || proof.original_content_sha256 != original.original_sha256
         || proof.source_policy != policy
         || proof.recorded_at_unix_ms != unsigned(row.recorded_at_ms)?
         || proof.statement_timezone != row.statement_timezone

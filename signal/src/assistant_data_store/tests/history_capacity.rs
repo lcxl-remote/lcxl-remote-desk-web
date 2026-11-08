@@ -188,3 +188,94 @@ async fn fragments_count_as_one_native_record_and_later_replay_cannot_recreate_r
         origin_count
     );
 }
+
+#[tokio::test]
+async fn a_replayed_source_with_different_native_metadata_is_not_accepted() {
+    use desk_diagnose_core::ai_assistant::native_history::{
+        NativeHistoryMetadata, NativeHistoryTime, NativeTimeBasis,
+    };
+    use sha2::Digest;
+    let store = setup().await;
+    store
+        .settings(1, &AssistantDataPolicy::default())
+        .await
+        .unwrap();
+    let config = store.db.config_read().await;
+    let device_ref = native_ids::stable(
+        Kind::AssistantDeviceBinding,
+        &(&config.metadata.instance, &"replay-device"),
+    );
+    let source_policy = owner_text_policy(1, false);
+    let text = "receipt body";
+    let message = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        native_ids::stable(Kind::Message, &"replayed-receipt"),
+        text.into(),
+        DestinationIdentity::Model {
+            connection_id: "model-connection".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    let metadata = |at_unix_ms| NativeHistoryMetadata {
+        format_version: 1,
+        native_proof_sha256: "a".repeat(64),
+        projected_content_sha256: format!("{:x}", sha2::Sha256::digest(text.as_bytes())),
+        projection_partial: false,
+        time: Some(NativeHistoryTime::Exact {
+            at_unix_ms,
+            basis: NativeTimeBasis::NativeRecorded,
+        }),
+        status_snapshot: None,
+    };
+    let original = metadata(90);
+    let changed = metadata(80);
+    let capture = |native| HistoryCapture {
+        native,
+        actor_id: "1",
+        device_ref: &device_ref,
+        directory: Some(HistorySourceDirectory {
+            instance_id: &config.metadata.instance,
+            audience: "replay-device",
+            device_name: Some("Replay device"),
+        }),
+        conversation_id: "conversation",
+        root_conversation_id: "conversation",
+        native_id: &message.message_id,
+        kind: AssistantSourceKind::Receipt,
+        role: "tool",
+        content: text,
+        envelope: message.data_envelope.as_ref().unwrap(),
+        source_policy: &source_policy,
+        dependencies: &[],
+        accepted_input_seq: 1,
+        recorded_at_unix_ms: 100,
+        statement_timezone: "UTC",
+        revision: 1,
+    };
+    let policy = AssistantDataPolicy::default();
+    let txn = store.db.begin().await.unwrap();
+    ensure_runtime_on(&txn, "1").await.unwrap();
+    runtime::Entity::update_many()
+        .col_expr(
+            runtime::Column::InputSeq,
+            sea_orm::sea_query::Expr::value(1_i64),
+        )
+        .filter(runtime::Column::ActorId.eq("1"))
+        .exec(&txn)
+        .await
+        .unwrap();
+    let first = super::super::history::capture_on(&txn, &capture(Some(&original)), &policy)
+        .await
+        .unwrap();
+    assert_eq!(first.admission, HistoryAdmission::Indexed);
+    let same = super::super::history::capture_on(&txn, &capture(Some(&original)), &policy)
+        .await
+        .unwrap();
+    assert_eq!(same.admission, HistoryAdmission::Indexed);
+    let replay = super::super::history::capture_on(&txn, &capture(Some(&changed)), &policy)
+        .await
+        .unwrap();
+    assert_eq!(replay.admission, HistoryAdmission::OmittedPolicy);
+}

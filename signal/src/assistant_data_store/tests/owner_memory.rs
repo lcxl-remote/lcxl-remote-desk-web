@@ -221,7 +221,6 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
         origin_kind: AssistantSourceKind::Input,
         origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
         origin_accepted_input_seq: unsigned(original.accepted_input_seq).unwrap(),
-        origin_content_sha256: &original.original_sha256,
         recorded_at_unix_ms: unsigned(source.observed_at_ms).unwrap(),
         statement_timezone: &source.statement_timezone,
         origin_policy: &origin_policy,
@@ -574,24 +573,17 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
     let body = evidence.body;
     let hash = format!("{:x}", Sha256::digest(body.as_bytes()));
     let expires = 90 * 86_400_000i64;
-    let proof =
-        HistoryRetentionProof {
-            native_metadata_sha256:
-                desk_diagnose_core::ai_assistant::native_history::metadata_sha256(None).unwrap(),
-            actor_id: original.actor_id.clone(),
-            device_ref: original.device_ref.clone(),
-            accepted_input_seq: unsigned(original.accepted_input_seq).unwrap(),
-            origin_id: original.origin_id.clone(),
-            original_envelope_id: "owner-input-envelope".into(),
-            production_dependencies_sha256:
-                desk_diagnose_core::ai_assistant::source::history_dependencies_sha256(&[]).unwrap(),
-            original_content_sha256: original.original_sha256.clone(),
-            retained_content_sha256: hash.clone(),
-            source_policy: policy,
-            recorded_at_unix_ms: 1,
-            statement_timezone: "UTC".into(),
-            expires_at_unix_ms: expires as u64,
-        };
+    let proof = HistoryRetentionProof {
+        actor_id: original.actor_id.clone(),
+        device_ref: original.device_ref.clone(),
+        accepted_input_seq: unsigned(original.accepted_input_seq).unwrap(),
+        origin_id: original.origin_id.clone(),
+        original_envelope_id: "owner-input-envelope".into(),
+        source_policy: policy,
+        recorded_at_unix_ms: 1,
+        statement_timezone: "UTC".into(),
+        expires_at_unix_ms: expires as u64,
+    };
     history::ActiveModel {
         source_id: Set(known[0].source_id.clone()),
         origin_id: Set(original.origin_id.clone()),

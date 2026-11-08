@@ -177,12 +177,7 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
                 {
                     return Ok(None);
                 }
-                let proof: desk_diagnose_core::ai_assistant::source::HistoryRetentionProof =
-                    match serde_json::from_str(&row.retention_proof_json) {
-                        Ok(value) => value,
-                        Err(_) => return Ok(None),
-                    };
-                if super::history_native::read(&row, &proof).is_err() {
+                if super::history_native::read(&row).is_err() {
                     return Ok(None);
                 }
             }

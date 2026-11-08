@@ -3,15 +3,11 @@
 use super::{AssistantStoreError, unsigned};
 use crate::entity::agent_assistant_history as history;
 use desk_agent_protocol::ai_assistant::source::AssistantSourceKind;
-use desk_diagnose_core::ai_assistant::{
-    native_history::{NativeHistoryMetadata, NativeHistoryTimeColumns, read_metadata},
-    source::HistoryRetentionProof,
+use desk_diagnose_core::ai_assistant::native_history::{
+    NativeHistoryMetadata, NativeHistoryTimeColumns, read_metadata,
 };
 
-pub fn read(
-    row: &history::Model,
-    proof: &HistoryRetentionProof,
-) -> Result<Option<NativeHistoryMetadata>, AssistantStoreError> {
+pub fn read(row: &history::Model) -> Result<Option<NativeHistoryMetadata>, AssistantStoreError> {
     let kind = match row.kind.as_str() {
         "input" => AssistantSourceKind::Input,
         "assistant_message" => AssistantSourceKind::AssistantMessage,
@@ -27,11 +23,9 @@ pub fn read(
     };
     read_metadata(
         kind,
-        &proof.original_content_sha256,
         unsigned(row.recorded_at_ms)?,
         row.state_json.as_deref(),
         &columns,
-        &proof.native_metadata_sha256,
     )
     .map_err(|_| AssistantStoreError::Inaccessible)
 }

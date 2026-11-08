@@ -21,9 +21,7 @@ pub fn forgetting_sources(
         || proof.memory_revision != unsigned(row.memory_revision)?
         || proof.evidence_source_id != row.source_id
         || proof.origin_id != row.origin_id
-        || proof.retained_content_sha256 != row.content_sha256
         || row.retained_bytes <= 0
-        || proof.retained_bytes != row.retained_bytes as u32
         || proof.recorded_at_unix_ms != unsigned(row.observed_at_ms)?
         || proof.statement_timezone != row.statement_timezone
         || !matches!(

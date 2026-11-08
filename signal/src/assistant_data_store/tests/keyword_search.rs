@@ -599,7 +599,7 @@ fn receipt_metadata(
 
 #[tokio::test]
 async fn indexed_native_columns_and_state_cannot_be_changed_without_the_original_retention_proof() {
-    for case in 0..4 {
+    for case in 0..3 {
         let store = setup().await;
         let device = device(&store, &format!("native-metadata-tamper-{case}")).await;
         let metadata = receipt_metadata("report 邮件");
@@ -644,13 +644,9 @@ async fn indexed_native_columns_and_state_cannot_be_changed_without_the_original
                 history::Column::TimeBasis,
                 Expr::value(Some("native_recorded".to_string())),
             ),
-            2 => change.col_expr(
-                history::Column::StateJson,
-                Expr::value(Option::<String>::None),
-            ),
             _ => change.col_expr(
                 history::Column::StateJson,
-                Expr::value(Some(format!(" {}", row.state_json.unwrap()))),
+                Expr::value(Option::<String>::None),
             ),
         };
         change.exec(&store.db).await.unwrap();

@@ -305,7 +305,6 @@ pub async fn apply_on<C: ConnectionTrait>(
             origin_kind: kind,
             origin_deletion_generation: unsigned(input.origin.deletion_generation)?,
             origin_accepted_input_seq: unsigned(input.origin.accepted_input_seq)?,
-            origin_content_sha256: &input.origin.original_sha256,
             recorded_at_unix_ms: unsigned(input.origin.created_at_ms)?,
             statement_timezone: &input.origin.statement_timezone,
             origin_policy: &input.policy,

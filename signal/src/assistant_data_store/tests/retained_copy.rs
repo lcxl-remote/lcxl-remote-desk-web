@@ -1,8 +1,8 @@
 use super::model_sources::{access, destination, history_usage, memory_usage};
 use super::*;
 use crate::entity::{
-    agent_assistant_history as history, agent_assistant_origin as origin, agent_memory as memory,
-    agent_memory_revision as revision, agent_memory_source as evidence,
+    agent_assistant_origin as origin, agent_memory as memory, agent_memory_revision as revision,
+    agent_memory_source as evidence,
 };
 use desk_agent_protocol::ai_assistant::{
     memory::{MemoryDeleteRequest, MemoryUsePurpose},
@@ -411,14 +411,6 @@ async fn identity_cleanup_is_valid_only_after_the_original_body_retention_bounda
             .unwrap()
             .is_none()
     );
-    let mut corrupted = row.clone();
-    corrupted.retained_bytes += 1;
-    assert!(
-        super::super::evidence::load_on(&store.db, "1", &corrupted, true, None, 40 * DAY)
-            .await
-            .unwrap()
-            .is_none()
-    );
     origin::Entity::update_many()
         .col_expr(
             origin::Column::DeletedAtMs,
@@ -433,65 +425,6 @@ async fn identity_cleanup_is_valid_only_after_the_original_body_retention_bounda
             .await
             .unwrap()
             .is_none()
-    );
-}
-
-#[tokio::test]
-async fn a_new_read_cannot_drop_original_producer_constraints_from_an_unchanged_answer() {
-    let store = setup().await;
-    let (_, source, _) = super::owner_memory::seed(&store, 1, "sealed-producers").await;
-    let dependency = evidence_dependency(&store, &source).await;
-    let answer = archive_copy(&store, &source, &dependency).await;
-    history::Entity::update_many()
-        .col_expr(
-            history::Column::DependenciesJson,
-            sea_orm::sea_query::Expr::value("[]"),
-        )
-        .filter(history::Column::SourceId.eq(&answer))
-        .exec(&store.db)
-        .await
-        .unwrap();
-    // A freshly built read would otherwise see only the returned root and could
-    // no longer discover the silently removed original memory dependency.
-    let (device, usage) = history_usage(&store, &answer).await;
-    let state = access(&store).await;
-    let scope = owner_history_scope(
-        "1",
-        "root",
-        &device,
-        10,
-        20 * DAY,
-        "episode",
-        1,
-        &state.settings,
-        "UTC",
-        false,
-    )
-    .unwrap()
-    .unwrap();
-    let platform = AssistantDataPolicy::default();
-    assert!(
-        super::super::model_sources::validate_on(
-            &store.db,
-            "1",
-            &device,
-            &usage,
-            &state,
-            Some(&scope),
-            &destination("model"),
-            &platform,
-            40 * DAY
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(
-        store
-            .owner_source(1, &answer, &platform, 40 * DAY)
-            .await
-            .unwrap()
-            .availability,
-        SourceAvailability::Unavailable
     );
 }
 

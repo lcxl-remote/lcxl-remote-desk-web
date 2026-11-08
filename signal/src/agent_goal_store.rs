@@ -2292,8 +2292,7 @@ mod lifecycle_tests {
                 .unwrap();
             if mode == 0 {
                 assert_eq!(rows.len(), 1);
-                let proof = serde_json::from_str(&rows[0].retention_proof_json).unwrap();
-                let snapshot = data::read_native_history(&rows[0], &proof)
+                let snapshot = data::read_native_history(&rows[0])
                     .unwrap()
                     .unwrap()
                     .status_snapshot

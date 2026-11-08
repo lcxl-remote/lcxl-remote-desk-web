@@ -11,9 +11,8 @@ use desk_agent_protocol::ai_assistant::{
     history::NativeStatusSummary,
     source::{AssistantSourceDevice, AssistantSourceKind, AssistantSourceRef, SourceRefRole},
 };
-use desk_diagnose_core::ai_assistant::{
-    native_history::{NativeHistorySnapshot, NativeHistoryStatus},
-    source::HistoryRetentionProof,
+use desk_diagnose_core::ai_assistant::native_history::{
+    NativeHistorySnapshot, NativeHistoryStatus,
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::BTreeMap;
@@ -79,10 +78,8 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
                 continue;
             }
         };
-        let proof: HistoryRetentionProof = serde_json::from_str(&source.row.retention_proof_json)
-            .map_err(|_| AssistantStoreError::Inaccessible)?;
-        let native = super::history_native::read(&source.row, &proof)?
-            .ok_or(AssistantStoreError::Inaccessible)?;
+        let native =
+            super::history_native::read(&source.row)?.ok_or(AssistantStoreError::Inaccessible)?;
         let snapshot = native
             .status_snapshot
             .as_ref()
