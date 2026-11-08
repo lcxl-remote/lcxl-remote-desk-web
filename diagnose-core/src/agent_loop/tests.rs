@@ -2222,6 +2222,24 @@ async fn ai_assistant_followup_batch_repeats_exact_latest_input_at_recency_edge(
         projected.provenance.source_envelope_ids,
         vec!["latest-user-envelope"]
     );
+    // Request projections are content-addressed and never persisted.
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    let projected_ids: std::collections::BTreeSet<_> = messages
+        .iter()
+        .filter_map(|message| message.data_envelope.as_ref())
+        .filter(|label| label.envelope_id.starts_with("status-result-"))
+        .map(|label| label.envelope_id.clone())
+        .collect();
+    assert!(!projected_ids.is_empty());
+    for message in &stored.conversation {
+        let Some(label) = &message.data_envelope else {
+            continue;
+        };
+        assert!(!projected_ids.contains(&label.envelope_id));
+        assert!(!matches!(&label.content,
+            ContentRef::ImmutableBlob { blob_id, .. } if blob_id.starts_with("status-content-")));
+    }
 }
 
 #[tokio::test]

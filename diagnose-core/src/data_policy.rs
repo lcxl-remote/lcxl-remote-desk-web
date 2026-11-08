@@ -17,7 +17,6 @@ use desk_agent_protocol::data_lineage::{
 pub struct ConservativeDerivation<'a> {
     pub output_envelope_id: &'a str,
     pub content: ContentRef,
-    pub digest_sha256: &'a str,
     pub source_provider_id: &'a str,
     pub source_tool_name: &'a str,
     pub source_object_id: Option<&'a str>,
@@ -159,7 +158,6 @@ mod tests {
                     size_bytes: 1,
                     media_type: "application/json".into(),
                 },
-                digest_sha256: &digest('b'),
                 source_provider_id: "report",
                 source_tool_name: "summarize",
                 source_object_id: None,
@@ -189,7 +187,6 @@ mod tests {
                     size_bytes: 1,
                     expires_at_unix_ms: 10,
                 },
-                digest_sha256: &digest('c'),
                 source_provider_id: "provider",
                 source_tool_name: "summarize",
                 source_object_id: None,

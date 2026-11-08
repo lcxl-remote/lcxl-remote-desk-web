@@ -140,7 +140,7 @@ pub struct ContextSummarySourceV1 {
     pub message_id: String,
     /// Label of the canonical message; a rewritten body always carries a new
     /// label, so the id binds the summarized body.
-    pub envelope_id: Option<String>,
+    pub envelope_id: String,
     /// Completion status is set after persistence and is visible to the model.
     pub tool_ok: Option<bool>,
 }
@@ -151,12 +151,15 @@ fn source_binding(
 ) -> Result<ContextSummarySourceV1, ModelContextError> {
     let canonical = crate::conversation_attachment::model_read::canonical_source(message)
         .map_err(|_| lineage_error())?;
+    // An unlabeled body could change without changing its binding.
+    let envelope_id = canonical
+        .data_envelope
+        .as_ref()
+        .map(|label| label.envelope_id.clone())
+        .ok_or_else(lineage_error)?;
     Ok(ContextSummarySourceV1 {
         message_id: message_id.into(),
-        envelope_id: canonical
-            .data_envelope
-            .as_ref()
-            .map(|label| label.envelope_id.clone()),
+        envelope_id,
         tool_ok: canonical.tool_ok,
     })
 }
@@ -600,7 +603,6 @@ fn derive_projection_metadata(
         ConservativeDerivation {
             output_envelope_id: &format!("context-lineage:{binding}"),
             content,
-            digest_sha256: digest,
             source_provider_id: "ai-assistant-context",
             source_tool_name: tool,
             source_object_id: Some(&binding),

@@ -730,6 +730,21 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&receipt).unwrap()).unwrap();
         replay.validate_for(&origin, action(), 1, &output).unwrap();
         assert_eq!(receipt, replay);
+        // An ephemeral label has no digest; the receipt keeps the result digest
+        // that completion replay compares.
+        assert!(receipt.envelope.content_sha256().is_none());
+        let changed = origin
+            .receipt(
+                action(),
+                1,
+                1000,
+                &ToolRunOutput {
+                    content: "CHANGED RESULT".into(),
+                    ..output.clone()
+                },
+            )
+            .unwrap();
+        assert_ne!(changed.result_sha256, receipt.result_sha256);
         let mut other = action();
         other.execution_id = "other-generation".into();
         assert!(replay.validate_for(&origin, other, 1, &output).is_err());

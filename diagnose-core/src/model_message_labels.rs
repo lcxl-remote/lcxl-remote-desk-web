@@ -135,9 +135,10 @@ fn invalid_label() -> AgentError {
 
 /// Runtime-authored tool closure inherits its parent authority and retention.
 /// A missing label remains missing; this never grants export to a new sink.
-/// Label a persisted runtime status result. One call has one result under a
-/// given parent label and tool, and in-place rewrites derive from the current
-/// label, so the id needs no body digest.
+/// Label a persisted runtime status result. Host recovery paths can rewrite
+/// one call's status body under the same parent and tool, so the id binds a
+/// digest of the short status body; the label stores no digest and no reader
+/// recomputes it.
 pub fn internal_tool_result_envelope(
     parent: Option<&DataEnvelope>,
     call_id: &str,
@@ -193,8 +194,13 @@ fn status_envelope(
         )
     } else {
         (
-            serde_json::to_string(&(&parent.envelope_id, call_id, source_tool_name))
-                .map_err(|_| invalid_label())?,
+            serde_json::to_string(&(
+                &parent.envelope_id,
+                call_id,
+                source_tool_name,
+                format!("{:x}", Sha256::digest(content.as_bytes())),
+            ))
+            .map_err(|_| invalid_label())?,
             ContentRef::Projection {
                 projection: STATUS_RESULT_PROJECTION.into(),
                 size_bytes: content.len() as u64,
@@ -451,6 +457,35 @@ mod tests {
         .unwrap()
         .data_envelope
         .unwrap()
+    }
+
+    #[test]
+    fn status_and_request_labels_name_one_body_per_id() {
+        let parent = source("owner");
+        // Host recovery can relabel one call's status under the same parent and tool.
+        let running = internal_tool_result_envelope(Some(&parent), "call", "running", "status")
+            .unwrap()
+            .unwrap();
+        let unknown = internal_tool_result_envelope(Some(&parent), "call", "unknown", "status")
+            .unwrap()
+            .unwrap();
+        assert_ne!(running.envelope_id, unknown.envelope_id);
+        assert!(matches!(running.content, ContentRef::Projection { .. }));
+        assert_eq!(
+            running,
+            internal_tool_result_envelope(Some(&parent), "call", "running", "status")
+                .unwrap()
+                .unwrap()
+        );
+        // Request projections reuse one call id while their body changes per request.
+        let first = request_projection_envelope(Some(&parent), "marker", "one", "runtime_context")
+            .unwrap()
+            .unwrap();
+        let second = request_projection_envelope(Some(&parent), "marker", "two", "runtime_context")
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.envelope_id, second.envelope_id);
+        assert!(first.content_sha256().is_some());
     }
 
     #[test]

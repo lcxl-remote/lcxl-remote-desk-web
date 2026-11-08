@@ -30,7 +30,6 @@ pub fn envelope(
                 size_bytes: text.len() as u64,
                 media_type: "application/json".into(),
             },
-            digest_sha256: &digest,
             source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID,
             source_tool_name: tool_name,
             source_object_id: None,

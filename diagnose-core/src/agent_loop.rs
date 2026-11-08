@@ -3296,9 +3296,13 @@ fn interactive_user_home_projection(
     let mut message = ChatMessage::system_event(&message_id, &text);
     message.data_envelope = Some(DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-        envelope_id: format!("env-{message_id}"),
+        // The home text can change within a turn; the digest names its revision.
+        envelope_id: format!("env-{message_id}-{}", &digest_sha256[..32]),
         content: ContentRef::ImmutableBlob {
-            blob_id: format!("interactive-home-snapshot-env-{message_id}"),
+            blob_id: format!(
+                "interactive-home-snapshot-env-{message_id}-{}",
+                &digest_sha256[..32]
+            ),
             sha256: digest_sha256.clone(),
             size_bytes: text.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),

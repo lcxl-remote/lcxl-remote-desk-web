@@ -313,11 +313,6 @@ impl std::error::Error for SinkAuthorizationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hex_digest(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(bytes))
-    }
     use crate::data_policy::{ConservativeDerivation, derive_conservatively};
     use desk_agent_protocol::data_lineage::{
         DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary,
@@ -642,7 +637,6 @@ mod tests {
             vec![model_destination],
         );
         let derived_bytes = b"derived search query or outbound draft";
-        let derived_digest = hex_digest(derived_bytes);
         let (derived, record) = derive_conservatively(
             &[source],
             ConservativeDerivation {
@@ -652,7 +646,6 @@ mod tests {
                     size_bytes: derived_bytes.len() as u64,
                     expires_at_unix_ms: 200,
                 },
-                digest_sha256: &derived_digest,
                 source_provider_id: "model",
                 source_tool_name: "derive_outbound_content",
                 source_object_id: None,

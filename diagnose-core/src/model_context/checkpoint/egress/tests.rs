@@ -190,7 +190,9 @@ fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
         envelope_id: conversation[2]
             .data_envelope
             .as_ref()
-            .map(|label| label.envelope_id.clone()),
+            .unwrap()
+            .envelope_id
+            .clone(),
         tool_ok: conversation[2].tool_ok,
     }];
     assert_eq!(
