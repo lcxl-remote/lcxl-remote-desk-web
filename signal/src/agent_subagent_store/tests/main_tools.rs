@@ -733,14 +733,13 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
             .find(|message| message.message_id == "short-result")
             .unwrap();
         let output: serde_json::Value = serde_json::from_str(&output.text).unwrap();
-        assert_eq!(
-            if tool == tools::WAIT_REPORTS {
-                output["tasks"][0]["task_id"].as_str()
-            } else {
-                output[key].as_str()
-            },
-            Some(native.as_str())
-        );
+        let shown = if tool == tools::WAIT_REPORTS {
+            output["tasks"][0]["task_id"].as_str()
+        } else {
+            output[key].as_str()
+        }
+        .unwrap();
+        assert!(shown.starts_with("task") && shown != native, "{shown}");
         assert_eq!(request.messages, parent.conversation);
         if matches!(tool, tools::STATUS | tools::REPORTS | tools::WAIT_REPORTS) {
             let mut changed: serde_json::Value =

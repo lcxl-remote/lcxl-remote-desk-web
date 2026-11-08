@@ -198,6 +198,59 @@ fn visit_result_selectors(value: &mut Value, visitor: &mut impl FnMut(&mut Value
     }
 }
 
+/// Server-issued selectors the model copies by field name, with the alias
+/// prefixes each field accepts.
+const SELECTOR_FIELDS: [(&str, &[&str]); 5] = [
+    ("worker_id", &["wk"]),
+    ("request_id", &["task"]),
+    ("task_id", &["task", "j"]),
+    ("question_id", &["q"]),
+    ("preview_id", &["v"]),
+];
+
+fn selector_prefix(native: &str) -> Option<&'static str> {
+    use crate::native_ids::{Kind, is};
+    [
+        (Kind::Worker, "wk"),
+        (Kind::Task, "task"),
+        (Kind::WorkerReport, "q"),
+        (Kind::BackgroundAction, "j"),
+        (Kind::ExecRequest, "j"),
+        (Kind::InteractiveExecRequest, "j"),
+        (Kind::Preview, "v"),
+    ]
+    .into_iter()
+    .find(|(kind, _)| is(*kind, native))
+    .map(|(_, prefix)| prefix)
+}
+
+fn selector_alias_shape(id: &str) -> bool {
+    ["wk", "task", "q", "j", "v"].into_iter().any(|prefix| {
+        id.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+fn visit_selector_values(value: &Value, visitor: &mut impl FnMut(&str)) {
+    match value {
+        Value::Object(object) => {
+            for (field, child) in object {
+                if SELECTOR_FIELDS.iter().any(|(name, _)| name == field)
+                    && let Some(native) = child.as_str()
+                {
+                    visitor(native);
+                } else if !is_business_content(field) {
+                    visit_selector_values(child, visitor);
+                }
+            }
+        }
+        Value::Array(values) => values
+            .iter()
+            .for_each(|v| visit_selector_values(v, visitor)),
+        _ => {}
+    }
+}
+
 fn result_alias_shape(id: &str) -> bool {
     id.strip_prefix("res")
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -285,7 +338,7 @@ impl UiReferenceState {
         Ok(())
     }
 
-    /// Accepted device observations allocate aliases; native business IDs do not.
+    /// Accepted device observations and server-issued selectors allocate aliases.
     /// Ordering follows the result structure; request projection allocates no IDs.
     pub fn observe(&mut self, history: &[ChatMessage]) -> Result<bool, AgentError> {
         let before = self.clone();
@@ -349,7 +402,99 @@ impl UiReferenceState {
             }
         }
         self.observe_results(history)?;
+        self.observe_selectors(history)?;
         Ok(*self != before)
+    }
+
+    /// Worker, request, question, background task and preview ids issued in
+    /// results or persisted delegation state receive short aliases.
+    fn observe_selectors(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
+        for message in history {
+            let carries = matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+                || crate::subagent::model_ids::is_runtime(message)
+                || crate::subagent::model_ids::is_receipt(message);
+            if !carries {
+                continue;
+            }
+            let Ok(value) = crate::image_input::structured_tool_result(&message.text) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            visit_selector_values(&value, &mut |native| {
+                if let Some(prefix) = selector_prefix(native) {
+                    found.push((prefix, native.to_owned()));
+                }
+            });
+            for (prefix, native) in found {
+                self.register_entry(
+                    prefix,
+                    native.clone(),
+                    &serde_json::json!({"selector": native}),
+                    ReferenceSource::Message(message.message_id.clone()),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace selector aliases in known id fields with their native ids.
+    pub(crate) fn expand_selector_ids(&self, value: &mut Value) -> Result<(), AgentError> {
+        if let Some(requests) = value.get_mut("requests").and_then(Value::as_array_mut) {
+            for request in requests {
+                self.expand_selector_ids(request)?;
+            }
+        }
+        let Some(object) = value.as_object_mut() else {
+            return Ok(());
+        };
+        for (field, prefixes) in SELECTOR_FIELDS {
+            let Some(id) = object.get_mut(field) else {
+                continue;
+            };
+            let Some(selected) = id.as_str() else {
+                continue;
+            };
+            match self.entries.get(selected) {
+                Some(entry)
+                    if prefixes.contains(&entry.prefix.as_str()) && !entry.sources.is_empty() =>
+                {
+                    *id = Value::String(entry.native_id.clone());
+                }
+                Some(_) => {
+                    return Err(invalid(
+                        "ID has the wrong type; copy it from the matching result",
+                    ));
+                }
+                None if selector_alias_shape(selected) => {
+                    return Err(invalid(
+                        "ID is unavailable in this conversation; copy it from a current result",
+                    ));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Present recorded selectors with the aliases the model saw.
+    pub(crate) fn alias_selector_ids(&self, value: &mut Value) {
+        if let Some(requests) = value.get_mut("requests").and_then(Value::as_array_mut) {
+            for request in requests {
+                self.alias_selector_ids(request);
+            }
+        }
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        for (field, _) in SELECTOR_FIELDS {
+            if let Some(id) = object.get_mut(field)
+                && let Some(native) = id.as_str()
+                && let Some(alias) =
+                    selector_prefix(native).and_then(|prefix| self.alias(prefix, native, None))
+            {
+                *id = Value::String(alias.into());
+            }
+        }
     }
 
     /// A result alias names the verified message whose projection offers it.
@@ -996,6 +1141,15 @@ impl UiReferenceState {
                         }
                     }
                 }
+                for (field, _) in SELECTOR_FIELDS {
+                    if let Some(id) = object.get_mut(field)
+                        && let Some(native) = id.as_str()
+                        && let Some(alias) = selector_prefix(native)
+                            .and_then(|prefix| self.alias(prefix, native, None))
+                    {
+                        *id = Value::String(alias.into());
+                    }
+                }
                 for field in RESULT_OUTPUT_FIELDS {
                     if let Some(id) = object.get_mut(field)
                         && let Some(alias) = id
@@ -1049,6 +1203,7 @@ impl UiReferenceState {
             };
             if let Some(body) = body {
                 crate::subagent::model_ids::omit_internal_selectors(body);
+                self.shorten_value(body, None);
             }
             message.text = value.to_string();
         }
@@ -1208,6 +1363,7 @@ impl UiReferenceState {
         expected: &mut Vec<Value>,
     ) -> Result<(), AgentError> {
         self.expand_result_ids(value)?;
+        self.expand_selector_ids(value)?;
         if !Self::cursor_paths(tool).is_empty()
             && let Some(id) = value.get_mut("cursor")
             && let Some(selector) = id.as_str().filter(|id| id.parse::<i64>().is_err())

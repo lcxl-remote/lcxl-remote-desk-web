@@ -7,7 +7,7 @@ use crate::{
 use serde_json::json;
 
 #[test]
-fn native_tasks_do_not_allocate_or_resolve_aliases() {
+fn native_tasks_are_presented_and_accepted_as_aliases() {
     let id = native_ids::stable(Kind::Task, &("root", "group", "owner", "device", "call"));
     let mut references = UiReferenceState::default();
     let messages = vec![
@@ -26,31 +26,53 @@ fn native_tasks_do_not_allocate_or_resolve_aliases() {
             json!({"task_id":id,"state":"running"}).to_string(),
         ),
     ];
-    assert!(!references.observe(&messages).unwrap());
+    assert!(references.observe(&messages).unwrap());
+    let mut projected = messages[1].clone();
+    references.project_message(&mut projected);
     assert_eq!(
-        serde_json::to_value(&references).unwrap()["entries"],
-        json!({})
+        serde_json::from_str::<Value>(&projected.text).unwrap()["task_id"],
+        "task1"
     );
-    for (tool, args) in [
-        (tools::STATUS, json!({"task_id":id})),
-        (tools::REPORTS, json!({"request_id":id})),
+    for (tool, aliased, native) in [
+        (
+            tools::STATUS,
+            json!({"task_id":"task1"}),
+            json!({"task_id":id}),
+        ),
+        (
+            tools::REPORTS,
+            json!({"request_id":"task1"}),
+            json!({"request_id":id}),
+        ),
         (
             tools::WAIT_REPORTS,
+            json!({"requests":[{"request_id":"task1","after_seq":0}],"kinds":["completed"]}),
             json!({"requests":[{"request_id":id,"after_seq":0}],"kinds":["completed"]}),
         ),
     ] {
-        let call = ToolCall {
-            id: "read".into(),
-            name: tool.into(),
-            arguments_json: args.to_string(),
-        };
-        let (resolved, expected) = references.expand_call(&call).unwrap();
-        assert!(expected.is_empty());
-        assert_eq!(
-            serde_json::from_str::<Value>(&resolved.arguments_json).unwrap(),
-            args
-        );
+        for arguments in [&aliased, &native] {
+            let call = ToolCall {
+                id: "read".into(),
+                name: tool.into(),
+                arguments_json: arguments.to_string(),
+            };
+            let (resolved, expected) = references.expand_call(&call).unwrap();
+            assert!(expected.is_empty());
+            assert_eq!(
+                serde_json::from_str::<Value>(&resolved.arguments_json).unwrap(),
+                native
+            );
+        }
+        let mut recorded = native.clone();
+        references.alias_selector_ids(&mut recorded);
+        assert_eq!(recorded, aliased);
     }
+    let call = ToolCall {
+        id: "read".into(),
+        name: tools::STATUS.into(),
+        arguments_json: json!({"task_id":"task9"}).to_string(),
+    };
+    assert!(references.expand_call(&call).is_err());
 }
 
 #[test]

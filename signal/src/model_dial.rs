@@ -2308,7 +2308,8 @@ mod tests {
             assert!(!wire.contains("expires_at"));
             assert!(!wire.contains("calendar-id"));
             assert!(wire.contains("a1"));
-            assert!(wire.contains(&task_id));
+            assert!(!wire.contains(&task_id));
+            assert!(wire.contains("task1"));
             assert!(wire.contains("opaque-provider-call"));
             assert!(!wire.contains("result_locators"));
             assert!(wire.contains("application_id"));

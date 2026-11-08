@@ -435,6 +435,20 @@ pub fn parse_observed(
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<Operation, AgentError> {
     use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
+    // Execution and recovery both parse the recorded call, so aliases expand
+    // here rather than in the shared resolver.
+    let mut expanded = None;
+    if let Ok(original) = serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+        let mut arguments = original.clone();
+        session.ui_references.expand_selector_ids(&mut arguments)?;
+        if arguments != original {
+            expanded = Some(ToolCall {
+                arguments_json: arguments.to_string(),
+                ..call.clone()
+            });
+        }
+    }
+    let call = expanded.as_ref().unwrap_or(call);
     let effect = effect(&call.name).ok_or_else(|| {
         observation.reject(Stage::Exposure, InputIssue::UnknownTool);
         invalid("unknown delegation tool")

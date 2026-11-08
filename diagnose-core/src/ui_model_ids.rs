@@ -918,6 +918,7 @@ pub(crate) fn project_model_message(
             project_arguments(&call.name, &mut value, locators);
             if let Some(references) = references {
                 references.alias_result_ids(&mut value);
+                references.alias_selector_ids(&mut value);
             }
             crate::model_input::project_protocol_versions(&call.name, &mut value);
             if call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
