@@ -149,7 +149,6 @@ async fn ready_request_for(
             selected_envelopes: vec![
                 desk_diagnose_core::ai_assistant::seam::SelectedAssistantEnvelope {
                     envelope_id: envelope.envelope_id,
-                    digest_sha256: envelope.digest_sha256,
                 },
             ],
             read_projection_ids: vec![usage.projection_id.clone()],

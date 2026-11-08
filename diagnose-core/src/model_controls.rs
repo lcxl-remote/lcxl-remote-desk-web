@@ -7,7 +7,6 @@ use crate::{
 use desk_agent_protocol::AgentError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObservation {
@@ -16,7 +15,6 @@ pub struct ControlObservation {
     pub control_revision: u64,
     pub schedule_revision: i64,
     pub envelope_id: String,
-    pub digest_sha256: String,
     pub provider: String,
     pub tool: String,
     pub priority: u8,
@@ -72,9 +70,7 @@ impl FrozenModelControls {
                 || label.validate().is_err()
                 || crate::model_egress::message_content_bytes(message)
                     .ok()
-                    .is_none_or(|bytes| {
-                        format!("{:x}", Sha256::digest(bytes)) != label.digest_sha256
-                    })
+                    .is_none_or(|bytes| label.content.size_bytes() != bytes.len() as u64)
             {
                 continue;
             }
@@ -106,7 +102,6 @@ impl FrozenModelControls {
                             control_revision: session.control_revision,
                             schedule_revision: 0,
                             envelope_id: label.envelope_id.clone(),
-                            digest_sha256: label.digest_sha256.clone(),
                             provider: label.provenance.source_provider_id.clone(),
                             tool: source.into(),
                             priority: 1,
@@ -180,7 +175,6 @@ impl FrozenModelControls {
                     control_revision: control,
                     schedule_revision: revision,
                     envelope_id: label.envelope_id.clone(),
-                    digest_sha256: label.digest_sha256.clone(),
                     provider: label.provenance.source_provider_id.clone(),
                     tool: source.into(),
                     priority,
@@ -277,8 +271,7 @@ impl FrozenModelControls {
             let selected = self.selected(&id, kind)?;
             // An immediate export edge is acceptable. An ancestor of a summary is not.
             if !inputs.iter().any(|input| {
-                input.digest_sha256 == selected.digest_sha256
-                    && input.source_provider_id == selected.provider
+                input.source_provider_id == selected.provider
                     && input.source_tool_name == selected.tool
                     && (input.envelope_id == selected.envelope_id
                         || input.source_envelope_ids == [selected.envelope_id.clone()])
@@ -558,7 +551,7 @@ mod tests {
         let label = input.data_envelope.unwrap();
         let mut node = ModelInputLineage {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256,
+            size_bytes: 1,
             source_provider_id: label.provenance.source_provider_id,
             source_tool_name: label.provenance.source_tool_name,
             source_envelope_ids: vec![],

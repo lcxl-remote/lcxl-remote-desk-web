@@ -4257,7 +4257,7 @@ expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_fac
             exported.source_envelope_ids.as_slice(),
             std::slice::from_ref(&original.envelope_id)
         );
-        assert_eq!(exported.digest_sha256, original.digest_sha256);
+        assert_eq!(exported.size_bytes, original.content.size_bytes());
 
         let output = turn.provider_meta.data_envelope.as_ref().unwrap();
         assert_eq!(

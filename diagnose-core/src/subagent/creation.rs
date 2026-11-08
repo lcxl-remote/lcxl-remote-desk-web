@@ -5,7 +5,6 @@ use desk_agent_protocol::{
     data_lineage::{DataEnvelope, DestinationIdentity},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{
     DelegationSource,
@@ -515,9 +514,8 @@ impl CreationEnvelope {
             || label.provenance.source_object_id.as_deref() != Some(message.message_id.as_str())
             || !label.provenance.source_envelope_ids.is_empty()
             || label.allowed_destinations.as_slice() != [self.model_destination.clone()]
-            || label.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
-            || !matches!(&label.content, desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob { sha256, size_bytes, .. }
-                if sha256 == &label.digest_sha256 && *size_bytes == message.text.len() as u64)
+            || !matches!(&label.content, desk_agent_protocol::data_lineage::ContentRef::ImmutableBlob { size_bytes, .. }
+                if *size_bytes == message.text.len() as u64)
         {
             return Err(super::invalid(
                 "delegation creation does not contain authentic owner input",

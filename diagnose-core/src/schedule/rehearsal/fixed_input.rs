@@ -111,14 +111,13 @@ pub fn fixed_task_input_source(
         ModelInputLineage {
             public_system_prompt: false,
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
+            size_bytes: label.content.size_bytes(),
             source_provider_id: label.provenance.source_provider_id.clone(),
             source_tool_name: label.provenance.source_tool_name.clone(),
             source_envelope_ids: label.provenance.source_envelope_ids.clone(),
         },
         TaskSourceBinding {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
             authority: TaskSourceAuthority::Scopes(vec![task_input_scope(contract)]),
         },
     ))

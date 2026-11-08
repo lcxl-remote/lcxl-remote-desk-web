@@ -145,7 +145,6 @@ impl AssistantModelDataManifest {
                 .values()
                 .map(|envelope| SelectedAssistantEnvelope {
                     envelope_id: envelope.envelope_id.clone(),
-                    digest_sha256: envelope.digest_sha256.clone(),
                 })
                 .collect(),
             read_projection_ids: selected_ids,

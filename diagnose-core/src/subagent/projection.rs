@@ -94,16 +94,17 @@ pub fn runtime_message_for_history(
                     message.role,
                     crate::chat::ChatRole::Tool | crate::chat::ChatRole::UntrustedOutput
                 ) && (message.data_envelope.as_ref() == Some(input)
-                    || (message.raw_result.as_ref().is_some_and(|raw| {
-                        raw.original_envelope.as_ref() == Some(input)
-                            && raw.original_sha256 == input.digest_sha256
-                    }) && message.data_envelope.as_ref().is_some_and(|projected| {
-                        projected
-                            .provenance
-                            .source_envelope_ids
-                            .contains(&input.envelope_id)
-                            && projected.sensitivity >= input.sensitivity
-                    })))
+                    || (message
+                        .raw_result
+                        .as_ref()
+                        .is_some_and(|raw| raw.original_envelope.as_ref() == Some(input))
+                        && message.data_envelope.as_ref().is_some_and(|projected| {
+                            projected
+                                .provenance
+                                .source_envelope_ids
+                                .contains(&input.envelope_id)
+                                && projected.sensitivity >= input.sensitivity
+                        })))
             })
             .ok_or_else(|| {
                 super::invalid("delegated state has no original model-readable result")

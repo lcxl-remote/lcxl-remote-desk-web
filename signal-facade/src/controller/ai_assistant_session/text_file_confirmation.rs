@@ -81,7 +81,7 @@ pub(super) fn project(
     }
     let envelope = source.data_envelope.as_ref()?;
     envelope.validate().ok()?;
-    if envelope.digest_sha256 != format!("{:x}", Sha256::digest(source.text.as_bytes())) {
+    if envelope.content.size_bytes() != source.text.len() as u64 {
         return None;
     }
     let (file_name, digest) = if envelope.provenance.source_tool_name == "read_text_file"

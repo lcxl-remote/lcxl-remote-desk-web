@@ -22,7 +22,6 @@ use desk_diagnose_core::dynamic_run::{
 use desk_diagnose_core::session::{PersistedAgentSession, WorkKind};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, Set};
-use sha2::{Digest, Sha256};
 
 use crate::agent_session_store::EventAppend;
 use crate::entity::{agent_action_item, agent_run_event, agent_session};
@@ -90,10 +89,6 @@ impl BackgroundCompletionPayload {
             .envelope
             .validate()
             .map_err(|error| error.to_string())?;
-        let digest = format!("{:x}", Sha256::digest(output.text.as_bytes()));
-        if output.envelope.digest_sha256 != digest {
-            return Err("background result bytes do not match their DataEnvelope".into());
-        }
         let size_bytes = match &output.envelope.content {
             ContentRef::ImmutableBlob { size_bytes, .. }
             | ContentRef::EphemeralObservation { size_bytes, .. }
@@ -973,7 +968,7 @@ pub fn start_completion_publisher(db: DatabaseConnection) {
 fn cancel_delivered_event_id(request: &CapabilityCancelRequest) -> String {
     format!(
         "background-cancel-delivered-{:x}",
-        Sha256::digest(
+        <sha2::Sha256 as sha2::Digest>::digest(
             format!(
                 "{}:{}:{}:{}",
                 request.task.task_id,
@@ -1169,6 +1164,7 @@ mod tests {
     };
     use desk_diagnose_core::simulated_grant::{SimulatedCapabilityCall, SimulatedGrantAuthorizer};
     use sea_orm::{ConnectionTrait, PaginatorTrait, QueryOrder, Schema};
+    use sha2::{Digest, Sha256};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},

@@ -81,7 +81,6 @@ pub(super) fn owner_text_on<'a>(
             return Ok(None);
         };
         if original.device_ref != output.source_set.source_device_ref
-            || original.original_sha256 != source.digest_sha256
             || !original.history_admitted
             || original.accepted_input_seq < 0
             || original.accepted_input_seq as u64 > output.actor_input_seq

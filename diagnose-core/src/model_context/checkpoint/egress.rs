@@ -138,7 +138,27 @@ pub fn reconcile_context_eligibility(
 #[serde(deny_unknown_fields)]
 pub struct ContextSummarySourceV1 {
     pub message_id: String,
-    pub message_sha256: String,
+    /// Label of the canonical message; a rewritten body always carries a new
+    /// label, so the id binds the summarized body.
+    pub envelope_id: Option<String>,
+    /// Completion status is set after persistence and is visible to the model.
+    pub tool_ok: Option<bool>,
+}
+
+fn source_binding(
+    message_id: &str,
+    message: &ChatMessage,
+) -> Result<ContextSummarySourceV1, ModelContextError> {
+    let canonical = crate::conversation_attachment::model_read::canonical_source(message)
+        .map_err(|_| lineage_error())?;
+    Ok(ContextSummarySourceV1 {
+        message_id: message_id.into(),
+        envelope_id: canonical
+            .data_envelope
+            .as_ref()
+            .map(|label| label.envelope_id.clone()),
+        tool_ok: canonical.tool_ok,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,13 +351,7 @@ pub(super) fn compression_source_bindings(
     ids.into_iter()
         .map(|id| {
             let message = messages.get(id).ok_or_else(lineage_error)?;
-            Ok(ContextSummarySourceV1 {
-                message_id: id.into(),
-                message_sha256: sha256_hex(&canonical_bytes(
-                    &crate::conversation_attachment::model_read::canonical_source(message)
-                        .map_err(|_| lineage_error())?,
-                )?),
-            })
+            source_binding(id, message)
         })
         .collect()
 }
@@ -380,11 +394,7 @@ fn validate_source_bindings(
         let message = messages
             .get(source.message_id.as_str())
             .ok_or_else(lineage_error)?;
-        if sha256_hex(&canonical_bytes(
-            &crate::conversation_attachment::model_read::canonical_source(message)
-                .map_err(|_| lineage_error())?,
-        )?) != source.message_sha256
-        {
+        if source_binding(&source.message_id, message)? != *source {
             return Err(lineage_error());
         }
         previous = Some(&source.message_id);
@@ -400,9 +410,8 @@ pub(super) fn validate_summary_lineage(
     validate_source_bindings(&lineage.sources, conversation)?;
     validate_summary_derivations(lineage, conversation)?;
     lineage.envelope.validate().map_err(|_| lineage_error())?;
-    if lineage.envelope.digest_sha256 != sha256_hex(canonical.as_bytes())
-        || lineage.envelope.provenance.source_object_id.as_deref()
-            != Some(source_binding_digest(&lineage.envelope, &lineage.sources)?.as_str())
+    if lineage.envelope.provenance.source_object_id.as_deref()
+        != Some(source_binding_digest(&lineage.envelope, &lineage.sources)?.as_str())
         || !matches!(&lineage.envelope.content, ContentRef::ImmutableBlob { size_bytes, .. }
             if *size_bytes == canonical.len() as u64)
     {

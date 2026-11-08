@@ -152,7 +152,7 @@ async fn completion_before_parent_release_is_found_after_release_and_claimed_onc
     };
     let lineage = desk_diagnose_core::model_egress::ModelInputLineage {
         envelope_id: label.envelope_id.clone(),
-        digest_sha256: label.digest_sha256.clone(),
+        size_bytes: label.content.size_bytes(),
         source_provider_id: label.provenance.source_provider_id.clone(),
         source_tool_name: label.provenance.source_tool_name.clone(),
         source_envelope_ids: label.provenance.source_envelope_ids.clone(),

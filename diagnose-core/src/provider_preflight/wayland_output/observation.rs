@@ -43,7 +43,7 @@ pub fn observed_output(
             || envelope.provenance.source_tool_name != "read_current_screen"
             || envelope.provenance.source_provider_id
                 != crate::ai_assistant::CURRENT_SCREEN_PROVIDER_ID
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
+            || envelope.content.size_bytes() != message.text.len() as u64
         {
             continue;
         }

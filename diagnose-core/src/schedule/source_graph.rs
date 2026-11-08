@@ -18,7 +18,6 @@ pub enum TaskSourceAuthority {
 /// Independently verified authority at a node; never a traversal stopping point.
 pub struct TaskSourceBinding {
     pub envelope_id: String,
-    pub digest_sha256: String,
     pub authority: TaskSourceAuthority,
 }
 
@@ -40,24 +39,22 @@ pub enum TaskSourceError {
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && id.trim() == id && !id.chars().any(char::is_control)
 }
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
 
 /// Callers must first verify every model/transform receipt and root authority in
 /// the same owner-bound frozen run. This verifies graph completeness and scope
 /// union only; it neither establishes root permissions nor authorizes any sink.
 /// Traversal is iterative so a deep history cannot exhaust the call stack.
+/// An envelope id names one immutable body, so nodes, roots and the output
+/// match by id; one id with differing lineage or size is a conflict.
 pub fn resolve_task_sources(
     output_id: &str,
-    output_digest: &str,
     nodes: &[ModelInputLineage],
     bindings: &[TaskSourceBinding],
 ) -> Result<ResolvedTaskSources, TaskSourceError> {
     let mut indexed = BTreeMap::new();
     for node in nodes {
         if !valid_id(&node.envelope_id)
-            || !valid_digest(&node.digest_sha256)
+            || node.size_bytes == 0
             || node.source_envelope_ids.iter().any(|id| !valid_id(id))
             || node
                 .source_envelope_ids
@@ -88,9 +85,6 @@ pub fn resolve_task_sources(
         let node = indexed
             .get(root.envelope_id.as_str())
             .ok_or(TaskSourceError::InvalidRoot)?;
-        if root.digest_sha256 != node.digest_sha256 {
-            return Err(TaskSourceError::InvalidRoot);
-        }
         match &root.authority {
             TaskSourceAuthority::Scopes(scopes)
                 if !scopes.is_empty()
@@ -107,11 +101,8 @@ pub fn resolve_task_sources(
             return Err(TaskSourceError::InvalidRoot);
         }
     }
-    let output = indexed
-        .get(output_id)
-        .ok_or(TaskSourceError::MissingSource)?;
-    if output.digest_sha256 != output_digest {
-        return Err(TaskSourceError::ConflictingNode);
+    if !indexed.contains_key(output_id) {
+        return Err(TaskSourceError::MissingSource);
     }
     let mut pending = vec![(output_id, false)];
     let mut active = BTreeSet::new();
@@ -167,7 +158,7 @@ mod tests {
         ModelInputLineage {
             public_system_prompt: false,
             envelope_id: id.into(),
-            digest_sha256: "a".repeat(64),
+            size_bytes: 1,
             source_provider_id: "device".into(),
             source_tool_name: "read".into(),
             source_envelope_ids: parents.iter().map(|id| (*id).into()).collect(),
@@ -176,7 +167,6 @@ mod tests {
     fn root(id: &str) -> TaskSourceBinding {
         TaskSourceBinding {
             envelope_id: id.into(),
-            digest_sha256: "a".repeat(64),
             authority: TaskSourceAuthority::Scopes(vec![format!("scope:{id}")]),
         }
     }
@@ -189,13 +179,8 @@ mod tests {
             node("previous", &["export"]),
             node("output", &["export", "previous"]),
         ];
-        let proof = resolve_task_sources(
-            "output",
-            &"a".repeat(64),
-            &nodes,
-            &[root("read"), root("unused")],
-        )
-        .unwrap();
+        let proof =
+            resolve_task_sources("output", &nodes, &[root("read"), root("unused")]).unwrap();
         assert_eq!(proof.scopes, ["scope:read"]);
         assert_eq!(proof.root_envelope_ids, ["read"]);
     }
@@ -206,67 +191,53 @@ mod tests {
             node("read", &["question"]),
             node("output", &["read"]),
         ];
-        let proof = resolve_task_sources(
-            "output",
-            &"a".repeat(64),
-            &nodes,
-            &[root("read"), root("question")],
-        )
-        .unwrap();
+        let proof =
+            resolve_task_sources("output", &nodes, &[root("read"), root("question")]).unwrap();
         assert_eq!(proof.scopes, ["scope:question", "scope:read"]);
         assert_eq!(proof.root_envelope_ids, ["question"]);
         assert_eq!(
-            resolve_task_sources("output", &"a".repeat(64), &nodes, &[root("read")]),
+            resolve_task_sources("output", &nodes, &[root("read")]),
             Err(TaskSourceError::MissingSource),
         );
         let cyclic = vec![node("read", &["output"]), node("output", &["read"])];
         assert_eq!(
-            resolve_task_sources("output", &"a".repeat(64), &cyclic, &[root("read")]),
+            resolve_task_sources("output", &cyclic, &[root("read")]),
             Err(TaskSourceError::Cycle),
         );
     }
 
     #[test]
     fn rejects_missing_cyclic_conflicting_and_unproven_sources() {
-        let digest = "a".repeat(64);
-        assert!(
-            resolve_task_sources("output", &digest, &[node("output", &["missing"])], &[]).is_err()
-        );
-        assert!(resolve_task_sources("output", &digest, &[node("output", &[])], &[]).is_err());
+        assert!(resolve_task_sources("output", &[node("output", &["missing"])], &[]).is_err());
+        assert!(resolve_task_sources("output", &[node("output", &[])], &[]).is_err());
         assert_eq!(
             resolve_task_sources(
                 "output",
-                &digest,
                 &[node("output", &["child"]), node("child", &["output"])],
                 &[]
             ),
             Err(TaskSourceError::Cycle)
         );
         let mut conflict = node("root", &[]);
-        conflict.digest_sha256 = "b".repeat(64);
+        conflict.size_bytes = 2;
         assert_eq!(
-            resolve_task_sources(
-                "root",
-                &digest,
-                &[node("root", &[]), conflict],
-                &[root("root")]
-            ),
+            resolve_task_sources("root", &[node("root", &[]), conflict], &[root("root")]),
             Err(TaskSourceError::ConflictingNode)
         );
         assert!(
             resolve_task_sources(
                 "output",
-                &digest,
                 &[node("root", &[]), node("output", &["root"])],
                 &[root("output")]
             )
             .is_err()
         );
-        let mut wrong = root("root");
-        wrong.digest_sha256 = "b".repeat(64);
-        assert!(resolve_task_sources("root", &digest, &[node("root", &[])], &[wrong]).is_err());
+        assert_eq!(
+            resolve_task_sources("root", &[node("root", &[])], &[root("absent")]),
+            Err(TaskSourceError::InvalidRoot)
+        );
         let mut public = root("root");
         public.authority = TaskSourceAuthority::SystemPrompt;
-        assert!(resolve_task_sources("root", &digest, &[node("root", &[])], &[public]).is_err());
+        assert!(resolve_task_sources("root", &[node("root", &[])], &[public]).is_err());
     }
 }

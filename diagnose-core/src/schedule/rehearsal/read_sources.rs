@@ -255,14 +255,13 @@ fn envelope_source(
         lineage: ModelInputLineage {
             public_system_prompt: false,
             envelope_id: envelope.envelope_id.clone(),
-            digest_sha256: envelope.digest_sha256.clone(),
+            size_bytes: envelope.content.size_bytes(),
             source_provider_id: envelope.provenance.source_provider_id.clone(),
             source_tool_name: envelope.provenance.source_tool_name.clone(),
             source_envelope_ids: envelope.provenance.source_envelope_ids.clone(),
         },
         authority: TaskSourceBinding {
             envelope_id: envelope.envelope_id.clone(),
-            digest_sha256: envelope.digest_sha256.clone(),
             authority: TaskSourceAuthority::Scopes(resources.to_vec()),
         },
     }

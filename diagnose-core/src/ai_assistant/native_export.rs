@@ -646,7 +646,6 @@ mod tests {
             control_generation: 1,
             selected_envelopes: vec![SelectedAssistantEnvelope {
                 envelope_id: envelope.envelope_id.clone(),
-                digest_sha256: envelope.digest_sha256.clone(),
             }],
             read_projection_ids: vec![proof.usage.projection_id.clone()],
             current_memories: Vec::new(),
@@ -743,7 +742,7 @@ mod tests {
         manifest.read_projection_ids.clear();
         let mut input = crate::model_egress::ModelInputLineage {
             envelope_id: "direct-memory".into(),
-            digest_sha256: "a".repeat(64),
+            size_bytes: 1,
             source_provider_id: "assistant-data-source".into(),
             source_tool_name: "current_memories".into(),
             source_envelope_ids: Vec::new(),

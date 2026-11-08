@@ -7,7 +7,6 @@ use desk_agent_protocol::{
     data_lineage::{DataEnvelope, DestinationIdentity},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub const MAX_REPORT_PAGE: u32 = 20;
 pub const MAX_REPORT_BATCH_ITEMS: usize = 8;
@@ -201,7 +200,7 @@ impl StoredReport {
         }
         if self.report.seq == 0
             || self.report.execution_generation == 0
-            || format!("{:x}", Sha256::digest(bytes)) != self.envelope.digest_sha256
+            || self.envelope.content.size_bytes() != bytes.len() as u64
         {
             return Err(invalid("report content does not match its provenance"));
         }

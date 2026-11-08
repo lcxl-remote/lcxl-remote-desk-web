@@ -1209,7 +1209,7 @@ mod tests {
             project_model_input_lineage(&authorized.audit, &authorized.input_envelopes).unwrap();
         assert_eq!(inputs[2].source_envelope_ids, ["read-envelope"]);
         assert_ne!(inputs[2].envelope_id, "read-envelope");
-        assert_eq!(inputs[2].digest_sha256, hex_digest(observation));
+        assert_eq!(inputs[2].size_bytes, observation.len() as u64);
         assert_eq!(authorized.request.messages[2].text.as_bytes(), observation);
         let reprojection = policy
             .authorize_request(authorized.request.clone())
@@ -1264,7 +1264,7 @@ mod tests {
         let read = ModelInputLineage {
             public_system_prompt: false,
             envelope_id: "read-envelope".into(),
-            digest_sha256: hex_digest(observation),
+            size_bytes: 1,
             source_provider_id: inputs[2].source_provider_id.clone(),
             source_tool_name: inputs[2].source_tool_name.clone(),
             source_envelope_ids: vec![],
@@ -1273,7 +1273,7 @@ mod tests {
         nodes.push(ModelInputLineage {
             public_system_prompt: false,
             envelope_id: derived.envelope_id.clone(),
-            digest_sha256: derived.digest_sha256.clone(),
+            size_bytes: derived.content.size_bytes(),
             source_provider_id: derived.provenance.source_provider_id.clone(),
             source_tool_name: derived.provenance.source_tool_name.clone(),
             source_envelope_ids: derived.provenance.source_envelope_ids.clone(),
@@ -1281,37 +1281,24 @@ mod tests {
         let roots = [
             TaskSourceBinding {
                 envelope_id: inputs[0].envelope_id.clone(),
-                digest_sha256: inputs[0].digest_sha256.clone(),
                 authority: TaskSourceAuthority::SystemPrompt,
             },
             TaskSourceBinding {
                 envelope_id: inputs[1].envelope_id.clone(),
-                digest_sha256: inputs[1].digest_sha256.clone(),
                 authority: TaskSourceAuthority::Scopes(vec!["fixed-input:question".into()]),
             },
             TaskSourceBinding {
                 envelope_id: read.envelope_id.clone(),
-                digest_sha256: read.digest_sha256.clone(),
                 authority: TaskSourceAuthority::Scopes(vec!["office:selection".into()]),
             },
         ];
-        let resolved =
-            resolve_task_sources(&derived.envelope_id, &derived.digest_sha256, &nodes, &roots)
-                .unwrap();
+        let resolved = resolve_task_sources(&derived.envelope_id, &nodes, &roots).unwrap();
         assert_eq!(
             resolved.scopes,
             ["fixed-input:question", "office:selection"]
         );
         nodes.retain(|node| node.envelope_id != read.envelope_id);
-        assert!(
-            resolve_task_sources(
-                &derived.envelope_id,
-                &derived.digest_sha256,
-                &nodes,
-                &roots[..2],
-            )
-            .is_err()
-        );
+        assert!(resolve_task_sources(&derived.envelope_id, &nodes, &roots[..2],).is_err());
 
         assert_eq!(derived.sensitivity, Sensitivity::Sensitive);
         assert_eq!(derived.allowed_destinations, vec![destination]);
@@ -1350,13 +1337,11 @@ mod tests {
         assert!(!private_lineage[0].public_system_prompt);
         let binding = crate::schedule::source_graph::TaskSourceBinding {
             envelope_id: private_lineage[0].envelope_id.clone(),
-            digest_sha256: private_lineage[0].digest_sha256.clone(),
             authority: crate::schedule::source_graph::TaskSourceAuthority::SystemPrompt,
         };
         assert!(
             crate::schedule::source_graph::resolve_task_sources(
                 &private_lineage[0].envelope_id,
-                &private_lineage[0].digest_sha256,
                 &private_lineage,
                 &[binding]
             )
@@ -1455,7 +1440,7 @@ mod tests {
         nodes.push(ModelInputLineage {
             public_system_prompt: false,
             envelope_id: output.envelope_id.clone(),
-            digest_sha256: output.digest_sha256.clone(),
+            size_bytes: output.content.size_bytes(),
             source_provider_id: output.provenance.source_provider_id.clone(),
             source_tool_name: output.provenance.source_tool_name.clone(),
             source_envelope_ids: output.provenance.source_envelope_ids.clone(),
@@ -1463,27 +1448,18 @@ mod tests {
         let bindings = vec![
             TaskSourceBinding {
                 envelope_id: first.input_envelopes[0].envelope_id.clone(),
-                digest_sha256: first.input_envelopes[0].digest_sha256.clone(),
                 authority: TaskSourceAuthority::SystemPrompt,
             },
             TaskSourceBinding {
                 envelope_id: second.input_envelopes[0].envelope_id.clone(),
-                digest_sha256: second.input_envelopes[0].digest_sha256.clone(),
                 authority: TaskSourceAuthority::SystemPrompt,
             },
             TaskSourceBinding {
                 envelope_id: first.input_envelopes[1].envelope_id.clone(),
-                digest_sha256: first.input_envelopes[1].digest_sha256.clone(),
                 authority: TaskSourceAuthority::Scopes(vec!["fixed-input:report".into()]),
             },
         ];
-        let proof = resolve_task_sources(
-            &output.envelope_id,
-            &output.digest_sha256,
-            &nodes,
-            &bindings,
-        )
-        .unwrap();
+        let proof = resolve_task_sources(&output.envelope_id, &nodes, &bindings).unwrap();
         assert_eq!(proof.scopes, ["fixed-input:report"]);
         assert_eq!(proof.root_envelope_ids.len(), 3);
     }

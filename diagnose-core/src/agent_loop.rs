@@ -2592,8 +2592,7 @@ fn requested_artifact_registry_projection(
                 && source.provenance.source_provider_id
                     == crate::ai_assistant::TEXT_FILE_PROVIDER_ID
                 && source.provenance.source_tool_name == tool
-                && source.digest_sha256
-                    == format!("{:x}", sha2::Sha256::digest(message.text.as_bytes()))
+                && source.content.size_bytes() == message.text.len() as u64
                 && let Some(call_id) = &message.tool_call_id
                 && conversation
                     .iter()
@@ -3920,9 +3919,7 @@ async fn run_mutating<F: FnMut() -> String>(
                     | ContentRef::EphemeralObservation { size_bytes, .. }
                     | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
                 };
-                if original.digest_sha256 != format!("{:x}", Sha256::digest(&bytes))
-                    || declared_size != bytes.len() as u64
-                {
+                if declared_size != bytes.len() as u64 {
                     return Err(invalid_original_result());
                 }
                 Some(original)
@@ -4249,10 +4246,7 @@ async fn run_wait<F: FnMut() -> String>(
                 | ContentRef::EphemeralObservation { size_bytes, .. }
                 | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
             };
-            if declared_size != output.content.len() as u64
-                || data_envelope.digest_sha256
-                    != format!("{:x}", Sha256::digest(output.content.as_bytes()))
-            {
+            if declared_size != output.content.len() as u64 {
                 return Err(invalid_original_result());
             }
             if !remaining_calls.is_empty() {

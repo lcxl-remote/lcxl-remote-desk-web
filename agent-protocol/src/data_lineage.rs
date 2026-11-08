@@ -227,6 +227,14 @@ impl ContentRef {
         Ok(())
     }
 
+    pub fn size_bytes(&self) -> u64 {
+        match self {
+            Self::ImmutableBlob { size_bytes, .. }
+            | Self::EphemeralObservation { size_bytes, .. }
+            | Self::Artifact { size_bytes, .. } => *size_bytes,
+        }
+    }
+
     pub fn content_sha256(&self) -> Option<&str> {
         match self {
             Self::ImmutableBlob { sha256, .. } | Self::Artifact { sha256, .. } => Some(sha256),

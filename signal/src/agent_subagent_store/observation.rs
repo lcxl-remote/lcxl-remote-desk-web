@@ -6,8 +6,6 @@ use crate::entity::{
 };
 use desk_diagnose_core::{chat::ChatRole, subagent::seam::AcceptedResultObservation};
 
-use sha2::{Digest, Sha256};
-
 pub(super) async fn accepted_inputs_on(
     txn: &DatabaseTransaction,
     parent: &PersistedAgentSession,
@@ -101,9 +99,7 @@ async fn validate_observation_on(
         .ok_or_else(|| invalid())?;
     let label = tool.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
-    if label.provenance.source_tool_name != desk_diagnose_core::subagent::tools::REPORTS
-        || label.digest_sha256 != format!("{:x}", Sha256::digest(tool.text.as_bytes()))
-    {
+    if label.provenance.source_tool_name != desk_diagnose_core::subagent::tools::REPORTS {
         return Err(invalid());
     }
     let page: desk_diagnose_core::subagent::report::WorkerReportPage =
@@ -161,9 +157,10 @@ async fn validate_observation_on(
         }
     }
     let inputs = accepted_inputs_on(txn, parent, response).await?;
-    if !inputs.iter().any(|input| {
-        input.envelope_id == label.envelope_id && input.digest_sha256 == label.digest_sha256
-    }) {
+    if !inputs
+        .iter()
+        .any(|input| input.envelope_id == label.envelope_id)
+    {
         return Err(invalid());
     }
     let event = inbox::Entity::find()

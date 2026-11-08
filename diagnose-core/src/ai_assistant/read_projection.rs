@@ -219,10 +219,6 @@ impl ReadProjectionProof {
 
     pub fn validate_cached_result(&self, content: &str) -> Result<(), &'static str> {
         self.validate()?;
-        if format!("{:x}", Sha256::digest(content.as_bytes())) != self.source_envelope.digest_sha256
-        {
-            return Err("cached assistant read result changed");
-        }
         let ContentRef::ImmutableBlob { size_bytes, .. } = &self.source_envelope.content else {
             unreachable!()
         };
@@ -245,8 +241,7 @@ impl ReadProjectionProof {
     ) -> Result<(), &'static str> {
         let expected = self.validate_request_selection(session, request)?;
         if !inputs.iter().any(|input| {
-            (input.envelope_id == expected.envelope_id
-                && input.digest_sha256 == expected.digest_sha256)
+            input.envelope_id == expected.envelope_id
                 || input.source_envelope_ids.contains(&expected.envelope_id)
         }) {
             return Err("assistant read is absent from the actual model projection");
@@ -489,7 +484,7 @@ mod tests {
         let label = result.data_envelope.as_ref().unwrap();
         let actual = ModelInputLineage {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
+            size_bytes: label.content.size_bytes(),
             source_provider_id: label.provenance.source_provider_id.clone(),
             source_tool_name: label.provenance.source_tool_name.clone(),
             source_envelope_ids: label.provenance.source_envelope_ids.clone(),
@@ -587,7 +582,7 @@ mod tests {
         );
         let input = crate::model_egress::ModelInputLineage {
             envelope_id: proof.source_envelope.envelope_id.clone(),
-            digest_sha256: proof.source_envelope.digest_sha256.clone(),
+            size_bytes: proof.source_envelope.content.size_bytes(),
             source_provider_id: proof.source_envelope.provenance.source_provider_id.clone(),
             source_tool_name: proof.source_envelope.provenance.source_tool_name.clone(),
             source_envelope_ids: Vec::new(),

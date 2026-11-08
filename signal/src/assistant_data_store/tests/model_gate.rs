@@ -196,7 +196,6 @@ pub(super) async fn fixture_with_model(
         control_generation: data.control_generation,
         selected_envelopes: vec![SelectedAssistantEnvelope {
             envelope_id: proof.source_envelope.envelope_id.clone(),
-            digest_sha256: proof.source_envelope.digest_sha256.clone(),
         }],
         read_projection_ids: vec![proof.usage.projection_id.clone()],
         current_memories: data.current_memories.clone(),

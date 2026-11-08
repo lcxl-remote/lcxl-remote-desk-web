@@ -188,7 +188,11 @@ fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
     assert_eq!(restored.view.messages, conversation);
     let sources = vec![ContextSummarySourceV1 {
         message_id: conversation[2].message_id.clone(),
-        message_sha256: sha256_hex(&canonical_bytes(&conversation[2]).unwrap()),
+        envelope_id: conversation[2]
+            .data_envelope
+            .as_ref()
+            .map(|label| label.envelope_id.clone()),
+        tool_ok: conversation[2].tool_ok,
     }];
     assert_eq!(
         authorize_sources(&later, &sources, &conversation)
@@ -408,12 +412,26 @@ fn compression_and_reloaded_checkpoint_keep_exact_lineage_and_lens_dependencies(
     let mut missing = serde_json::to_value(lineage).unwrap();
     missing.as_object_mut().unwrap().remove("derivations");
     assert!(serde_json::from_value::<ContextSummaryLineageV1>(missing).is_err());
-    let mut changed_lens = conversation;
-    changed_lens[1] = user("recent", 7999);
-    assert!(
-        authorize_context_checkpoint(&policy(), &restored, &context_policy().key(), &changed_lens)
-            .is_err()
-    );
+    // A rewritten body always carries a new label; completion status is bound too.
+    for case in 0..2 {
+        let mut changed_lens = conversation.clone();
+        if case == 0 {
+            changed_lens[1].data_envelope.as_mut().unwrap().envelope_id =
+                "user-message-rewritten".into();
+        } else {
+            changed_lens[1].tool_ok = Some(false);
+        }
+        assert!(
+            authorize_context_checkpoint(
+                &policy(),
+                &restored,
+                &context_policy().key(),
+                &changed_lens
+            )
+            .is_err(),
+            "case {case}"
+        );
+    }
 }
 
 #[test]

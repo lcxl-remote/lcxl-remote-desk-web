@@ -99,7 +99,6 @@ pub async fn load_on<C: ConnectionTrait>(
         && input.device_ref == data.source_device_ref
         && labels.iter().any(|label| {
             label.envelope_id == proof.original_envelope_id
-                && label.digest_sha256 == input.original_sha256
                 && label.provenance.source_provider_id == "ai-assistant-user"
                 && label.provenance.source_object_id.as_deref() == Some(input.native_id.as_str())
         }));

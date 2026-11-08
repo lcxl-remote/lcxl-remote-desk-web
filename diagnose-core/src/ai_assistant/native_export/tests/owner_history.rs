@@ -125,7 +125,6 @@ fn original_with_turn(
     manifest.current_memories = proof.usage.memories.clone();
     manifest.selected_envelopes = vec![SelectedAssistantEnvelope {
         envelope_id: proof.source_envelope.envelope_id.clone(),
-        digest_sha256: proof.source_envelope.digest_sha256.clone(),
     }];
     let grant = AssistantDataExportAuthorization::for_projection(
         &session,

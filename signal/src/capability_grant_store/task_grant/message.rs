@@ -266,7 +266,6 @@ pub(super) async fn bind(
                 desk_diagnose_core::schedule::source_graph::attachment::TaskAttachmentReceipt {
                     run_id: &session.conversation_id,
                     envelope_id: &envelope.envelope_id,
-                    receipt_digest_sha256: &envelope.digest_sha256,
                     attachment,
                 },
             );

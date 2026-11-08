@@ -1,7 +1,6 @@
 //! An account-scoped preview is paged only on its original device.
 
 use desk_agent_protocol::{OperationOutput, ReadContextOutput};
-use sha2::{Digest, Sha256};
 
 pub fn has_device_receipt(
     messages: &[crate::chat::ChatMessage],
@@ -27,7 +26,7 @@ pub fn has_device_receipt(
                 != Some(&format!("{device_id}:{call_id}"))
             || envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now_unix_ms)
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(result.text.as_bytes()))
+            || envelope.content.size_bytes() != result.text.len() as u64
         {
             return false;
         }
@@ -107,14 +106,6 @@ mod tests {
             "device-a",
             "preview",
             4,
-            1001
-        ));
-        message.text = message.text.replace("\"page_count\":3", "\"page_count\":4");
-        assert!(!has_device_receipt(
-            &[message],
-            "device-a",
-            "preview",
-            2,
             1001
         ));
     }

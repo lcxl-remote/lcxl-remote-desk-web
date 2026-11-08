@@ -7,8 +7,6 @@ use desk_agent_protocol::communication::ImmutableAttachmentSnapshot;
 pub struct TaskAttachmentReceipt<'a> {
     pub run_id: &'a str,
     pub envelope_id: &'a str,
-    /// Digest of the authenticated tool receipt envelope, not of the attachment bytes.
-    pub receipt_digest_sha256: &'a str,
     pub attachment: &'a ImmutableAttachmentSnapshot,
 }
 
@@ -30,12 +28,7 @@ pub fn resolve_task_attachment_sources(
     {
         return Err(TaskSourceError::InvalidRoot);
     }
-    resolve_task_sources(
-        receipt.envelope_id,
-        receipt.receipt_digest_sha256,
-        nodes,
-        bindings,
-    )
+    resolve_task_sources(receipt.envelope_id, nodes, bindings)
 }
 
 #[cfg(test)]
@@ -64,7 +57,6 @@ mod tests {
         let receipt = TaskAttachmentReceipt {
             run_id: "run-1",
             envelope_id: "artifact-envelope",
-            receipt_digest_sha256: &"b".repeat(64),
             attachment: &original,
         };
         assert_eq!(
@@ -82,17 +74,15 @@ mod tests {
     #[test]
     fn traverses_artifact_sources_and_rejects_missing_parent() {
         let original = attachment();
-        let receipt_digest = "b".repeat(64);
         let receipt = TaskAttachmentReceipt {
             run_id: "run",
             envelope_id: "artifact",
-            receipt_digest_sha256: &receipt_digest,
             attachment: &original,
         };
         let node = |id: &str, parents: Vec<String>| ModelInputLineage {
             public_system_prompt: false,
             envelope_id: id.into(),
-            digest_sha256: "b".repeat(64),
+            size_bytes: 1,
             source_provider_id: "device".into(),
             source_tool_name: "read".into(),
             source_envelope_ids: parents,
@@ -103,7 +93,6 @@ mod tests {
         ];
         let roots = vec![TaskSourceBinding {
             envelope_id: "source".into(),
-            digest_sha256: "b".repeat(64),
             authority: TaskSourceAuthority::Scopes(vec!["file:report".into()]),
         }];
         let resolved =

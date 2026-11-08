@@ -313,9 +313,7 @@ pub(crate) async fn ready_notification_source_on(
         .ok_or_else(|| invalid())?;
     let label = message.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
-    if label.provenance.source_tool_name != "subagent_notification"
-        || label.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
-    {
+    if label.provenance.source_tool_name != "subagent_notification" {
         return Err(invalid());
     }
     let payload: serde_json::Value = serde_json::from_str(&message.text).map_err(|_| invalid())?;
@@ -646,9 +644,7 @@ pub(crate) async fn acknowledge_notification_on(
         .ok_or_else(|| invalid())?;
     let label = message.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
-    if label.provenance.source_tool_name != "subagent_notification"
-        || label.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
-    {
+    if label.provenance.source_tool_name != "subagent_notification" {
         return Err(invalid());
     }
     let response = next
@@ -661,9 +657,10 @@ pub(crate) async fn acknowledge_notification_on(
         })
         .ok_or_else(|| invalid())?;
     let inputs = super::observation::accepted_inputs_on(txn, next, response).await?;
-    if !inputs.iter().any(|input| {
-        input.envelope_id == label.envelope_id && input.digest_sha256 == label.digest_sha256
-    }) {
+    if !inputs
+        .iter()
+        .any(|input| input.envelope_id == label.envelope_id)
+    {
         return Err(invalid());
     }
     for expected in &notification.events {

@@ -297,9 +297,6 @@ pub(crate) fn retained_assistant_data_result(
     else {
         return Err(invalid_label());
     };
-    if sha256 != &source.digest_sha256 {
-        return Err(invalid_label());
-    }
     source_result_identity(
         &[parent, source],
         call_id,

@@ -37,7 +37,6 @@ pub struct RehearsalCompressionCall {
 pub fn retained_rehearsal_compressions(
     session: &PersistedAgentSession,
 ) -> Result<Vec<crate::model_context::ContextSummaryDerivationV1>, TaskSourceError> {
-    use sha2::{Digest, Sha256};
     let mut traces: Vec<crate::model_context::ContextSummaryDerivationV1> = Vec::new();
     for entry in &session.model_context_state.entries {
         let Some(checkpoint) = &entry.checkpoint else {
@@ -52,7 +51,7 @@ pub fn retained_rehearsal_compressions(
             .map_err(|_| TaskSourceError::InvalidNode)?;
         let encoded =
             serde_json::to_vec(&checkpoint.summary).map_err(|_| TaskSourceError::InvalidNode)?;
-        if lineage.envelope.digest_sha256 != format!("{:x}", Sha256::digest(&encoded))
+        if lineage.envelope.content.size_bytes() != encoded.len() as u64
             || lineage.derivations.last().is_none_or(|trace| {
                 trace.generation != checkpoint.generation
                     || trace.compressor != checkpoint.compressor
@@ -80,7 +79,7 @@ pub(super) fn source_node(
 ) -> ModelInputLineage {
     ModelInputLineage {
         envelope_id: label.envelope_id.clone(),
-        digest_sha256: label.digest_sha256.clone(),
+        size_bytes: label.content.size_bytes(),
         source_provider_id: label.provenance.source_provider_id.clone(),
         source_tool_name: label.provenance.source_tool_name.clone(),
         source_envelope_ids: label.provenance.source_envelope_ids.clone(),
@@ -125,12 +124,7 @@ impl RehearsalSourceGraph {
         }
         let output = model_output_message_envelope(unique_message(session, message_id)?)
             .map_err(|_| TaskSourceError::InvalidNode)?;
-        resolve_task_sources(
-            &output.envelope_id,
-            &output.digest_sha256,
-            &self.nodes,
-            &self.bindings,
-        )
+        resolve_task_sources(&output.envelope_id, &self.nodes, &self.bindings)
     }
 }
 
@@ -198,7 +192,7 @@ pub fn build_rehearsal_source_graph(
         }
         known.push(ModelInputLineage {
             envelope_id: output.envelope_id.clone(),
-            digest_sha256: output.digest_sha256.clone(),
+            size_bytes: output.content.size_bytes(),
             source_provider_id: output.provenance.source_provider_id.clone(),
             source_tool_name: output.provenance.source_tool_name.clone(),
             source_envelope_ids: output.provenance.source_envelope_ids.clone(),
@@ -293,7 +287,6 @@ pub fn build_rehearsal_source_graph(
                 nodes.push(input.clone());
                 bindings.push(TaskSourceBinding {
                     envelope_id: input.envelope_id.clone(),
-                    digest_sha256: input.digest_sha256.clone(),
                     authority: TaskSourceAuthority::SystemPrompt,
                 });
                 continue;
@@ -301,7 +294,7 @@ pub fn build_rehearsal_source_graph(
             let mut matched = false;
             for source in &known {
                 if input.public_system_prompt
-                    || input.digest_sha256 != source.digest_sha256
+                    || input.size_bytes != source.size_bytes
                     || input.source_provider_id != source.source_provider_id
                     || input.source_tool_name != source.source_tool_name
                     || input.source_envelope_ids != [source.envelope_id.clone()]
@@ -502,17 +495,15 @@ mod attachment_graph_tests {
             size_bytes: 1,
             digest_sha256: "a".repeat(64),
         };
-        let receipt_digest = "b".repeat(64);
         let receipt = TaskAttachmentReceipt {
             run_id: "run",
             envelope_id: "receipt",
-            receipt_digest_sha256: &receipt_digest,
             attachment: &artifact,
         };
         let node = |id: &str, parents: Vec<String>| ModelInputLineage {
             public_system_prompt: false,
             envelope_id: id.into(),
-            digest_sha256: receipt_digest.clone(),
+            size_bytes: 1,
             source_provider_id: "device".into(),
             source_tool_name: "read".into(),
             source_envelope_ids: parents,
@@ -524,7 +515,6 @@ mod attachment_graph_tests {
             ],
             bindings: vec![TaskSourceBinding {
                 envelope_id: "original".into(),
-                digest_sha256: receipt_digest.clone(),
                 authority: TaskSourceAuthority::Scopes(vec!["file:original".into()]),
             }],
             verified_model_messages: BTreeSet::new(),
@@ -540,16 +530,14 @@ mod attachment_graph_tests {
             graph.resolve_attachment("other", &artifact, &receipt),
             Err(TaskSourceError::InvalidRoot)
         );
-        let wrong_digest = "c".repeat(64);
         let wrong_receipt = TaskAttachmentReceipt {
             run_id: "run",
-            envelope_id: "receipt",
-            receipt_digest_sha256: &wrong_digest,
+            envelope_id: "other-receipt",
             attachment: &artifact,
         };
         assert_eq!(
             graph.resolve_attachment("run", &artifact, &wrong_receipt),
-            Err(TaskSourceError::ConflictingNode)
+            Err(TaskSourceError::MissingSource)
         );
         let incomplete = RehearsalSourceGraph {
             nodes: graph.nodes[..1].to_vec(),

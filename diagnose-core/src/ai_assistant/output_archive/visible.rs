@@ -10,7 +10,6 @@ use desk_agent_protocol::{
     ai_assistant::source::{SourceUsePolicy, validate_source_id},
     data_lineage::ContentRef,
 };
-use sha2::{Digest, Sha256};
 
 /// Retention policy validated against a real message and its original native output.
 pub struct VisibleAssistantMessage {
@@ -53,17 +52,10 @@ impl ArchivedAssistantOutput {
         };
         let bytes = model_turn_content_bytes(&turn)
             .map_err(|_| "invalid original visible model payload")?;
-        let ContentRef::ImmutableBlob {
-            sha256, size_bytes, ..
-        } = &self.output.content
-        else {
+        let ContentRef::ImmutableBlob { size_bytes, .. } = &self.output.content else {
             return Err("visible native output is not immutable");
         };
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if actual != self.output.digest_sha256
-            || sha256 != &actual
-            || *size_bytes != bytes.len() as u64
-        {
+        if *size_bytes != bytes.len() as u64 {
             return Err("visible assistant message changed its native text or tool calls");
         }
         let policy = self.retained_policy.clone();

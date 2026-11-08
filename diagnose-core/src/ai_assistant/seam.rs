@@ -223,7 +223,6 @@ pub struct CurrentMemoryBlock {
 #[serde(deny_unknown_fields)]
 pub struct SelectedAssistantEnvelope {
     pub envelope_id: String,
-    pub digest_sha256: String,
 }
 
 /// Host-only source manifest for an exact prepared request. It is not a grant.
@@ -339,7 +338,7 @@ impl AssistantModelDataManifest {
                 return Err("assistant model budget belongs to a different original planner");
             }
         }
-        let mut selected = std::collections::BTreeMap::new();
+        let mut selected = std::collections::BTreeSet::new();
         let mut labels = std::collections::BTreeMap::new();
         for message in &request.messages {
             if let Some(envelope) = &message.data_envelope {
@@ -357,12 +356,7 @@ impl AssistantModelDataManifest {
                 {
                     return Err("selected source label changed under the same identity");
                 }
-                if selected
-                    .insert(envelope.envelope_id.clone(), envelope.digest_sha256.clone())
-                    .is_some_and(|old| old != envelope.digest_sha256)
-                {
-                    return Err("selected source envelope changed");
-                }
+                selected.insert(envelope.envelope_id.clone());
             }
         }
         crate::model_egress::sink_metadata_sha256(&labels)?;
@@ -373,9 +367,7 @@ impl AssistantModelDataManifest {
         }
         let mut seen = std::collections::BTreeSet::new();
         for source in &self.selected_envelopes {
-            if !seen.insert(&source.envelope_id)
-                || selected.get(&source.envelope_id) != Some(&source.digest_sha256)
-            {
+            if !seen.insert(&source.envelope_id) || !selected.contains(&source.envelope_id) {
                 return Err("assistant selected-source manifest changed");
             }
         }

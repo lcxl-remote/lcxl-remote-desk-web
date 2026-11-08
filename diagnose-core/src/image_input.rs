@@ -213,10 +213,8 @@ fn remove_image(message: &mut ChatMessage) {
                 | ContentRef::Artifact { size_bytes, .. } => *size_bytes,
             };
             source.validate().is_ok()
-                && crate::model_egress::message_content_bytes(message).is_ok_and(|bytes| {
-                    bytes.len() as u64 == size
-                        && format!("{:x}", Sha256::digest(&bytes)) == source.digest_sha256
-                })
+                && crate::model_egress::message_content_bytes(message)
+                    .is_ok_and(|bytes| bytes.len() as u64 == size)
         })
         .cloned();
     message.image_data_url = None;

@@ -195,7 +195,7 @@ impl FrozenIssueReply {
                 != publication_export_id(&self.origin, &self.access)
             || self.body.trim().is_empty()
             || self.wire_body().len() > 64 * 1024
-            || self.output.digest_sha256 != format!("{:x}", Sha256::digest(self.body.as_bytes()))
+            || self.output.content.size_bytes() != self.body.len() as u64
             || self.comment_tool_signature.len() != 64
             || !self
                 .comment_tool_signature

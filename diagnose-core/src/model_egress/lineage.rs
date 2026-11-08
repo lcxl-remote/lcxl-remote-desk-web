@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct ModelInputLineage {
     pub envelope_id: String,
-    pub digest_sha256: String,
+    pub size_bytes: u64,
     pub source_provider_id: String,
     pub source_tool_name: String,
     pub source_envelope_ids: Vec<String>,
@@ -31,7 +31,7 @@ pub fn project_model_input_lineage(
         }
         entries.push(ModelInputLineage {
             envelope_id: input.envelope_id.clone(),
-            digest_sha256: input.digest_sha256.clone(),
+            size_bytes: input.content.size_bytes(),
             source_provider_id: input.provenance.source_provider_id.clone(),
             source_tool_name: input.provenance.source_tool_name.clone(),
             source_envelope_ids: input.provenance.source_envelope_ids.clone(),
@@ -46,10 +46,20 @@ pub(crate) fn is_public_system_prompt(input: &DataEnvelope) -> bool {
     let Some(message_id) = input.provenance.source_object_id.as_deref() else {
         return false;
     };
+    let ContentRef::ImmutableBlob {
+        blob_id,
+        sha256,
+        size_bytes,
+        media_type,
+    } = &input.content
+    else {
+        return false;
+    };
+    // The content hash names this prompt revision; the prompt text is regenerated
+    // for every request.
     let expected_id = format!(
-        "system-prompt-{}-{}",
+        "system-prompt-{}-{sha256}",
         short_digest(message_id.as_bytes()),
-        input.digest_sha256
     );
     input.envelope_id == expected_id
         && input.provenance.source_provider_id == "ai-assistant-runtime"
@@ -61,21 +71,17 @@ pub(crate) fn is_public_system_prompt(input: &DataEnvelope) -> bool {
         && (input.allowed_destinations.len() == 1
             || super::issue_reply::is_issue_reply_instruction(input)
             || crate::skills::is_issue_publication_label(input))
-        && matches!(&input.content, ContentRef::ImmutableBlob {blob_id, sha256, size_bytes, media_type}
-            if blob_id == &format!("system-prompt-content-{}", &input.digest_sha256[..32])
-                && sha256 == &input.digest_sha256 && *size_bytes > 0
-                && media_type == "text/plain;charset=utf-8")
+        && sha256.len() == 64
+        && *blob_id == format!("system-prompt-content-{}", &sha256[..32])
+        && *size_bytes > 0
+        && media_type == "text/plain;charset=utf-8"
 }
 
 /// The audit writer establishes the public marker from the complete label.
 /// Readers additionally check its closed metadata shape before using it as a root.
 pub fn is_audited_public_system_prompt(input: &ModelInputLineage) -> bool {
     input.public_system_prompt
-        && input.digest_sha256.len() == 64
-        && input
-            .digest_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        && input.size_bytes > 0
         && input.source_provider_id == "ai-assistant-runtime"
         && input.source_tool_name == "system-prompt-projector"
         && input.source_envelope_ids.is_empty()
@@ -87,7 +93,8 @@ pub fn is_audited_public_system_prompt(input: &ModelInputLineage) -> bool {
                     .is_some_and(|(message_hash, content_hash)| {
                         message_hash.len() == 32
                             && message_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                            && content_hash == input.digest_sha256
+                            && content_hash.len() == 64
+                            && content_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                     })
             })
 }
@@ -181,7 +188,7 @@ pub fn model_output_message_envelope(
         .ok_or(InvalidModelInputLineage)?;
     output.validate().map_err(|_| InvalidModelInputLineage)?;
     let bytes = message_content_bytes(message).map_err(|_| InvalidModelInputLineage)?;
-    if bytes.is_empty() || hex_digest(&bytes) != output.digest_sha256 {
+    if bytes.is_empty() || output.content.size_bytes() != bytes.len() as u64 {
         return Err(InvalidModelInputLineage);
     }
     Ok(output)

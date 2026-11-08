@@ -1237,7 +1237,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
     let read = RehearsalToolSource {
         lineage: ModelInputLineage {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
+            size_bytes: label.content.size_bytes(),
             source_provider_id: label.provenance.source_provider_id.clone(),
             source_tool_name: label.provenance.source_tool_name.clone(),
             source_envelope_ids: label.provenance.source_envelope_ids.clone(),
@@ -1245,7 +1245,6 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         },
         authority: TaskSourceBinding {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
             authority: TaskSourceAuthority::Scopes(vec!["device:1".into()]),
         },
     };
@@ -1460,7 +1459,7 @@ fn compressed_answer_preserves_original_read_scope() {
     let read = RehearsalToolSource {
         lineage: crate::model_egress::ModelInputLineage {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
+            size_bytes: label.content.size_bytes(),
             source_provider_id: label.provenance.source_provider_id.clone(),
             source_tool_name: label.provenance.source_tool_name.clone(),
             source_envelope_ids: label.provenance.source_envelope_ids.clone(),
@@ -1468,7 +1467,6 @@ fn compressed_answer_preserves_original_read_scope() {
         },
         authority: TaskSourceBinding {
             envelope_id: label.envelope_id.clone(),
-            digest_sha256: label.digest_sha256.clone(),
             authority: TaskSourceAuthority::Scopes(vec!["device:1".into()]),
         },
     };
@@ -1875,21 +1873,18 @@ fn step_attachment_checks_sources_before_returning_bounded_decision() {
     let node = ModelInputLineage {
         public_system_prompt: false,
         envelope_id: "artifact".into(),
-        digest_sha256: "a".repeat(64),
+        size_bytes: 1,
         source_provider_id: "device".into(),
         source_tool_name: "read".into(),
         source_envelope_ids: vec![],
     };
     let root = TaskSourceBinding {
         envelope_id: "artifact".into(),
-        digest_sha256: "a".repeat(64),
         authority: TaskSourceAuthority::Scopes(vec!["device:1".into()]),
     };
-    let receipt_digest = "a".repeat(64);
     let receipt = TaskAttachmentReceipt {
         run_id: "run",
         envelope_id: "artifact",
-        receipt_digest_sha256: &receipt_digest,
         attachment: &file,
     };
     let evaluate = |contract: &ValidatedTaskContract, root: &TaskSourceBinding| {

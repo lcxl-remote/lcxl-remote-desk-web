@@ -275,8 +275,7 @@ impl ScheduleStore {
                     }
                     let envelope = &matching[0].receipt.envelope;
                     attachment_receipts.push(desk_diagnose_core::schedule::source_graph::attachment::TaskAttachmentReceipt {
-                        run_id: &session.conversation_id, envelope_id: &envelope.envelope_id,
-                        receipt_digest_sha256: &envelope.digest_sha256, attachment,
+                        run_id: &session.conversation_id, envelope_id: &envelope.envelope_id, attachment,
                     });
                 }
                 let attachment_check = contract

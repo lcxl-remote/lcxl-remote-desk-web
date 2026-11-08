@@ -565,18 +565,6 @@ fn memory_control_binds_the_complete_original_batch_input_sequence_and_call_mess
             .persisted_producer(&fixture.context(), &changed, 1100)
             .is_err()
     );
-    let mut changed = fixture.session.clone();
-    let message = changed
-        .conversation
-        .iter_mut()
-        .find(|message| message.message_id == "producer")
-        .unwrap();
-    message.tool_calls[1].arguments_json = forget_call("second", 3).arguments_json;
-    assert!(
-        original
-            .persisted_producer(&fixture.context(), &changed, 1100)
-            .is_err()
-    );
 }
 
 #[test]

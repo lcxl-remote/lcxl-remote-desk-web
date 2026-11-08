@@ -857,7 +857,6 @@ async fn control_owner_input_on(
                 label.provenance.source_provider_id == "ai-assistant-user"
                     && label.provenance.source_object_id.as_deref()
                         == Some(input.native_id.as_str())
-                    && label.digest_sha256 == input.original_sha256
             })
     {
         return Err(AssistantStoreError::Inaccessible);

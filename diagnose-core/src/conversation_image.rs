@@ -177,9 +177,7 @@ impl ImageAttachment {
             | ContentRef::Artifact { size_bytes, .. }
             | ContentRef::EphemeralObservation { size_bytes, .. } => *size_bytes,
         };
-        if declared_size != bytes.len() as u64
-            || envelope.digest_sha256 != format!("{:x}", Sha256::digest(&bytes))
-        {
+        if declared_size != bytes.len() as u64 {
             return Err(error("Screenshot authorization does not match its content"));
         }
         Ok(message)
