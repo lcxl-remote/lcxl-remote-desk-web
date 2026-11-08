@@ -26,7 +26,14 @@ async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<Permissio
             .into_iter()
             .map(|id| GrantRequestItem {
                 command_confirmation: None,
-                selected_device_target: None,
+                selected_device_target: Some(
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                        device_id: "device-1".to_owned(),
+                        target_ref: "device-1".to_owned(),
+                        connection_id: "host".into(),
+                        readiness_revision: 1,
+                    },
+                ),
                 launch_confirmation: None,
                 item_id: id.into(),
                 provider_id: "desktop.session".into(),

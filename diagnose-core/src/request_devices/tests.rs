@@ -1293,3 +1293,16 @@ fn approved_command_visibility_uses_live_device_authority_across_continuations()
         assert!(command_tool(&session, std::slice::from_ref(&device), &registry).is_none());
     }
 }
+
+#[test]
+fn native_canonical_input_excludes_the_model_device_selector() {
+    let native = r#"{"overview":true}"#;
+    let selected = r#"{"target_ref":"mac","overview":true}"#;
+    let expected = native_canonical_input("inspect_desktop_ui", native).unwrap();
+    assert_eq!(
+        native_canonical_input("inspect_desktop_ui", selected).as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(!expected.contains("target_ref"));
+    assert!(native_canonical_input("inspect_desktop_ui", "[]").is_none());
+}

@@ -1778,6 +1778,7 @@ mod tests {
             ContentRef, DataEnvelope, DataProvenance, RetentionBoundary, Sensitivity,
         };
         let (mut session, evidence, _) = fixture();
+        session.bind_assistant_input_targets(&[]).unwrap();
         let output = FileContentReadOutput {
             file: evidence.reference,
             display_name: "notes.txt".into(),
@@ -2452,6 +2453,7 @@ mod tests {
         };
         use desk_agent_protocol::data_lineage::{ContentRef, DestinationIdentity};
         let (mut session, evidence, call) = fixture();
+        session.bind_assistant_input_targets(&[]).unwrap();
         let tool = "create_text_file";
         let destination = DestinationIdentity::Model {
             connection_id: "test".into(),
@@ -2700,7 +2702,7 @@ mod tests {
                 "tool_name":tool,"expected_effect":"write_artifact", "exact_input":serde_json::from_str::<serde_json::Value>(&call.arguments_json).unwrap(),
                 "suggested_ttl_seconds":60,"suggested_max_uses":50,"reason":"Perform the requested exact text change"
             }]}).to_string() };
-            let request = crate::permission_tools::build_permission_request(
+            let mut request = crate::permission_tools::build_permission_request(
                 &request_call,
                 &registry,
                 "permission".into(),
@@ -2708,6 +2710,14 @@ mod tests {
                 "2026-09-05T00:00:00Z".into(),
             )
             .unwrap();
+            for item in &mut request.items {
+                item.selected_device_target = Some(crate::request_devices::SelectedDeviceTarget {
+                    device_id: session.device_id.clone(),
+                    target_ref: session.device_id.clone(),
+                    connection_id: "host".into(),
+                    readiness_revision: 1,
+                });
+            }
             assert_eq!(request.items[0].suggested_max_uses, 1);
             let decisions = vec![PermissionDecisionItem {
                 item_id: "mutation".into(),

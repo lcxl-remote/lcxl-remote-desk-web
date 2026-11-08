@@ -73,6 +73,7 @@ fn command_item(item: &mut desk_diagnose_core::dynamic_run::GrantRequestItem, in
     item.canonical_input_json = Some(canonical);
     item.canonical_input_digest_sha256 = Some(confirmation.canonical_input_digest_sha256.clone());
     item.command_confirmation = Some(confirmation);
+    item.selected_device_target = None;
     item.suggested_max_uses = 1;
 }
 

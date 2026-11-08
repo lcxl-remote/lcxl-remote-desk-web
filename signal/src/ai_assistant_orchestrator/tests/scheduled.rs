@@ -940,6 +940,7 @@ async fn owner_decision(
         "schema_version":desk_diagnose_core::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION, "request_id":"scheduled-permission", "input_revision":1,
         "state":"pending", "created_at":chrono::Utc::now().to_rfc3339(), "items":[{
             "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
+            "selected_device_target":{"device_id":"device","target_ref":"device","connection_id":"host","readiness_revision":1},
             "expected_effect":"read_device", "resource_scope":["target:current_device"],
             "operation_scope":["observe"], "suggested_ttl_seconds":120,
             "suggested_max_uses":1, "reason":"Inspect current device"

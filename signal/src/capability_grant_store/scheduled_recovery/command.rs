@@ -363,11 +363,14 @@ async fn validate_command_origin_on(
         name: proposal.name.clone(),
         arguments_json: proposal.arguments_json.clone(),
     };
-    let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
-        &call.name,
-        serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
-    )
-    .map_err(|_| invalid())?;
+    // Dispatch stores the native command input without the device selector,
+    // which a request-device proposal carries when the model selected it.
+    let selected = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+        .map_err(|_| invalid())?
+        .get("target_ref")
+        .is_some();
+    let (_, canonical) = desk_diagnose_core::request_devices::command_input(&call, selected)
+        .map_err(|_| invalid())?;
     if call.name != payload.tool_name || canonical != payload.canonical_input_json {
         return Err(invalid());
     }

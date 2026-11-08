@@ -138,13 +138,11 @@ impl ScheduleStore {
                 &session,
             )
             .map_err(|_| ScheduleStoreError::Invalid)?;
-            let canonical =
-                desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
-                    &call.name,
-                    serde_json::from_str(&call.arguments_json)
-                        .map_err(|_| ScheduleStoreError::Invalid)?,
-                )
-                .map_err(|_| ScheduleStoreError::Invalid)?;
+            let canonical = desk_diagnose_core::request_devices::native_canonical_input(
+                &call.name,
+                &call.arguments_json,
+            )
+            .ok_or(ScheduleStoreError::Invalid)?;
             if !matched.insert(call.id.clone())
                 || work.actor_id != owner.to_string()
                 || work.target_device_id != source.target_device_id

@@ -17,7 +17,14 @@ pub(super) fn request(session: &mut PersistedAgentSession) -> PermissionRequeste
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
-            selected_device_target: None,
+            selected_device_target: Some(
+                desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                    device_id: session.device_id.clone(),
+                    target_ref: session.device_id.clone(),
+                    connection_id: "host".into(),
+                    readiness_revision: 1,
+                },
+            ),
             launch_confirmation: None,
             item_id: "inspect".into(),
             provider_id: "desktop.session".into(),

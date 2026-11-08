@@ -4345,7 +4345,14 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_device_target: None,
+                selected_device_target: Some(
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                        device_id: "device-1".to_owned(),
+                        target_ref: "device-1".to_owned(),
+                        connection_id: "host".into(),
+                        readiness_revision: 1,
+                    },
+                ),
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4432,7 +4439,14 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_device_target: None,
+                selected_device_target: Some(
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                        device_id: "device-1".to_owned(),
+                        target_ref: "device-1".to_owned(),
+                        connection_id: "host".into(),
+                        readiness_revision: 3,
+                    },
+                ),
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4572,6 +4586,8 @@ mod tests {
         let mut session = store.claim_turn(claim("ui-action-turn")).await.unwrap();
         session.input_revision = 1;
         session.policy_revision = 1;
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
+        session.bind_assistant_input_targets(&[]).unwrap();
         let target = ObjectRef {
             token: "signed-ui-element-token".into(),
             snapshot_id: "snapshot-1".into(),
@@ -4592,7 +4608,14 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_device_target: None,
+                selected_device_target: Some(
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                        device_id: "device-1".to_owned(),
+                        target_ref: "device-1".to_owned(),
+                        connection_id: "host".into(),
+                        readiness_revision: 7,
+                    },
+                ),
                 launch_confirmation: None,
                 item_id: "ui-action".into(),
                 provider_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),

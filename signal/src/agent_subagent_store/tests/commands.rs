@@ -132,7 +132,7 @@ async fn approved_child_with_source_on(
         vec![ToolCallRef {
             id: call.id.clone(),
             name: call.name.clone(),
-            arguments_json: call.arguments_json.clone(),
+            arguments_json: with_target_ref(&call, &child.device_id).arguments_json,
         }],
     );
     proposal.turn_id = child.current_turn_id.clone();
@@ -349,7 +349,7 @@ async fn newly_created_child_owner_approval_prepares_and_claims_command_once() {
         &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         &child,
         &child.device_id,
-        &call,
+        &with_target_ref(&call, &child.device_id),
         now,
     )
     .unwrap();
@@ -665,4 +665,15 @@ async fn live_project_model_subagent_command() {
         passed,
         "pending command report must follow the reference contract"
     );
+}
+
+/// The executed command call carries the target selected for its admitted
+/// request; the permission input remains the canonical native arguments.
+pub(super) fn with_target_ref(call: &ToolCall, device_id: &str) -> ToolCall {
+    let mut input: serde_json::Value = serde_json::from_str(&call.arguments_json).unwrap();
+    input["target_ref"] = serde_json::json!(device_id);
+    ToolCall {
+        arguments_json: input.to_string(),
+        ..call.clone()
+    }
 }

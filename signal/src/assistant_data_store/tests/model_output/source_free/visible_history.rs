@@ -666,7 +666,7 @@ async fn ai_task_prompt_keeps_original_copy_policy_and_rolls_back_on_small_stack
                 "client_create_key": "native-prompt-policy", "kind": "fresh_task", "target_device_id": session.device_id,
                 "title": "Task prompt policy", "prompt": "Review the original requirement", "locale": null, "model_id": null,
                 "spec": { "schema_version": 1, "rule": { "kind": "daily", "utc_time": "06:00:00" } },
-                "source_conversation_id": session.conversation_id, "requirement_revision": null,
+                "source_conversation_id": null, "requirement_revision": null,
                 "creation_source": "ai_proposal", "time_confirmation": null
             })).unwrap();
             let mut task = crate::schedule_store::ScheduleStore::new(store.db.clone())

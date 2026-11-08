@@ -1743,7 +1743,14 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_device_target: None,
+                selected_device_target: Some(
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                        device_id: "device-1".to_owned(),
+                        target_ref: "device-1".to_owned(),
+                        connection_id: "host".into(),
+                        readiness_revision: 1,
+                    },
+                ),
                 launch_confirmation: None,
                 item_id: "inspect-directory".into(),
                 provider_id: "file.workspace".into(),

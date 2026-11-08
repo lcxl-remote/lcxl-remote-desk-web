@@ -111,11 +111,7 @@ async fn offline_recovery_reads_original_snapshot_and_stops_only_the_original_ta
     let mut active: agent_session::ActiveModel = row.into();
     active.state_json = Set(state.encode_json_for_storage().unwrap());
     active.update(&f.store.db).await.unwrap();
-    assert!(
-        sessions
-            .recovery_device("run-1", "1")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    // A stored subject that no longer matches its frozen fixed target is
+    // rejected while decoding, so it never resolves a recovery device.
+    assert!(sessions.recovery_device("run-1", "1").await.is_err());
 }

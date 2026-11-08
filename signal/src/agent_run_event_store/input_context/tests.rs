@@ -538,7 +538,7 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
             desk_diagnose_core::read_tools::build_read_operation(&call).unwrap();
         let destination = destination();
         let binding = ObjectReadBinding {
-            device_id: "device-1",
+            device_id: &object.device_id,
             original: &selection,
             destination: &destination,
             now_unix_ms: Utc::now().timestamp_millis() as u64,
@@ -602,7 +602,7 @@ async fn terminal_read_binds_only_original_terminal_with_original_byte_limit() {
     };
     let (_, mut operation) = desk_diagnose_core::read_tools::build_read_operation(&call).unwrap();
     ObjectReadBinding {
-        device_id: "device-1",
+        device_id: &terminal.device_id,
         original: params.read_context.as_ref().unwrap(),
         destination: &destination(),
         now_unix_ms: Utc::now().timestamp_millis() as u64,

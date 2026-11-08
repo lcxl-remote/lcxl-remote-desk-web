@@ -162,13 +162,11 @@ impl ScheduleStore {
                 return Err(ScheduleStoreError::Conflict);
             }
             let proposal = proposals[0];
-            let canonical =
-                desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
-                    &proposal.name,
-                    serde_json::from_str(&proposal.arguments_json)
-                        .map_err(|_| ScheduleStoreError::Invalid)?,
-                )
-                .map_err(|_| ScheduleStoreError::Invalid)?;
+            let canonical = desk_diagnose_core::request_devices::native_canonical_input(
+                &proposal.name,
+                &proposal.arguments_json,
+            )
+            .ok_or(ScheduleStoreError::Invalid)?;
             if canonical != observed.canonical_input_json {
                 return Err(ScheduleStoreError::Conflict);
             }

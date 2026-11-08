@@ -188,7 +188,7 @@ async fn exercise_preclaimed(permission: bool) {
     }
     if permission {
         session.permission_requests.push(serde_json::from_value(serde_json::json!({
-            "schema_version":1, "request_id":"decision", "input_revision":1,
+            "schema_version":crate::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION, "request_id":"decision", "input_revision":1,
             "state":"denied", "created_at":"2026-09-06T00:00:00Z", "items":[{
                 "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
                 "expected_effect":"read_device", "resource_scope":["target:current_device"],

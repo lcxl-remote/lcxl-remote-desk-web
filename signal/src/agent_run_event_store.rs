@@ -3301,7 +3301,10 @@ mod tests {
         let session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
         assert_eq!(
             serde_json::to_value(&session).unwrap()["assistant_request_targets"],
-            serde_json::json!({"input_revision": 2, "device_ids": ["device-1"]})
+            serde_json::json!({
+                "input_revision": 2,
+                "targets": [{"device_id": "device-1", "reference": "device-1"}],
+            })
         );
         assert!(session.admits_assistant_device("device-1"));
         assert!(!session.admits_assistant_device("other-device"));

@@ -308,7 +308,7 @@ async fn completed_fixture_with_delivery(
         &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         &child,
         &child.device_id,
-        &call,
+        &super::with_target_ref(&call, &child.device_id),
         now,
     )
     .unwrap();

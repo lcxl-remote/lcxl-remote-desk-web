@@ -132,6 +132,9 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         .await
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::device_code_store::get_or_create(&db, "device")
+        .await
+        .unwrap();
     crate::ai_assistant_gate::enable_test_host();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -183,7 +186,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         }
         (bodies, title)
     });
-    let map = Arc::new(SharedConnectionMap::new());
+    let map = Arc::new(SharedConnectionMap::new_oss());
     let pending = crate::remote_tool_edge::global_remote_tool_pending();
     let observer = Arc::new(SignalRemoteToolObserver::new(pending.clone()));
     let host = format!("host-{}", uuid::Uuid::new_v4());
@@ -232,8 +235,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                                         },
                                         ai_assistant_settings:
                                             desk_agent_protocol::ai_assistant::AiAssistantSettings {
-                                                revision: 0,
-                                                enabled: false,
+                                                revision: 1,
+                                                enabled: true,
                                             },
                                     }
                                 }),
@@ -550,7 +553,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         let original = map.write().await.remove(&host).unwrap();
         assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
         map.write().await.insert(host.clone(), original.clone());
-        let mut duplicate = original;
+        let mut duplicate = original.clone();
         duplicate.lifecycle = Default::default();
         std::sync::Arc::make_mut(&mut duplicate.model).connection_id = format!("duplicate-{host}");
         map.write()
@@ -558,6 +561,11 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .insert(duplicate.model.connection_id.clone(), duplicate);
         assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
         map.write().await.remove(&format!("duplicate-{host}"));
+        // The OSS registry keeps one current connection per device, so the
+        // duplicate replaced the original; restore it as a live connection.
+        let mut restored = original;
+        restored.lifecycle = Default::default();
+        map.write().await.insert(host.clone(), restored);
         let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
         let ready = cache.get_fresh(&host, Utc::now()).unwrap().readiness;
         cache.remove_connection(&host);
@@ -657,13 +665,20 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     .await
                     .insert(host.clone(), original_host.clone());
                 let duplicate = format!("{host}-duplicate");
-                map.write().await.insert(duplicate.clone(), original_host);
+                let mut duplicate_host = original_host.clone();
+                duplicate_host.lifecycle = Default::default();
+                map.write().await.insert(duplicate.clone(), duplicate_host);
                 assert!(
                     claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
                         .await
                         .is_err()
                 );
                 map.write().await.remove(&duplicate);
+                // The OSS registry keeps one current connection per device, so the
+                // duplicate replaced the original; restore it as a live connection.
+                let mut restored = original_host;
+                restored.lifecycle = Default::default();
+                map.write().await.insert(host.clone(), restored);
                 let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
                 let cached = cache.get_fresh(&host, Utc::now()).unwrap();
                 cache.remove_connection(&host);
@@ -819,6 +834,34 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         tokio::time::timeout(MODEL_IO_TIMEOUT, resume())
             .await
             .unwrap();
+        if change == Some("legacy") {
+            // An unsupported original input format is rejected before any
+            // model request or device read; the approved use stays unspent.
+            let mut capture = capture;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), &mut capture)
+                    .await
+                    .is_err()
+            );
+            capture.abort();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), socket.next())
+                    .await
+                    .is_err()
+            );
+            let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                .list_for_subject(&run_id, "1", "device")
+                .await
+                .unwrap();
+            assert_eq!(grants[0].remaining_uses, 1);
+            socket.send(awc::ws::Message::Close(None)).await.unwrap();
+            drop(socket);
+            map.write().await.clear();
+            handle.stop(true).await;
+            task.await.unwrap().unwrap();
+            db.close().await.unwrap();
+            return;
+        }
         let (bodies, title) = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
             .await
             .unwrap()

@@ -605,7 +605,12 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
         },
         "2026-08-31T00:00:00Z",
     );
+    session.adopt_client_metadata(
+        Some("live-read"),
+        crate::session::AgentSessionSurface::AiAssistant,
+    );
     session.input_revision = 1;
+    session.bind_assistant_input_targets(&[]).unwrap();
     session.conversation.push(
         crate::model_message_labels::model_bound_user_message(
             "input".into(),
@@ -619,11 +624,18 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)
             .unwrap();
-        let request = crate::permission_tools::build_permission_request(&ToolCall {
+        let mut request = crate::permission_tools::build_permission_request(&ToolCall {
             id:"request".into(),name:"request_permissions".into(),arguments_json:serde_json::json!({"items":[{
                 "item_id":"read","provider_id":provider.wire.provider_id,"tool_name":name,"expected_effect":capability.wire.effect,
                 "suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Read original document"}]}).to_string(),
         },&registry,"request".into(),1,"2026-08-31T00:00:01Z".into()).unwrap();
+        request.items[0].selected_device_target =
+            Some(crate::request_devices::SelectedDeviceTarget {
+                device_id: session.device_id.clone(),
+                target_ref: session.device_id.clone(),
+                connection_id: "host".into(),
+                readiness_revision: 1,
+            });
         let decisions = [PermissionDecisionItem {
             item_id: "read".into(),
             decision: PermissionItemDecision::Approve {

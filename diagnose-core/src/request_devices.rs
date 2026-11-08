@@ -609,6 +609,14 @@ pub(crate) async fn plan_device_permission(
     )
 }
 
+/// Native canonical input of a recorded device call. The model-facing
+/// `target_ref` selects the device and is never part of the native input.
+pub fn native_canonical_input(tool_name: &str, arguments_json: &str) -> Option<String> {
+    let mut input: serde_json::Value = serde_json::from_str(arguments_json).ok()?;
+    input.as_object_mut()?.remove("target_ref");
+    crate::permission_tools::canonical_tool_permission_input_json(tool_name, input).ok()
+}
+
 /// The selected-read path resolves aliases before approval and dispatch, so
 /// its exact input can retain the entire native object incarnation.
 pub fn canonical_selected_read_input(

@@ -4144,6 +4144,9 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
                 | "manage_memories"
                 | "request_goal"
                 | "control_goal"
+                | desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE
+                | desk_diagnose_core::schedule::management_tools::LIST
+                | desk_diagnose_core::schedule::management_tools::CANCEL
         ) || tools::effect(name).is_some()),
         "{names:?}"
     );

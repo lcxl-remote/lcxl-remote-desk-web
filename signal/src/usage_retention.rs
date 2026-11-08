@@ -952,6 +952,7 @@ mod tests {
             session.surface = desk_diagnose_core::session::AgentSessionSurface::AiAssistant;
             session.input_revision = 1;
             session.begin_focus_epoch(1, Vec::new()).unwrap();
+            session.bind_assistant_input_targets(&[]).unwrap();
         }
         if active {
             session

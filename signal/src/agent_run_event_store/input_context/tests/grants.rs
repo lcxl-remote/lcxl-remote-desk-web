@@ -18,6 +18,7 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
     session.input_revision = 1;
     session.policy_revision =
         desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+    session.bind_assistant_input_targets(&[]).unwrap();
     let now = Utc::now().timestamp_millis() as u64;
     let deadline = now + 60_000;
     let ambient = [serde_json::from_str::<ObjectRef>(&later.object_ref.opaque_token).unwrap()];
@@ -43,7 +44,7 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
                     "suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Read original object"
                 }]}).to_string(),
             };
-            let request = desk_diagnose_core::permission_tools::build_permission_request(
+            let mut request = desk_diagnose_core::permission_tools::build_permission_request(
                 &call,
                 &registry,
                 "request".into(),
@@ -51,6 +52,24 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
                 Utc::now().to_rfc3339(),
             )
             .unwrap();
+            request.items[0].selected_device_target =
+                Some(desk_diagnose_core::request_devices::SelectedDeviceTarget {
+                    device_id: session.device_id.clone(),
+                    target_ref: session.device_id.clone(),
+                    connection_id: "host".into(),
+                    readiness_revision: 1,
+                });
+            // The request-device planner freezes the completed native input.
+            let canonical = desk_diagnose_core::request_devices::canonical_selected_read_input(
+                name,
+                serde_json::json!({}),
+            )
+            .unwrap();
+            request.items[0].canonical_input_digest_sha256 = Some(format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(canonical.as_bytes())
+            ));
+            request.items[0].canonical_input_json = Some(canonical);
             let decisions = [PermissionDecisionItem {
                 item_id: "read".into(),
                 decision: PermissionItemDecision::Approve {
