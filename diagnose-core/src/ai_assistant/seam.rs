@@ -106,11 +106,6 @@ impl AssistantDataReadUse {
                 || dependency.source_revision == 0
                 || dependency.origin_deletion_generation == 0
                 || dependency.policy_revision == 0
-                || dependency.content_sha256.len() != 64
-                || !dependency
-                    .content_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit())
                 || !sources.insert((&dependency.source_id, dependency.source_revision))
                 || dependency.expires_at_unix_ms.is_some_and(|until| {
                     until == 0

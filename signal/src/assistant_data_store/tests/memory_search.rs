@@ -102,7 +102,6 @@ pub(super) async fn index_fact(store: &TestStore, row: &fact::Model) {
             byte_end: Set(part.byte_end as i32),
             token_count: Set(part.token_count as i32),
             policy_revision: Set(1),
-            content_sha256: Set(row.content_sha256.clone()),
             partial: Set(projected.partial),
             expires_at_ms: Set(None),
             ..Default::default()
@@ -220,7 +219,6 @@ async fn actual_accepted_producer_reads_model_memory_and_replays_the_identical_r
         vec![QuerySourceVersion {
             source_id: row.memory_id,
             revision: row.revision as u64,
-            content_sha256: row.content_sha256
         }]
     );
 }
@@ -504,7 +502,6 @@ async fn the_original_observation_and_memory_device_rule_are_enforced_before_bod
     let version = QuerySourceVersion {
         source_id: row.memory_id,
         revision: row.revision as u64,
-        content_sha256: row.content_sha256,
     };
     let mut authority = MemoryReadAuthorization {
         actor_id: "1",
@@ -644,7 +641,6 @@ async fn storage_views_apply_original_device_consent_and_keep_pending_facts_out_
     let version = QuerySourceVersion {
         source_id: row.memory_id.clone(),
         revision: row.revision as u64,
-        content_sha256: row.content_sha256.clone(),
     };
     let mut authority = MemoryReadAuthorization {
         actor_id: "1",
@@ -702,7 +698,6 @@ async fn storage_views_apply_original_device_consent_and_keep_pending_facts_out_
     let account_version = QuerySourceVersion {
         source_id: a.clone(),
         revision: account.revision as u64,
-        content_sha256: account.content_sha256,
     };
     fact::Entity::update_many()
         .col_expr(fact::Column::Status, Expr::value("pending_conflict"))

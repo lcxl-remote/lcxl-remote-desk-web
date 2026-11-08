@@ -113,7 +113,6 @@ async fn window_query(
             anchor: QuerySourceVersion {
                 source_id: source.into(),
                 revision: row.revision as u64,
-                content_sha256: row.content_sha256,
             },
             conversation_id: row.conversation_id,
         },

@@ -203,10 +203,6 @@ pub fn apply_terms(
                 .equals((term::Entity, term::Column::SourceRevision)),
         )
         .and_where(
-            Expr::col((document::Entity, document::Column::ContentSha256))
-                .equals((history::Entity, history::Column::ContentSha256)),
-        )
-        .and_where(
             Expr::col((document::Entity, document::Column::DeviceRef))
                 .equals((history::Entity, history::Column::DeviceRef)),
         )

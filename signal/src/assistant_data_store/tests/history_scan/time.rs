@@ -200,15 +200,9 @@ async fn time_scans_exclude_owner_viewable_no_export_text_and_derived_sources_wi
         .await
         .unwrap()
         .unwrap();
-    let parent = source_reads::readable_history_on(
-        &store.db,
-        &frame.borrowed(),
-        &allowed,
-        1,
-        &row.content_sha256,
-    )
-    .await
-    .unwrap();
+    let parent = source_reads::readable_history_on(&store.db, &frame.borrowed(), &allowed, 1)
+        .await
+        .unwrap();
     let derived = capture_at(
         &store,
         &device,

@@ -203,7 +203,7 @@ async fn expanded_owner_candidates_and_large_cursors_page_every_result() {
     let first = super::super::owner_search::search_on(&store.db, "1", &request, &policy, 5000)
         .await
         .unwrap();
-    assert!(first.next_cursor.as_ref().unwrap().len() > 16384);
+    assert!(first.next_cursor.as_ref().unwrap().len() > 4096);
     {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         let raw = URL_SAFE_NO_PAD
@@ -219,10 +219,7 @@ async fn expanded_owner_candidates_and_large_cursors_page_every_result() {
         let mut state: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let remaining = state["remaining"].as_array_mut().unwrap();
         for index in 0..10 {
-            remaining.insert(
-                0,
-                serde_json::json!([format!("missing-source-{index}"), 1, "a".repeat(64)]),
-            );
+            remaining.insert(0, serde_json::json!([format!("missing-source-{index}"), 1]));
         }
         request.cursor = Some(format!(
             "oh1_{}",

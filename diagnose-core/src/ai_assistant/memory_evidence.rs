@@ -322,7 +322,6 @@ fn canonical_dependencies(
             || value.source_revision == 0
             || value.origin_deletion_generation == 0
             || value.policy_revision == 0
-            || !hash(&value.content_sha256)
             || !seen.insert((&value.source_id, value.source_revision))
             || value
                 .expires_at_unix_ms
@@ -332,10 +331,6 @@ fn canonical_dependencies(
         }
     }
     Ok(values)
-}
-
-fn hash(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -359,10 +354,6 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let origin = native_ids::stable(Kind::AssistantOrigin, &"assertion");
-            let original_hash = format!(
-                "{:x}",
-                <sha2::Sha256 as sha2::Digest>::digest(b"I prefer Chinese")
-            );
             Self {
                 memory: native_ids::stable(Kind::Memory, &"language"),
                 evidence: native_ids::stable(Kind::AssistantSource, &"evidence"),
@@ -370,7 +361,6 @@ mod tests {
                     source_id: native_ids::stable(Kind::AssistantSource, &"original-fragment"),
                     revision: 1,
                     origin_id: origin.clone(),
-                    content_sha256: original_hash.clone(),
                 }],
                 origin,
                 role: SourceRefRole::Evidence,
@@ -415,7 +405,6 @@ mod tests {
             source_id: native_ids::stable(Kind::AssistantSource, &"another-original-fragment"),
             revision: 1,
             origin_id: data.origin.clone(),
-            content_sha256: "b".repeat(64),
         };
         data.known.push(second.clone());
         let mut snapshot = data.snapshot();
@@ -449,21 +438,19 @@ mod tests {
         snapshot.forget_sources = &[];
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&snapshot).is_err());
         let mut changed = data.known[0].clone();
-        changed.content_sha256 = "c".repeat(64);
+        changed.revision += 1;
         snapshot.forget_sources = std::slice::from_ref(&changed);
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&snapshot).is_err());
         let foreign = KnownMemorySource {
             source_id: native_ids::stable(Kind::AssistantSource, &"foreign-input"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"foreign-origin"),
-            content_sha256: "d".repeat(64),
         };
         data.known.push(foreign.clone());
         data.dependencies.push(HistoryDependency {
             source_id: foreign.source_id.clone(),
             source_revision: foreign.revision,
             origin_id: foreign.origin_id.clone(),
-            content_sha256: foreign.content_sha256.clone(),
             origin_deletion_generation: 1,
             policy_revision: 1,
             expires_at_unix_ms: Some(5000),
@@ -552,7 +539,6 @@ mod tests {
             source_id: native_ids::stable(Kind::AssistantSource, &"background"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"background"),
-            content_sha256: "a".repeat(64),
         };
         data.known.push(known.clone());
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_err());
@@ -562,7 +548,6 @@ mod tests {
             origin_id: known.origin_id,
             origin_deletion_generation: 1,
             policy_revision: 1,
-            content_sha256: known.content_sha256,
             expires_at_unix_ms: None,
         });
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_ok());
@@ -627,7 +612,6 @@ mod tests {
             source_id: native_ids::stable(Kind::AssistantSource, &"independent-background"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"independent-background"),
-            content_sha256: "b".repeat(64),
         };
         let origin = RetainedMemoryOrigin {
             origin_id: source.origin_id.clone(),
@@ -698,7 +682,6 @@ mod tests {
                 source_id: native_ids::stable(Kind::AssistantSource, &index),
                 revision: 1,
                 origin_id: origin_id.clone(),
-                content_sha256: "a".repeat(64),
             });
             retained.push(RetainedMemoryOrigin {
                 origin_id,

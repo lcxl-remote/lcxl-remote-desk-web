@@ -28,7 +28,6 @@ pub struct Model {
     pub byte_end: i32,
     pub token_count: i32,
     pub policy_revision: i64,
-    pub content_sha256: String,
     pub partial: bool,
     #[sea_orm(indexed)]
     pub expires_at_ms: Option<i64>,

@@ -1,6 +1,5 @@
 //! Validation and immutable first-input personalization snapshots.
 
-use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 use crate::redaction::{Redactor, RegexRedactor};
@@ -78,7 +77,6 @@ fn freeze_snapshot(
     Ok(UserInstructionsSnapshot {
         revision: current.revision,
         content: current.content.clone(),
-        content_sha256: format!("{:x}", Sha256::digest(current.content.as_bytes())),
         accepted_input_seq,
         frozen_at_unix_ms: now_unix_ms,
     })
@@ -99,9 +97,7 @@ pub fn instructions_projection(
         safe_for_model: false,
         error_code: None,
     };
-    if snapshot.revision == 0
-        || snapshot.content_sha256 != format!("{:x}", Sha256::digest(snapshot.content.as_bytes()))
-    {
+    if snapshot.revision == 0 {
         return Err(invalid());
     }
     let id = crate::native_ids::stable(
@@ -110,7 +106,6 @@ pub fn instructions_projection(
             "personalization",
             conversation_id,
             snapshot.revision,
-            &snapshot.content_sha256,
             &destination,
         ),
     );
@@ -150,7 +145,7 @@ mod tests {
         let second = freeze_instructions(&current, 6, 200).unwrap();
         assert_eq!(first.content, "默认中文");
         assert_eq!(first.revision, 1);
-        assert_ne!(first.content_sha256, second.content_sha256);
+        assert_eq!(second.revision, 2);
     }
 
     #[test]

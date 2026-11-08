@@ -49,7 +49,6 @@ pub trait HistorySourceReader<C: ConnectionTrait> {
         context: &HistorySearchAuthorization<'_>,
         source_id: &str,
         revision: u64,
-        content_sha256: &str,
     ) -> Result<Box<ReadableHistorySource>, AssistantStoreError>;
 }
 
@@ -90,7 +89,6 @@ impl ReadableHistorySource {
             desk_diagnose_core::ai_assistant::retrieval_query::QuerySourceVersion {
                 source_id: self.row.source_id.clone(),
                 revision: unsigned(self.row.revision)?,
-                content_sha256: self.row.content_sha256.clone(),
             },
         )
     }
@@ -103,7 +101,6 @@ struct Posting {
     frequency: i32,
     source_revision: i64,
     source_id: String,
-    content_sha256: String,
     root_conversation_id: String,
     token_count: i32,
 }
@@ -203,7 +200,6 @@ pub async fn scan_on<C: ConnectionTrait, R: HistorySourceReader<C>>(
                     context,
                     &posting.source_id,
                     unsigned(posting.source_revision)?,
-                    &posting.content_sha256,
                 )
                 .await
                 {
@@ -238,7 +234,6 @@ pub async fn scan_on<C: ConnectionTrait, R: HistorySourceReader<C>>(
                                 document_id: posting.document_id.clone(),
                                 source_id: source.row.source_id,
                                 revision: unsigned(source.row.revision)?,
-                                content_sha256: source.row.content_sha256,
                                 root_conversation_id: source.row.root_conversation_id,
                                 token_count: posting.token_count as u32,
                                 frequencies: BTreeMap::new(),
@@ -254,7 +249,6 @@ pub async fn scan_on<C: ConnectionTrait, R: HistorySourceReader<C>>(
             if let Some(doc) = readable.get_mut(&posting.document_id) {
                 if doc.source_id != posting.source_id
                     || doc.revision != unsigned(posting.source_revision)?
-                    || doc.content_sha256 != posting.content_sha256
                     || doc.root_conversation_id != posting.root_conversation_id
                     || posting.token_count <= 0
                     || doc.token_count != posting.token_count as u32
@@ -334,7 +328,6 @@ fn posting_query(
         ])
         .columns([
             (document::Entity, document::Column::SourceId),
-            (document::Entity, document::Column::ContentSha256),
             (document::Entity, document::Column::RootConversationId),
             (document::Entity, document::Column::TokenCount),
         ])
@@ -353,10 +346,6 @@ fn posting_query(
         .and_where(
             Expr::col((document::Entity, document::Column::SourceRevision))
                 .equals((term::Entity, term::Column::SourceRevision)),
-        )
-        .and_where(
-            Expr::col((document::Entity, document::Column::ContentSha256))
-                .equals((history::Entity, history::Column::ContentSha256)),
         )
         .and_where(
             Expr::col((document::Entity, document::Column::DeviceRef))

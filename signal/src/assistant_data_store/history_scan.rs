@@ -79,7 +79,6 @@ impl ThinHistory {
             source: QuerySourceVersion {
                 source_id: self.source_id.clone(),
                 revision,
-                content_sha256: self.content_sha256.clone(),
             },
             position: WindowPosition {
                 admitted_generation: generation,
@@ -229,7 +228,6 @@ async fn readable_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         context,
         &item.source.source_id,
         item.source.revision,
-        &item.source.content_sha256,
     )
     .await;
     // A source error must not hide a concurrent switch, policy or control change.

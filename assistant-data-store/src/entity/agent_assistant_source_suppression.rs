@@ -14,7 +14,6 @@ pub struct Model {
     pub source_id: String,
     pub source_revision: i64,
     pub origin_id: String,
-    pub content_sha256: String,
     pub cutoff_input_seq: i64,
     pub control_generation: i64,
     pub created_at_ms: i64,

@@ -73,7 +73,6 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
                 source.source_id == row.source_id
                     && source.source_revision == row.memory_revision as u64
                     && source.origin_id == row.origin_id
-                    && source.content_sha256 == row.content_sha256
                     && source.expires_at_unix_ms == expiry
             }) {
                 return Ok(None);
@@ -131,7 +130,6 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         let policy_revision = if let Some(row) = retained {
             if row.origin_id != source.origin_id
                 || row.memory_revision != signed(source.source_revision)?
-                || row.content_sha256 != source.content_sha256
                 || !super::evidence::owner_history_identity_allowed_on(
                     db,
                     view.actor_id(),
@@ -171,7 +169,6 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
             {
                 if row.origin_id != source.origin_id
                     || row.revision != signed(source.source_revision)?
-                    || row.content_sha256 != source.content_sha256
                     || row.deleted_at_ms.is_some()
                     || !dependencies_declared(&row.dependencies_json, &usage.history_dependencies)
                 {

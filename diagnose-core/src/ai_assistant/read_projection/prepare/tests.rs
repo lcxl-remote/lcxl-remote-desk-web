@@ -144,7 +144,7 @@ impl Fixture {
             now_unix_ms: 1100,
         }
     }
-    fn usage(&self, name: &str, body: &str) -> AssistantDataReadUse {
+    fn usage(&self, name: &str) -> AssistantDataReadUse {
         let source = native_ids::stable(Kind::AssistantSource, &name);
         AssistantDataReadUse {
             decision_roots: Vec::new(),
@@ -170,7 +170,6 @@ impl Fixture {
             history_dependencies: vec![HistoryDependency {
                 source_id: source,
                 source_revision: 1,
-                content_sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
                 origin_id: native_ids::stable(Kind::AssistantOrigin, &name),
                 origin_deletion_generation: 1,
                 policy_revision: 1,
@@ -221,11 +220,6 @@ fn search(sources: &[AssistantDataReadUse]) -> String {
             .iter()
             .map(|usage| {
                 let root = &usage.roots[0];
-                let source = usage
-                    .history_dependencies
-                    .iter()
-                    .find(|source| source.source_id == root.source_id)
-                    .unwrap();
                 ConversationSearchHit {
                     source_id: root.source_id.clone(),
                     revision: root.source_revision,
@@ -237,7 +231,7 @@ fn search(sources: &[AssistantDataReadUse]) -> String {
                         input_event_id: None,
                         action_id: None,
                         result_id: None,
-                        content_sha256: source.content_sha256.clone(),
+                        content_sha256: "a".repeat(64),
                         fragment_index: 0,
                         byte_start: 0,
                         byte_end: 20,
@@ -281,9 +275,9 @@ fn prepared_reads_bind_exact_returned_roots_complete_shared_dependencies_and_the
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let mut a = fixture.usage("A", "report A");
-    let mut b = fixture.usage("B", "report B");
-    let common = fixture.usage("shared", "common background");
+    let mut a = fixture.usage("A");
+    let mut b = fixture.usage("B");
+    let common = fixture.usage("shared");
     a.history_dependencies
         .extend(common.history_dependencies.clone());
     b.history_dependencies.extend(common.history_dependencies);
@@ -329,7 +323,7 @@ fn source_purpose_and_preparation_deadlines_are_never_renewed_from_a_retry_clock
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let mut usage = fixture.usage("A", "report");
+    let mut usage = fixture.usage("A");
     usage.expires_at_unix_ms = None;
     usage.history_dependencies[0].expires_at_unix_ms = None;
     let content = search(std::slice::from_ref(&usage));
@@ -376,7 +370,7 @@ fn source_purpose_and_preparation_deadlines_are_never_renewed_from_a_retry_clock
         .as_mut()
         .unwrap()
         .expires_at_unix_ms = Some(1400);
-    let usage = fixture.usage("B", "report");
+    let usage = fixture.usage("B");
     let content = search(std::slice::from_ref(&usage));
     let narrowed = persisted_read(
         &fixture.context(),
@@ -401,7 +395,7 @@ fn mismatched_arguments_accounting_classes_producers_and_destinations_cannot_pre
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Read,
     );
-    let usage = fixture.usage("A", "report");
+    let usage = fixture.usage("A");
     let content = search(std::slice::from_ref(&usage));
     assert!(
         persisted_read(
@@ -419,7 +413,7 @@ fn mismatched_arguments_accounting_classes_producers_and_destinations_cannot_pre
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let usage = fixture.usage("A", "report");
+    let usage = fixture.usage("A");
     let content = search(std::slice::from_ref(&usage));
     fixture
         .session
@@ -463,8 +457,8 @@ fn result_ids_hashes_and_actual_output_roots_cannot_be_fabricated_or_padded_with
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let a = fixture.usage("A", "report A");
-    let b = fixture.usage("B", "report B");
+    let a = fixture.usage("A");
+    let b = fixture.usage("B");
     let content = search(std::slice::from_ref(&a));
     assert!(
         persisted_read(
@@ -488,19 +482,6 @@ fn result_ids_hashes_and_actual_output_roots_cannot_be_fabricated_or_padded_with
         )
         .is_err()
     );
-    let mut wrong: ConversationSearchResult = serde_json::from_str(&content).unwrap();
-    wrong.hits[0].locator.content_sha256 = "f".repeat(64);
-    assert!(
-        persisted_read(
-            &fixture.context(),
-            &fixture.access,
-            &serde_json::to_string(&wrong).unwrap(),
-            SourceReadPurpose::ModelHistory,
-            &[a],
-            1100
-        )
-        .is_err()
-    );
 }
 
 #[test]
@@ -510,9 +491,9 @@ fn dependency_conflicts_and_current_control_or_feature_changes_fail_closed() {
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let mut a = fixture.usage("A", "report A");
-    let mut b = fixture.usage("B", "report B");
-    let shared = fixture.usage("shared", "background");
+    let mut a = fixture.usage("A");
+    let mut b = fixture.usage("B");
+    let shared = fixture.usage("shared");
     a.history_dependencies
         .extend(shared.history_dependencies.clone());
     b.history_dependencies.extend(shared.history_dependencies);
@@ -566,7 +547,7 @@ fn original_window_content_and_self_reported_bytes_must_match_the_retained_full_
         RetrievalCallKind::Read,
     );
     let body = "exact 汉 fragment";
-    let mut usage = fixture.usage("A", body);
+    let mut usage = fixture.usage("A");
     usage.decision_roots = usage.roots.clone();
     let mut result = ConversationReadResult {
         conversation_id: "past-root".into(),
@@ -600,20 +581,6 @@ fn original_window_content_and_self_reported_bytes_must_match_the_retained_full_
         1100,
     )
     .unwrap();
-    result.messages[0].content = "invented fragment".into();
-    let framed = budget.try_encode_window(&mut result).unwrap().unwrap();
-    assert!(
-        persisted_read(
-            &fixture.context(),
-            &fixture.access,
-            &framed.content,
-            SourceReadPurpose::ModelHistory,
-            std::slice::from_ref(&usage),
-            1100
-        )
-        .is_err()
-    );
-    result.messages[0].content = body.into();
     result.actual_bytes = 1;
     assert!(
         persisted_read(
@@ -638,9 +605,9 @@ fn a_window_keeps_its_original_anchor_as_a_constraint_without_claiming_its_body_
         &arguments,
         RetrievalCallKind::Read,
     );
-    let mut anchor = fixture.usage("anchor", "original anchor outside the tail");
+    let mut anchor = fixture.usage("anchor");
     anchor.decision_roots = std::mem::take(&mut anchor.roots);
-    let tail = fixture.usage("tail", "actual returned tail");
+    let tail = fixture.usage("tail");
     let mut result = ConversationReadResult {
         conversation_id: "past-root".into(),
         messages: vec![HistoryMessage {
@@ -768,7 +735,7 @@ fn search_results_cannot_add_a_hidden_window_decision_anchor() {
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let mut usage = fixture.usage("A", "report A");
+    let mut usage = fixture.usage("A");
     let body = search(std::slice::from_ref(&usage));
     usage.decision_roots = usage.roots.clone();
     assert!(
@@ -792,8 +759,8 @@ fn an_empty_native_inventory_names_its_exact_source_and_cannot_hide_extra_read_r
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let input = fixture.usage("input", "report");
-    let native = fixture.usage("native", "complete empty inventory");
+    let input = fixture.usage("input");
+    let native = fixture.usage("native");
     let mut result: ConversationSearchResult =
         serde_json::from_str(&search(std::slice::from_ref(&input))).unwrap();
     let root = &native.roots[0];
@@ -867,9 +834,9 @@ fn retained_native_state_families_bind_each_original_observation_and_reject_unli
         "{\"queries\":[\"report\"]}",
         RetrievalCallKind::Relevance,
     );
-    let input = fixture.usage("input", "report");
-    let current = fixture.usage("current-native", "empty current inventory");
-    let retained = fixture.usage("old-native", "original goal completed");
+    let input = fixture.usage("input");
+    let current = fixture.usage("current-native");
+    let retained = fixture.usage("old-native");
     let mut result: ConversationSearchResult =
         serde_json::from_str(&search(std::slice::from_ref(&input))).unwrap();
     let mut summary = NativeHistorySnapshot::bounded(
@@ -948,7 +915,7 @@ fn configured_unused_lifetime_is_frozen_and_consumption_retains_original_source_
         let data = fixture.session.assistant_data.as_mut().unwrap();
         data.retrieval_budget.limits.unused_projection_ttl_ms = ttl;
         data.limits.retrieval.episode.unused_projection_ttl_ms = 1;
-        let mut usage = fixture.usage("configured", "report");
+        let mut usage = fixture.usage("configured");
         usage.expires_at_unix_ms = None;
         usage.history_dependencies[0].expires_at_unix_ms = None;
         let content = search(std::slice::from_ref(&usage));

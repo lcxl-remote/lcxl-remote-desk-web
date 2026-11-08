@@ -66,7 +66,6 @@ impl Fixture {
             history_dependencies: vec![HistoryDependency {
                 source_id: source,
                 source_revision: 1,
-                content_sha256: "a".repeat(64),
                 origin_id: native_ids::stable(Kind::AssistantOrigin, &"current-original"),
                 origin_deletion_generation: 1,
                 policy_revision: 1,

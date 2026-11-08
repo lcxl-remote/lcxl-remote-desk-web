@@ -149,13 +149,6 @@ async fn manual_root_deletion_denies_completed_child_evidence_and_derived_text_w
         source_revision: 1,
         origin_id: origin_id.clone(),
         origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
-        content_sha256: evidence::Entity::find()
-            .filter(evidence::Column::SourceId.eq(&evidence_id))
-            .one(&store.db)
-            .await
-            .unwrap()
-            .unwrap()
-            .content_sha256,
         policy_revision: 1,
         expires_at_unix_ms: None,
     };
@@ -472,7 +465,6 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
             source_id: source.source_id.clone(),
             source_revision: source.revision,
             origin_id: source.origin_id.clone(),
-            content_sha256: source.content_sha256.clone(),
             origin_deletion_generation: original.deletion_generation as u64,
             policy_revision: original_policy.policy_revision,
             expires_at_unix_ms: original_policy.content_hard_expires_at_unix_ms,

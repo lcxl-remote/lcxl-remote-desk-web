@@ -34,9 +34,8 @@ impl<C: ConnectionTrait + crate::config::ConfigConnection> HistorySourceReader<C
         context: &HistorySearchAuthorization<'_>,
         source_id: &str,
         revision: u64,
-        content_sha256: &str,
     ) -> Result<Box<ReadableHistorySource>, AssistantStoreError> {
-        readable_history_on(db, context, source_id, revision, content_sha256).await
+        readable_history_on(db, context, source_id, revision).await
     }
 }
 pub(crate) async fn relevance_on<C: ConnectionTrait + crate::config::ConfigConnection>(
@@ -66,7 +65,6 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     context: &HistorySearchAuthorization<'_>,
     source_id: &str,
     revision: u64,
-    digest: &str,
 ) -> Result<Box<ReadableHistorySource>, AssistantStoreError> {
     validate_context_on(db, context).await?;
     let row = history::Entity::find()
@@ -76,7 +74,6 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
     if unsigned(row.revision)? != revision
-        || row.content_sha256 != digest
         || row.admitted_generation <= 0
         || unsigned(row.admitted_generation)? > context.corpus_generation
     {
@@ -96,7 +93,6 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     let own = HistoryDependency {
         source_id: row.source_id.clone(),
         source_revision: revision,
-        content_sha256: row.content_sha256.clone(),
         origin_id: row.origin_id.clone(),
         origin_deletion_generation: unsigned(original.deletion_generation)?,
         policy_revision: policy.policy_revision,

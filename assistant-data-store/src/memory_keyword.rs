@@ -84,7 +84,6 @@ struct Posting {
     frequency: i32,
     source_revision: i64,
     source_id: String,
-    content_sha256: String,
     token_count: i32,
 }
 
@@ -169,13 +168,8 @@ pub async fn scan_on<C: ConnectionTrait, R: MemorySourceReader<C>>(
                 let version = QuerySourceVersion {
                     source_id: posting.source_id.clone(),
                     revision: unsigned(posting.source_revision)?,
-                    content_sha256: posting.content_sha256.clone(),
                 };
-                let identity = (
-                    version.source_id.clone(),
-                    version.revision,
-                    version.content_sha256.clone(),
-                );
+                let identity = (version.source_id.clone(), version.revision);
                 if !authorized.contains(&identity) {
                     let result = match desk_diagnose_core::future::boxed(|| {
                         R::authorize_version_on(
@@ -215,7 +209,6 @@ pub async fn scan_on<C: ConnectionTrait, R: MemorySourceReader<C>>(
                         document_id: posting.document_id.clone(),
                         source_id: posting.source_id.clone(),
                         revision: version.revision,
-                        content_sha256: posting.content_sha256.clone(),
                         root_conversation_id: posting.source_id.clone(),
                         token_count: posting.token_count as u32,
                         frequencies: BTreeMap::new(),
@@ -225,7 +218,6 @@ pub async fn scan_on<C: ConnectionTrait, R: MemorySourceReader<C>>(
             if let Some(doc) = readable.get_mut(&posting.document_id) {
                 if doc.source_id != posting.source_id
                     || doc.revision != unsigned(posting.source_revision)?
-                    || doc.content_sha256 != posting.content_sha256
                     || posting.token_count <= 0
                     || doc.token_count != posting.token_count as u32
                     || posting.frequency <= 0
@@ -261,9 +253,6 @@ pub async fn scan_on<C: ConnectionTrait, R: MemorySourceReader<C>>(
         }
         let key = (doc.source_id.clone(), doc.revision);
         if let Some(fact) = facts.get_mut(&key) {
-            if fact.content_sha256 != doc.content_sha256 {
-                return Err(AssistantStoreError::Inaccessible);
-            }
             fact.token_count = fact
                 .token_count
                 .checked_add(doc.token_count)
@@ -307,7 +296,6 @@ pub async fn scan_on<C: ConnectionTrait, R: MemorySourceReader<C>>(
             .map(|hit| QuerySourceVersion {
                 source_id: hit.document.source_id,
                 revision: hit.document.revision,
-                content_sha256: hit.document.content_sha256,
             })
             .collect(),
         reasons: reasons.into_iter().map(str::to_owned).collect(),
@@ -369,7 +357,6 @@ fn posting_query(
         ])
         .columns([
             (document::Entity, document::Column::SourceId),
-            (document::Entity, document::Column::ContentSha256),
             (document::Entity, document::Column::TokenCount),
         ])
         .and_where(Expr::col((term::Entity, term::Column::ActorId)).eq(context.actor_id))
@@ -395,10 +382,6 @@ fn posting_query(
         .and_where(
             Expr::col((document::Entity, document::Column::SourceRevision))
                 .equals((term::Entity, term::Column::SourceRevision)),
-        )
-        .and_where(
-            Expr::col((document::Entity, document::Column::ContentSha256))
-                .equals((memory::Entity, memory::Column::ContentSha256)),
         )
         .and_where(
             Expr::col((memory::Entity, memory::Column::Status))

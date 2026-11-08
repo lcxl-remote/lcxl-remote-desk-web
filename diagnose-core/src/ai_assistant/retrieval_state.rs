@@ -835,7 +835,7 @@ fn digest(value: &str) -> bool {
 }
 fn validate_version(value: &QuerySourceVersion) -> Result<(), &'static str> {
     validate_source_id(&value.source_id)?;
-    if value.revision == 0 || value.revision > i64::MAX as u64 || !digest(&value.content_sha256) {
+    if value.revision == 0 || value.revision > i64::MAX as u64 {
         return Err("invalid query source version");
     }
     Ok(())

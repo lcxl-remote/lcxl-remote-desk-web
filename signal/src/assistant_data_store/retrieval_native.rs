@@ -770,19 +770,15 @@ async fn producer_on(
             .iter()
             .chain(&source.usage.decision_roots)
         {
-            let dependency = source
-                .usage
-                .history_dependencies
-                .iter()
-                .find(|dependency| {
-                    dependency.source_id == root.source_id
-                        && dependency.source_revision == root.source_revision
-                })
-                .ok_or(AssistantStoreError::Inaccessible)?;
+            if !source.usage.history_dependencies.iter().any(|dependency| {
+                dependency.source_id == root.source_id
+                    && dependency.source_revision == root.source_revision
+            }) {
+                return Err(AssistantStoreError::Inaccessible);
+            }
             let version = QuerySourceVersion {
                 source_id: root.source_id.clone(),
                 revision: root.source_revision,
-                content_sha256: dependency.content_sha256.clone(),
             };
             if let Some(previous) = observed.insert(
                 (root.source_id.clone(), root.source_revision),

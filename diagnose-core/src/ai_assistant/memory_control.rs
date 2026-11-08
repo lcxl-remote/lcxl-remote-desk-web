@@ -12,7 +12,6 @@ pub struct KnownMemorySource {
     pub source_id: String,
     pub revision: u64,
     pub origin_id: String,
-    pub content_sha256: String,
 }
 
 impl KnownMemorySource {
@@ -20,8 +19,6 @@ impl KnownMemorySource {
         if !native_ids::is(Kind::AssistantSource, &self.source_id)
             || !native_ids::is(Kind::AssistantOrigin, &self.origin_id)
             || self.revision == 0
-            || self.content_sha256.len() != 64
-            || !self.content_sha256.bytes().all(|v| v.is_ascii_hexdigit())
         {
             return Err("invalid known memory source");
         }
@@ -32,7 +29,6 @@ impl KnownMemorySource {
         self.source_id == dependency.source_id
             && self.revision == dependency.source_revision
             && self.origin_id == dependency.origin_id
-            && self.content_sha256 == dependency.content_sha256
     }
 }
 
@@ -43,12 +39,7 @@ pub fn canonical_sources(
         source.validate()?;
     }
     sources.sort_by(|a, b| {
-        (&a.source_id, a.revision, &a.origin_id, &a.content_sha256).cmp(&(
-            &b.source_id,
-            b.revision,
-            &b.origin_id,
-            &b.content_sha256,
-        ))
+        (&a.source_id, a.revision, &a.origin_id).cmp(&(&b.source_id, b.revision, &b.origin_id))
     });
     sources.dedup();
     Ok(sources)
@@ -112,7 +103,6 @@ mod tests {
             source_id: native_ids::stable(Kind::AssistantSource, &seed),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"same-message"),
-            content_sha256: "a".repeat(64),
         }
     }
 
@@ -134,7 +124,6 @@ mod tests {
         let mut dependency = HistoryDependency {
             source_id: known.source_id.clone(),
             source_revision: 1,
-            content_sha256: known.content_sha256.clone(),
             origin_id: known.origin_id.clone(),
             origin_deletion_generation: 1,
             policy_revision: 1,

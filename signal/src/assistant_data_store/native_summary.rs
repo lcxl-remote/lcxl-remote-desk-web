@@ -67,7 +67,6 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             context,
             &row.source_id,
             unsigned(row.revision)?,
-            &row.content_sha256,
         )
         .await
         {

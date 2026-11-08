@@ -15,7 +15,6 @@ use desk_agent_protocol::ai_assistant::{
     user_instructions::{UserInstructions, UserInstructionsSnapshot},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Only the original requirement metadata, never a transcript, read projection
 /// or spent ledger. Zero means a task definition without an owner chat input.
@@ -326,8 +325,6 @@ impl TaskRetrievalConsent {
                 || seed.instructions.accepted_input_seq > seed.actor_input_seq
                 || seed.instructions.revision == 0
                 || seed.instructions.frozen_at_unix_ms == 0
-                || seed.instructions.content_sha256
-                    != format!("{:x}", Sha256::digest(seed.instructions.content.as_bytes()))
                 || (seed.actor_input_seq == 0
                     && (seed.instructions.accepted_input_seq != 0
                         || self

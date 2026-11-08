@@ -31,13 +31,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     version: &QuerySourceVersion,
 ) -> Result<Box<AuthorizedHistoryView>, AssistantStoreError> {
     let source = desk_diagnose_core::future::boxed(|| {
-        keyword_search::readable_history_on(
-            db,
-            context,
-            &version.source_id,
-            version.revision,
-            &version.content_sha256,
-        )
+        keyword_search::readable_history_on(db, context, &version.source_id, version.revision)
     })
     .await?;
     let view = super::owner_source::history_source_on(
@@ -63,7 +57,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     let device = view
         .source_device
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if locator.content_sha256 != version.content_sha256
+    if locator.content_sha256 != source.row.content_sha256
         || locator.conversation_id != source.row.conversation_id
         || locator.root_conversation_id != source.row.root_conversation_id
         || device.device_ref != source.row.device_ref

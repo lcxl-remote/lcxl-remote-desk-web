@@ -9,7 +9,6 @@ use desk_agent_protocol::ai_assistant::{
     memory::{MemoryHistoryResult, MemorySearchResult, MemoryStatus},
     source::{AssistantSourceResolution, SourceAvailability},
 };
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub(super) fn validate(
@@ -34,20 +33,13 @@ pub(super) fn validate(
                 return Err("search result changed its original bounds");
             }
             for hit in result.hits {
-                add(
-                    usage,
-                    &mut returned,
-                    &hit.source_id,
-                    hit.revision,
-                    Some(&hit.locator.content_sha256),
-                )?;
+                add(usage, &mut returned, &hit.source_id, hit.revision)?;
                 if let Some(summary) = hit.native_status_summary {
                     add(
                         usage,
                         &mut returned,
                         &summary.source_id,
                         summary.source_revision,
-                        None,
                     )?;
                     let mut native_sources = BTreeSet::from([summary.source_id.clone()]);
                     for source in summary.additional_sources {
@@ -61,7 +53,6 @@ pub(super) fn validate(
                             source
                                 .revision
                                 .ok_or("native status source revision is missing")?,
-                            None,
                         )?;
                     }
                     for state in summary.items {
@@ -89,13 +80,7 @@ pub(super) fn validate(
                 return Err("read result changed its original count, framing or continuations");
             }
             for message in result.messages {
-                add(
-                    usage,
-                    &mut returned,
-                    &message.source_id,
-                    message.revision,
-                    Some(&format!("{:x}", Sha256::digest(message.content.as_bytes()))),
-                )?;
+                add(usage, &mut returned, &message.source_id, message.revision)?;
             }
             for state in result.related_results {
                 add_by_id(usage, &mut returned, &state.source_id)?;
@@ -146,7 +131,7 @@ pub(super) fn validate(
                 }
                 returned_memories.insert((result.memory_id.clone(), version.revision));
                 for source in version.source_ids {
-                    add(usage, &mut returned, &source, version.revision, None)?;
+                    add(usage, &mut returned, &source, version.revision)?;
                 }
             }
         }
@@ -156,17 +141,11 @@ pub(super) fn validate(
             if result.source_id != *source_id {
                 return Err("source result replaced its original source");
             }
-            if let Some(body) = result.content {
+            if result.content.is_some() {
                 if result.availability == SourceAvailability::Unavailable {
                     return Err("unavailable source result contains text");
                 }
-                add(
-                    usage,
-                    &mut returned,
-                    &result.source_id,
-                    result.revision,
-                    Some(&format!("{:x}", Sha256::digest(body.as_bytes()))),
-                )?;
+                add(usage, &mut returned, &result.source_id, result.revision)?;
                 // A source-only view binds its fact version without duplicating
                 // the fact body in the source-resolution DTO.
                 returned_memories.extend(
@@ -209,17 +188,15 @@ fn add(
     returned: &mut BTreeSet<(String, u64)>,
     id: &str,
     revision: u64,
-    hash: Option<&str>,
 ) -> Result<(), &'static str> {
     if !usage
         .roots
         .iter()
         .any(|root| root.source_id == id && root.source_revision == revision)
-        || !usage.history_dependencies.iter().any(|source| {
-            source.source_id == id
-                && source.source_revision == revision
-                && hash.is_none_or(|hash| hash == source.content_sha256)
-        })
+        || !usage
+            .history_dependencies
+            .iter()
+            .any(|source| source.source_id == id && source.source_revision == revision)
     {
         return Err("result names an unretained source or different source body");
     }
@@ -236,5 +213,5 @@ fn add_by_id(
     if matches.next().is_some() {
         return Err("source result has an ambiguous retained revision");
     }
-    add(usage, returned, id, root.source_revision, None)
+    add(usage, returned, id, root.source_revision)
 }

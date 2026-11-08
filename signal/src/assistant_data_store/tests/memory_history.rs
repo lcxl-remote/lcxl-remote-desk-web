@@ -56,7 +56,6 @@ async fn seed_versions(
         };
         let body = format!("用户要求称呼为 {name}");
         let context = Some(format!("用户第 {index} 次提出的偏好称呼"));
-        let hash = super::super::memory::content_hash(&body, context.as_deref());
         let mut version: revision::ActiveModel = original.clone().into();
         if index > 1 {
             version.id = sea_orm::ActiveValue::NotSet;
@@ -64,7 +63,6 @@ async fn seed_versions(
         version.revision = Set(index as i64);
         version.body = Set(body.clone());
         version.context = Set(context.clone());
-        version.content_sha256 = Set(hash.clone());
         version.status = Set(if index == count {
             "active"
         } else {
@@ -100,7 +98,6 @@ async fn seed_versions(
             current.revision = Set(index as i64);
             current.body = Set(body);
             current.context = Set(context);
-            current.content_sha256 = Set(hash);
             current.updated_at_ms = Set(now);
             current.update(&store.db).await.unwrap();
         }
@@ -261,17 +258,14 @@ async fn another_host_resumes_the_persisted_history_cursor_and_reads_its_old_evi
         .await
         .unwrap();
     let body = "A newer preference after the query";
-    let hash = super::super::memory::content_hash(body, head.context.as_deref());
     later.id = sea_orm::ActiveValue::NotSet;
     later.revision = Set(4);
     later.body = Set(body.into());
-    later.content_sha256 = Set(hash.clone());
     later.insert(&frame.store.db).await.unwrap();
     memory::Entity::update_many()
         .filter(memory::Column::Id.eq(head.id))
         .col_expr(memory::Column::Revision, Expr::value(4_i64))
         .col_expr(memory::Column::Body, Expr::value(body))
-        .col_expr(memory::Column::ContentSha256, Expr::value(hash))
         .exec(&frame.store.db)
         .await
         .unwrap();
@@ -311,40 +305,29 @@ async fn another_host_resumes_the_persisted_history_cursor_and_reads_its_old_evi
 }
 
 #[tokio::test]
-async fn expired_or_corrupt_versions_are_reported_as_gaps_and_never_recovered_from_identity_only_proofs()
- {
-    for corrupt in [false, true] {
-        let frame = frame(&format!("memory-history-gap-{corrupt}"), 2, 10).await;
-        let query = revision::Entity::update_many().filter(revision::Column::Revision.eq(1));
-        if corrupt {
-            query
-                .col_expr(revision::Column::Body, Expr::value("wrong old body"))
-                .exec(&frame.store.db)
-                .await
-                .unwrap();
-        } else {
-            query
-                .col_expr(revision::Column::ExpiresAtMs, Expr::value(1_i64))
-                .exec(&frame.store.db)
-                .await
-                .unwrap();
-        }
-        let result =
-            super::super::memory_history::read(&frame.store.db, frame.context(), &request(&frame))
-                .await
-                .unwrap();
-        assert_eq!(result.result.versions.len(), 1);
-        assert_eq!(result.result.versions[0].revision, 2);
-        assert!(result.result.partial);
-        assert!(!result.result.has_more);
-        assert!(
-            result
-                .result
-                .reasons
-                .iter()
-                .any(|r| r == "history_versions_unavailable")
-        );
-    }
+async fn expired_versions_are_reported_as_gaps_and_never_recovered_from_identity_only_proofs() {
+    let frame = frame("memory-history-gap", 2, 10).await;
+    revision::Entity::update_many()
+        .filter(revision::Column::Revision.eq(1))
+        .col_expr(revision::Column::ExpiresAtMs, Expr::value(1_i64))
+        .exec(&frame.store.db)
+        .await
+        .unwrap();
+    let result =
+        super::super::memory_history::read(&frame.store.db, frame.context(), &request(&frame))
+            .await
+            .unwrap();
+    assert_eq!(result.result.versions.len(), 1);
+    assert_eq!(result.result.versions[0].revision, 2);
+    assert!(result.result.partial);
+    assert!(!result.result.has_more);
+    assert!(
+        result
+            .result
+            .reasons
+            .iter()
+            .any(|r| r == "history_versions_unavailable")
+    );
 }
 
 #[tokio::test]

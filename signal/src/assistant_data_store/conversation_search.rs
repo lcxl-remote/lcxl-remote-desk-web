@@ -487,7 +487,6 @@ async fn prepare_query_on(
                 .map(|candidate| QuerySourceVersion {
                     source_id: candidate.document.source_id,
                     revision: candidate.document.revision,
-                    content_sha256: candidate.document.content_sha256,
                 })
                 .collect(),
             ranked.reasons,

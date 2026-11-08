@@ -94,7 +94,6 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
                 .one(db)
                 .await?
             && unsigned(original.revision)? == key.revision
-            && original.content_sha256 == key.content_sha256
         {
             let mut resolved = history_source_on(db, actor, &original, policy, now).await?;
             if matches!(
@@ -309,7 +308,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
             };
             if source.origin_id != dependency.origin_id
                 || unsigned(source.memory_revision)? != dependency.source_revision
-                || source.content_sha256 != dependency.content_sha256
                 || !history_policy_allowed(&source_policy, now)
                 || !super::evidence::owner_history_identity_allowed_on(db, actor, &source, now)
                     .await?
@@ -337,7 +335,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         .filter(document::Column::SourceKind.eq("history"))
         .filter(document::Column::SourceId.eq(&row.source_id))
         .filter(document::Column::SourceRevision.eq(row.revision))
-        .filter(document::Column::ContentSha256.eq(&row.content_sha256))
         .limit(2)
         .all(db)
         .await?;

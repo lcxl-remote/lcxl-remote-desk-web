@@ -314,7 +314,6 @@ pub(super) async fn write_on(
                 byte_end: Set(i32::try_from(part.byte_end).map_err(|_| AdmissionFailure::Capacity)?),
                 token_count: Set(i32::try_from(part.token_count).map_err(|_| AdmissionFailure::Capacity)?),
                 policy_revision: Set(signed(capture.source_policy.policy_revision)?),
-                content_sha256: Set(hash),
                 partial: Set(prepared.index.partial),
                 expires_at_ms: Set(Some(expires)),
                 ..Default::default()

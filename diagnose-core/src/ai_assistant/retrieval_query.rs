@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 pub struct QuerySourceVersion {
     pub source_id: String,
     pub revision: u64,
-    pub content_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,8 +113,6 @@ impl RetrievalQuerySnapshot {
             if !sources.insert((&source.source_id, source.revision))
                 || source.revision == 0
                 || source.revision > i64::MAX as u64
-                || source.content_sha256.len() != 64
-                || !source.content_sha256.bytes().all(|v| v.is_ascii_hexdigit())
             {
                 return Err("invalid retrieval candidate versions");
             }

@@ -199,7 +199,6 @@ pub struct SourceUsePolicy {
 pub struct HistoryDependency {
     pub source_id: String,
     pub source_revision: u64,
-    pub content_sha256: String,
     pub origin_id: String,
     pub origin_deletion_generation: u64,
     pub policy_revision: u64,

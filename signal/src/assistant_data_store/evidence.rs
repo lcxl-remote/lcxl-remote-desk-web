@@ -113,9 +113,7 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         return Ok(None);
     }
     if row.body_cleared_at_ms.is_none() {
-        if row.body.len() != row.retained_bytes as usize
-            || row.content_sha256 != super::memory::content_hash_evidence(&row.body)
-        {
+        if row.body.len() != row.retained_bytes as usize {
             return Ok(None);
         }
     } else if mode == EvidenceReadMode::Body || !row.body.is_empty() {
@@ -313,7 +311,6 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         {
             if source.origin_id != dependency.origin_id
                 || unsigned(source.memory_revision)? != dependency.source_revision
-                || source.content_sha256 != dependency.content_sha256
                 || (source.revoked_at_ms.is_some()
                     && mode != EvidenceReadMode::OwnerHistoryIdentity)
                 || source.expires_at_ms.is_some_and(|until| {

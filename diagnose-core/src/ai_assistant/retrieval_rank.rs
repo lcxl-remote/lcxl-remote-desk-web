@@ -13,7 +13,6 @@ pub struct ReadableSearchDocument {
     pub document_id: String,
     pub source_id: String,
     pub revision: u64,
-    pub content_sha256: String,
     pub root_conversation_id: String,
     pub token_count: u32,
     pub frequencies: BTreeMap<String, u32>,
@@ -68,11 +67,6 @@ pub fn rank_readable_documents(
         if doc.revision == 0
             || doc.token_count == 0
             || doc.frequencies.is_empty()
-            || doc.content_sha256.len() != 64
-            || !doc
-                .content_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
             || !versions.insert((doc.source_id.clone(), doc.revision))
         {
             return Err("invalid or duplicate readable search version");
@@ -200,7 +194,6 @@ mod tests {
             document_id: format!("document-{id:04}"),
             source_id: format!("source-{id:04}"),
             revision: 1,
-            content_sha256: "a".repeat(64),
             root_conversation_id: root.into(),
             token_count: 100,
             frequencies: BTreeMap::from([("report".into(), tf)]),

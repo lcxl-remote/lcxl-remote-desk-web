@@ -129,7 +129,6 @@ pub fn memory_metadata(row: &memory::Model) -> Result<i64, AssistantStoreError> 
             &row.actor_id,
             &row.scope_key,
             &row.device_ref,
-            &row.content_sha256,
         ],
     )
 }
@@ -144,7 +143,6 @@ pub fn version_metadata(row: &revision::Model) -> Result<i64, AssistantStoreErro
             &row.tool_call_id,
             &row.request_sha256,
             &row.logical_mutation_id,
-            &row.content_sha256,
             &row.dependencies_json,
         ],
     )
@@ -158,7 +156,6 @@ pub fn source_metadata(row: &source::Model) -> Result<i64, AssistantStoreError> 
             &row.memory_id,
             &row.actor_id,
             &row.origin_id,
-            &row.content_sha256,
             &row.dependencies_json,
             &row.known_sources_json,
             &row.forget_sources_json,
@@ -182,7 +179,6 @@ pub fn document_metadata(row: &document::Model) -> Result<i64, AssistantStoreErr
             &row.origin_id,
             &row.root_conversation_id,
             &row.conversation_id,
-            &row.content_sha256,
         ],
     )
 }

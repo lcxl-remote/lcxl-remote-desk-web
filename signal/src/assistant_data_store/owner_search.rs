@@ -38,7 +38,7 @@ struct Cursor {
     policy: u64,
     // Exact candidates, frozen before paging. A cursor grants no access: every
     // row, owner, scope, source revision and retention policy is checked again.
-    remaining: Vec<(String, i64, String)>,
+    remaining: Vec<(String, i64)>,
     reasons: Vec<String>,
 }
 impl Cursor {
@@ -215,7 +215,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
                 continue;
             }
             if terms.is_empty() || request.sort == HistorySort::Time {
-                candidates.push((row.source_id, row.revision, row.content_sha256));
+                candidates.push((row.source_id, row.revision));
                 if candidates.len() == policy.limits.retrieval.query_candidates as usize {
                     reasons.insert("candidate_limit".into());
                     break;
@@ -227,7 +227,6 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
                 .filter(document::Column::SourceKind.eq("history"))
                 .filter(document::Column::SourceId.eq(&row.source_id))
                 .filter(document::Column::SourceRevision.eq(row.revision))
-                .filter(document::Column::ContentSha256.eq(&row.content_sha256))
                 .one(db)
                 .await?
             else {
@@ -255,7 +254,6 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
                 document_id: doc.document_id,
                 source_id: row.source_id,
                 revision: unsigned(row.revision)?,
-                content_sha256: row.content_sha256,
                 root_conversation_id: row.root_conversation_id,
                 token_count: doc.token_count as u32,
                 frequencies,
@@ -272,13 +270,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
             candidates = result
                 .documents
                 .into_iter()
-                .map(|hit| {
-                    Ok((
-                        hit.document.source_id,
-                        signed(hit.document.revision)?,
-                        hit.document.content_sha256,
-                    ))
-                })
+                .map(|hit| Ok((hit.document.source_id, signed(hit.document.revision)?)))
                 .collect::<Result<Vec<_>, AssistantStoreError>>()?;
             reasons.insert("candidate_statistics".into());
         }
@@ -318,16 +310,14 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
             break;
         }
         visited += 1;
-        let (id, revision, hash) = cursor.remaining[0].clone();
+        let (id, revision) = cursor.remaining[0].clone();
         let row = history::Entity::find()
             .filter(history::Column::ActorId.eq(actor))
             .filter(history::Column::SourceId.eq(&id))
             .one(db)
             .await?;
         let Some(row) = row.filter(|row| {
-            row.revision == revision
-                && row.content_sha256 == hash
-                && matches(row, request, cursor.watermark, now, policy)
+            row.revision == revision && matches(row, request, cursor.watermark, now, policy)
         }) else {
             cursor.remaining.remove(0);
             result.partial = true;

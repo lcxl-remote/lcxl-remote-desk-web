@@ -36,7 +36,6 @@ async fn evidence_dependency(store: &TestStore, source: &str) -> HistoryDependen
     HistoryDependency {
         source_id: source.into(),
         source_revision: row.memory_revision as u64,
-        content_sha256: row.content_sha256,
         origin_id: row.origin_id,
         origin_deletion_generation: original.deletion_generation as u64,
         policy_revision: policy.policy_revision,

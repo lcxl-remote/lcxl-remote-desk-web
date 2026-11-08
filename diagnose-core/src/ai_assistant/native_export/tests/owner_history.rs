@@ -57,7 +57,6 @@ fn original_with_turn(
             source_revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"owner-copy-origin"),
             origin_deletion_generation: 1,
-            content_sha256: "a".repeat(64),
             policy_revision: 1,
             expires_at_unix_ms: Some(5000),
         },
@@ -217,7 +216,7 @@ fn missing_membership_changed_projection_or_invalid_consumption_never_proves_an_
         let mut last = 1001;
         match case {
             0 => old.source_set.authorizations.clear(),
-            1 => read.usage.history_dependencies[0].content_sha256 = "b".repeat(64),
+            1 => read.usage.history_dependencies[0].source_revision += 1,
             2 => original_grant.actor_id = "another-owner".into(),
             3 => first = proof.created_at_unix_ms - 1,
             4 => first = grant.authorized_at_unix_ms + 1,

@@ -16,7 +16,6 @@ fn known(label: &str) -> KnownMemorySource {
         source_id: native_ids::stable(Kind::AssistantSource, &label),
         revision: 1,
         origin_id: native_ids::stable(Kind::AssistantOrigin, &"shared-origin"),
-        content_sha256: "a".repeat(64),
     }
 }
 
@@ -24,7 +23,6 @@ fn dependency(source: &KnownMemorySource) -> HistoryDependency {
     HistoryDependency {
         source_id: source.source_id.clone(),
         source_revision: source.revision,
-        content_sha256: source.content_sha256.clone(),
         origin_id: source.origin_id.clone(),
         origin_deletion_generation: 1,
         policy_revision: 1,
@@ -60,9 +58,6 @@ async fn suppression_matches_the_exact_fragment_version_origin_and_hash_for_the_
     assert!(!suppressed_on(&txn, "1", &changed).await.unwrap());
     let mut changed = dependency(&source);
     changed.source_revision += 1;
-    assert!(!suppressed_on(&txn, "1", &changed).await.unwrap());
-    let mut changed = dependency(&source);
-    changed.content_sha256 = "b".repeat(64);
     assert!(!suppressed_on(&txn, "1", &changed).await.unwrap());
     let mut changed = dependency(&source);
     changed.origin_id = native_ids::stable(Kind::AssistantOrigin, &"another-origin");

@@ -3,7 +3,6 @@
 
 use crate::redaction::{Redactor, RegexRedactor};
 use regex::Regex;
-use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 static REDACTOR: LazyLock<RegexRedactor> = LazyLock::new(RegexRedactor::new);
@@ -12,13 +11,6 @@ static LOCALIZED_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
     r#"(?:密码|密碼|口令|验证码|驗證碼|一次性密码|一次性密碼|密钥|密鑰|私钥|私鑰|令牌)\s*(?:是|为|為|[:=：])\s*["']?[^\s;；,"'}]+"#
 ).expect("static memory credential labels")
 });
-
-/// Exact stored body/context binding, never a semantic identity or fact key.
-pub fn content_sha256(body: &str, context: Option<&str>) -> String {
-    let bytes = serde_json::to_vec(&("stable-fact-v1", body, context))
-        .expect("static memory content serialization");
-    format!("{:x}", Sha256::digest(bytes))
-}
 
 pub fn validate(text: &str) -> Result<(), &'static str> {
     if text

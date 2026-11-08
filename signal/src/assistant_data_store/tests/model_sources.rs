@@ -82,7 +82,6 @@ pub(super) async fn memory_usage(
         history_dependencies: vec![HistoryDependency {
             source_id: source.into(),
             source_revision: 1,
-            content_sha256: evidence.content_sha256,
             origin_id: evidence.origin_id,
             origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
             policy_revision: 1,
@@ -129,7 +128,6 @@ pub(super) async fn history_usage(
             history_dependencies: vec![HistoryDependency {
                 source_id: row.source_id,
                 source_revision: 1,
-                content_sha256: row.content_sha256,
                 origin_id: row.origin_id,
                 origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
                 policy_revision: 1,

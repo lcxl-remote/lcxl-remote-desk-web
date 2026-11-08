@@ -349,7 +349,6 @@ async fn target_on<C: ConnectionTrait>(
             source_id: source.source_id,
             revision: unsigned(source.memory_revision)?,
             origin_id: source.origin_id,
-            content_sha256: source.content_sha256,
         };
         if own.validate().is_ok() {
             known.push(own);

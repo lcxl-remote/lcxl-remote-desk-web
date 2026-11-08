@@ -50,12 +50,7 @@ pub async fn suppress_on<C: ConnectionTrait>(
             || row.control_generation <= 0
             || row.control_generation > generation
             || row.created_at_ms <= 0
-            || !existing.insert((
-                row.source_id,
-                row.source_revision,
-                row.origin_id,
-                row.content_sha256,
-            ))
+            || !existing.insert((row.source_id, row.source_revision, row.origin_id))
         {
             return Err(AssistantStoreError::Invalid(
                 "stored source suppression changed",
@@ -73,7 +68,6 @@ pub async fn suppress_on<C: ConnectionTrait>(
                 source_id: source.source_id.clone(),
                 source_revision: revision,
                 origin_id: source.origin_id.clone(),
-                content_sha256: source.content_sha256.clone(),
                 cutoff_input_seq: cutoff,
                 control_generation: generation,
                 created_at_ms: now,
@@ -82,7 +76,6 @@ pub async fn suppress_on<C: ConnectionTrait>(
                 row.source_id.clone(),
                 row.source_revision,
                 row.origin_id.clone(),
-                row.content_sha256.clone(),
             )) {
                 delta = delta.checked_add(metadata_bytes(&row)?).ok_or(
                     AssistantStoreError::Invalid("source suppression metadata overflow"),
@@ -99,7 +92,6 @@ pub async fn suppress_on<C: ConnectionTrait>(
                     suppression::Column::SourceId,
                     suppression::Column::SourceRevision,
                     suppression::Column::OriginId,
-                    suppression::Column::ContentSha256,
                 ])
                 .update_columns([
                     suppression::Column::CutoffInputSeq,
@@ -148,7 +140,6 @@ pub async fn suppressed_on<C: ConnectionTrait>(
             source_id: dependency.source_id.clone(),
             revision: dependency.source_revision,
             origin_id: dependency.origin_id.clone(),
-            content_sha256: dependency.content_sha256.clone(),
         },
     )
     .await
@@ -173,7 +164,6 @@ pub async fn known_row_on<C: ConnectionTrait>(
         .filter(suppression::Column::SourceId.eq(&source.source_id))
         .filter(suppression::Column::SourceRevision.eq(signed(source.revision)?))
         .filter(suppression::Column::OriginId.eq(&source.origin_id))
-        .filter(suppression::Column::ContentSha256.eq(&source.content_sha256))
         .one(db)
         .await?;
     Ok(row)
@@ -208,22 +198,16 @@ fn known_condition(source: &KnownMemorySource) -> Result<Condition, AssistantSto
     Ok(Condition::all()
         .add(suppression::Column::SourceId.eq(&source.source_id))
         .add(suppression::Column::SourceRevision.eq(signed(source.revision)?))
-        .add(suppression::Column::OriginId.eq(&source.origin_id))
-        .add(suppression::Column::ContentSha256.eq(&source.content_sha256)))
+        .add(suppression::Column::OriginId.eq(&source.origin_id)))
 }
 
 pub fn metadata_bytes(row: &suppression::Model) -> Result<i64, AssistantStoreError> {
-    let bytes = [
-        &row.actor_id,
-        &row.source_id,
-        &row.origin_id,
-        &row.content_sha256,
-    ]
-    .iter()
-    .try_fold(5 * 8_usize, |sum, field| sum.checked_add(field.len()))
-    .ok_or(AssistantStoreError::Invalid(
-        "source suppression size overflow",
-    ))?;
+    let bytes = [&row.actor_id, &row.source_id, &row.origin_id]
+        .iter()
+        .try_fold(5 * 8_usize, |sum, field| sum.checked_add(field.len()))
+        .ok_or(AssistantStoreError::Invalid(
+            "source suppression size overflow",
+        ))?;
     i64::try_from(bytes)
         .map_err(|_| AssistantStoreError::Invalid("source suppression size overflow"))
 }

@@ -150,7 +150,6 @@ pub async fn scan_on<C: ConnectionTrait, R: MemoryHistoryReader<C>>(
         let version = desk_diagnose_core::ai_assistant::retrieval_query::QuerySourceVersion {
             source_id: row.memory_id.clone(),
             revision,
-            content_sha256: row.content_sha256.clone(),
         };
         if !query.was_seen(&version) {
             match R::read_version_on(db, context, row).await {

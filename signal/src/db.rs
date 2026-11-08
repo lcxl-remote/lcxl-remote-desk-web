@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 53;
+const SIGNAL_SCHEMA_VERSION: i32 = 54;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
@@ -1301,7 +1301,7 @@ async fn create_assistant_data_indexes<C: ConnectionTrait>(db: &C) -> Result<(),
         "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_projection ON agent_assistant_data_authorization (actor_id, projection_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_call ON agent_assistant_data_authorization (actor_id, physical_call_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_consumer ON agent_assistant_data_authorization (actor_id, consumer_conversation_id, id)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_source_suppression ON agent_assistant_source_suppression (actor_id, source_id, source_revision, origin_id, content_sha256)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_source_suppression_revision ON agent_assistant_source_suppression (actor_id, source_id, source_revision, origin_id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_suppression_cutoff ON agent_assistant_source_suppression (actor_id, cutoff_input_seq, id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_native_model_output ON model_egress_receipt (context_conversation_id, model_output_envelope_id, model_output_digest_sha256)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output ON agent_assistant_model_output (conversation_id, output_envelope_id, output_digest_sha256)",

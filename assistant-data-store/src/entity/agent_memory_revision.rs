@@ -24,7 +24,6 @@ pub struct Model {
     pub body: String,
     #[sea_orm(column_type = "Text")]
     pub context: Option<String>,
-    pub content_sha256: String,
 
     pub status: String,
     pub accepted_input_seq: i64,

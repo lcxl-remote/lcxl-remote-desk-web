@@ -180,7 +180,6 @@ impl PendingControl {
             row.source_id == source.source_id
                 && u64::try_from(row.source_revision).ok() == Some(source.revision)
                 && row.origin_id == source.origin_id
-                && row.content_sha256 == source.content_sha256
         })
     }
     pub fn revokes_usage(
@@ -197,7 +196,6 @@ impl PendingControl {
                 source_id: source.source_id.clone(),
                 revision: source.source_revision,
                 origin_id: source.origin_id.clone(),
-                content_sha256: source.content_sha256.clone(),
             })
         })
     }
@@ -355,7 +353,7 @@ fn digest(value: &str) -> bool {
 }
 
 use crate::entity::agent_assistant_source_suppression as source_suppression;
-type SuppressionKey = (String, i64, String, String);
+type SuppressionKey = (String, i64, String);
 pub(super) type SuppressionImages =
     std::collections::BTreeMap<SuppressionKey, source_suppression::Model>;
 fn image_key(row: &source_suppression::Model) -> SuppressionKey {
@@ -363,7 +361,6 @@ fn image_key(row: &source_suppression::Model) -> SuppressionKey {
         row.source_id.clone(),
         row.source_revision,
         row.origin_id.clone(),
-        row.content_sha256.clone(),
     )
 }
 fn image_map(
@@ -382,7 +379,6 @@ fn known_source(row: &source_suppression::Model) -> Result<KnownMemorySource, As
         source_id: row.source_id.clone(),
         revision: unsigned(row.source_revision)?,
         origin_id: row.origin_id.clone(),
-        content_sha256: row.content_sha256.clone(),
     })
 }
 
@@ -403,7 +399,6 @@ pub(super) async fn suppress_sources_on<C: ConnectionTrait>(
             source.source_id.clone(),
             signed(source.revision)?,
             source.origin_id.clone(),
-            source.content_sha256.clone(),
         );
         let current = original.remove(&key);
         if owned
@@ -418,7 +413,6 @@ pub(super) async fn suppress_sources_on<C: ConnectionTrait>(
             source_id: source.source_id.clone(),
             source_revision: signed(source.revision)?,
             origin_id: source.origin_id.clone(),
-            content_sha256: source.content_sha256.clone(),
             cutoff_input_seq: cutoff,
             control_generation: generation,
             created_at_ms: now,

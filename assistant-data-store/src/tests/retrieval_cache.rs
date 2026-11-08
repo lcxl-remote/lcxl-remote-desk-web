@@ -28,7 +28,6 @@ fn source(label: &str) -> QuerySourceVersion {
     QuerySourceVersion {
         source_id: native_ids::stable(Kind::AssistantSource, &label),
         revision: 1,
-        content_sha256: "c".repeat(64),
     }
 }
 fn fixture(logical: &str, captured: u64) -> FrozenRetrievalQuery {
@@ -596,7 +595,6 @@ async fn window_lookup_uses_its_frozen_anchor_and_rejects_changed_bounds_purpose
     // version cannot replace the version admitted by the original window.
     let mut newer = anchor.clone();
     newer.revision = 2;
-    newer.content_sha256 = "d".repeat(64);
     let changed_anchor = FrozenRetrievalRequest::Window {
         request: request.clone(),
         anchor: newer,

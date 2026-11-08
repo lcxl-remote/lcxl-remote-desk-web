@@ -83,8 +83,6 @@ impl AssistantDataSession {
             || self.instructions.accepted_input_seq > self.current_actor_input_seq
             || self.instructions.revision == 0
             || self.instructions.frozen_at_unix_ms == 0
-            || self.instructions.content_sha256
-                != format!("{:x}", Sha256::digest(self.instructions.content.as_bytes()))
         {
             return Err("invalid personal assistant data state");
         }
@@ -148,11 +146,6 @@ impl AssistantDataSession {
             if dependency.source_revision == 0
                 || dependency.origin_deletion_generation == 0
                 || dependency.policy_revision == 0
-                || dependency.content_sha256.len() != 64
-                || !dependency
-                    .content_sha256
-                    .bytes()
-                    .all(|v| v.is_ascii_hexdigit())
             {
                 return Err("invalid external history dependency");
             }

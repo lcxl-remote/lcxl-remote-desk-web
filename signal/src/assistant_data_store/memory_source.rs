@@ -167,9 +167,7 @@ async fn source_on(
         .one(db)
         .await?
         .ok_or(AssistantStoreError::SourceUnavailable)?;
-    if unsigned(source.memory_revision)? != observed.revision
-        || source.content_sha256 != observed.content_sha256
-    {
+    if unsigned(source.memory_revision)? != observed.revision {
         return Err(AssistantStoreError::SourceUnavailable);
     }
     let data = fence

@@ -81,7 +81,6 @@ pub(super) async fn seed_with_body(
         source_id: native_ids::stable(Kind::AssistantSource, &(label, "original")),
         revision: 1,
         origin_id: origin_id.clone(),
-        content_sha256: format!("{:x}", Sha256::digest(b"I prefer Chinese")),
     };
     let body = body.to_owned();
     fact::ActiveModel {
@@ -92,7 +91,6 @@ pub(super) async fn seed_with_body(
 
         body: Set(body.clone()),
         context: Set(Some("Owner preference".into())),
-        content_sha256: Set(memory::content_hash(&body, Some("Owner preference"))),
         revision: Set(1),
         state_generation: Set(generation),
         status: Set("active".into()),
@@ -114,7 +112,6 @@ pub(super) async fn seed_with_body(
         origin_id: Set(origin_id.clone()),
         role: Set("evidence".into()),
         body: Set("I prefer Chinese".into()),
-        content_sha256: Set(format!("{:x}", Sha256::digest(b"I prefer Chinese"))),
         retained_bytes: Set("I prefer Chinese".len() as i32),
         body_cleared_at_ms: Set(None),
         dependencies_json: Set("[]".into()),
@@ -144,7 +141,6 @@ pub(super) async fn seed_with_body(
         write_outcome: Set("applied".into()),
         body: Set(body.clone()),
         context: Set(Some("Owner preference".into())),
-        content_sha256: Set(memory::content_hash(&body, Some("Owner preference"))),
         status: Set("active".into()),
         accepted_input_seq: Set(accepted_seq),
         dependencies_json: Set("[]".into()),
@@ -419,7 +415,6 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
     let dependency = HistoryDependency {
         source_id: native_ids::stable(Kind::AssistantSource, &"producer"),
         source_revision: 1,
-        content_sha256: "a".repeat(64),
         origin_id: other_origin.clone(),
         origin_deletion_generation: 1,
         policy_revision: 1,
@@ -637,7 +632,6 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         byte_end: Set(body.len() as i32),
         token_count: Set(3),
         policy_revision: Set(1),
-        content_sha256: Set(hash),
         partial: Set(false),
         expires_at_ms: Set(Some(expires)),
         ..Default::default()
@@ -922,7 +916,7 @@ async fn invalid_retention_proof_hides_the_fact_without_blocking_owner_deletion(
 }
 
 #[tokio::test]
-async fn updating_an_evidence_hash_cannot_rebind_the_retained_source_body_or_original_input() {
+async fn rewritten_evidence_cannot_rebind_the_original_input() {
     let store = setup().await;
     let (_, source_id, origin_id) = seed(&store, 1, "original-binding").await;
     let policy = AssistantDataPolicy::default();
@@ -930,10 +924,6 @@ async fn updating_an_evidence_hash_cannot_rebind_the_retained_source_body_or_ori
         .col_expr(
             evidence::Column::Body,
             sea_orm::sea_query::Expr::value("Invented source"),
-        )
-        .col_expr(
-            evidence::Column::ContentSha256,
-            sea_orm::sea_query::Expr::value(memory::content_hash_evidence("Invented source")),
         )
         .filter(evidence::Column::SourceId.eq(&source_id))
         .exec(&store.db)
@@ -951,10 +941,6 @@ async fn updating_an_evidence_hash_cannot_rebind_the_retained_source_body_or_ori
         .col_expr(
             evidence::Column::Body,
             sea_orm::sea_query::Expr::value("I prefer Chinese"),
-        )
-        .col_expr(
-            evidence::Column::ContentSha256,
-            sea_orm::sea_query::Expr::value(memory::content_hash_evidence("I prefer Chinese")),
         )
         .filter(evidence::Column::SourceId.eq(&source_id))
         .exec(&store.db)
@@ -981,36 +967,6 @@ async fn updating_an_evidence_hash_cannot_rebind_the_retained_source_body_or_ori
     assert!(
         store
             .memories(1, &MemoryListRequest::default(), &policy, 1000)
-            .await
-            .unwrap()
-            .memories
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn current_fact_must_match_its_immutable_memory_revision() {
-    let store = setup().await;
-    let (memory_id, _, _) = seed(&store, 1, "revision-binding").await;
-    let body = "Different body without a new revision";
-    fact::Entity::update_many()
-        .col_expr(fact::Column::Body, sea_orm::sea_query::Expr::value(body))
-        .col_expr(
-            fact::Column::ContentSha256,
-            sea_orm::sea_query::Expr::value(memory::content_hash(body, Some("Owner preference"))),
-        )
-        .filter(fact::Column::MemoryId.eq(memory_id))
-        .exec(&store.db)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .memories(
-                1,
-                &MemoryListRequest::default(),
-                &AssistantDataPolicy::default(),
-                1000
-            )
             .await
             .unwrap()
             .memories

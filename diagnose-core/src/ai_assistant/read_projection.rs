@@ -727,7 +727,6 @@ mod tests {
             desk_agent_protocol::ai_assistant::source::HistoryDependency {
                 source_id: source_id.clone(),
                 source_revision: 1,
-                content_sha256: "a".repeat(64),
                 origin_id: native_ids::stable(Kind::AssistantOrigin, &"root-origin"),
                 origin_deletion_generation: 1,
                 policy_revision: 1,

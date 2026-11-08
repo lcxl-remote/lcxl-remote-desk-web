@@ -260,11 +260,6 @@ pub fn validate_history_dependencies(
             || dependency.source_revision == 0
             || dependency.origin_deletion_generation == 0
             || dependency.policy_revision == 0
-            || dependency.content_sha256.len() != 64
-            || !dependency
-                .content_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
             || dependency
                 .expires_at_unix_ms
                 .is_some_and(|until| until == 0 || until > i64::MAX as u64)
@@ -584,7 +579,6 @@ mod tests {
         let source = |name: &str| HistoryDependency {
             source_id: native_ids::stable(Kind::AssistantSource, &name),
             source_revision: 1,
-            content_sha256: "a".repeat(64),
             origin_id: native_ids::stable(Kind::AssistantOrigin, &name),
             origin_deletion_generation: 1,
             policy_revision: 1,
@@ -593,8 +587,7 @@ mod tests {
         let a = source("A");
         let b = source("B");
         validate_history_dependencies(&[a.clone(), b]).unwrap();
-        let mut conflicting = a.clone();
-        conflicting.content_sha256 = "b".repeat(64);
-        assert!(validate_history_dependencies(&[a, conflicting]).is_err());
+        // One source revision appears once.
+        assert!(validate_history_dependencies(&[a.clone(), a]).is_err());
     }
 }

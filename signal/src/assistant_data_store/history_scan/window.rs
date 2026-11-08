@@ -67,14 +67,9 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
         ));
     }
     work.visited += 1;
-    let original_source = keyword_search::readable_history_on(
-        db,
-        context,
-        &anchor.source_id,
-        anchor.revision,
-        &anchor.content_sha256,
-    )
-    .await?;
+    let original_source =
+        keyword_search::readable_history_on(db, context, &anchor.source_id, anchor.revision)
+            .await?;
     if original_source.row.conversation_id != *conversation_id
         || !devices.contains(&original_source.row.device_ref)
     {

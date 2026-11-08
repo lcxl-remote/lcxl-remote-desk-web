@@ -13,7 +13,6 @@ use desk_agent_protocol::ai_assistant::{
 };
 use desk_diagnose_core::{
     ai_assistant::{
-        memory_content,
         memory_control::KnownMemorySource,
         memory_evidence::{MemoryEvidenceRetentionProof, MemoryEvidenceSnapshot},
     },
@@ -238,7 +237,6 @@ pub async fn apply_on<C: ConnectionTrait>(
         device_ref: device.into(),
         body: draft.content.clone(),
         context: draft.context.clone(),
-        content_sha256: memory_content::content_sha256(&draft.content, draft.context.as_deref()),
         revision: number,
         state_generation: generation,
         status: "active".into(),
@@ -262,7 +260,6 @@ pub async fn apply_on<C: ConnectionTrait>(
         write_outcome: "applied".into(),
         body: next.body.clone(),
         context: next.context.clone(),
-        content_sha256: next.content_sha256.clone(),
         status: "active".into(),
         accepted_input_seq: next.accepted_input_seq,
         dependencies_json: "[]".into(),
@@ -329,7 +326,6 @@ pub async fn apply_on<C: ConnectionTrait>(
             }
             .into(),
             body: input.body.clone(),
-            content_sha256: format!("{:x}", Sha256::digest(input.body.as_bytes())),
             retained_bytes: i32::try_from(input.body.len())
                 .map_err(|_| AssistantStoreError::Capacity)?,
             body_cleared_at_ms: None,
@@ -390,7 +386,6 @@ pub async fn apply_on<C: ConnectionTrait>(
             .filter(memory::Column::Id.eq(old.id))
             .filter(memory::Column::ActorId.eq(write.actor))
             .filter(memory::Column::Revision.eq(old.revision))
-            .filter(memory::Column::ContentSha256.eq(&old.content_sha256))
             .exec(db)
             .await?;
         if changed.rows_affected != 1 {

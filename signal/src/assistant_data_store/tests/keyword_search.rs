@@ -379,15 +379,9 @@ async fn original_dependency_deletion_blocks_a_matching_derived_source() {
         .await
         .unwrap()
         .unwrap();
-    let source = keyword_search::readable_history_on(
-        &store.db,
-        &frame.borrowed(),
-        &original,
-        1,
-        &row.content_sha256,
-    )
-    .await
-    .unwrap();
+    let source = keyword_search::readable_history_on(&store.db, &frame.borrowed(), &original, 1)
+        .await
+        .unwrap();
     capture(
         &store,
         &a,
@@ -492,22 +486,10 @@ async fn an_individual_selected_source_rechecks_current_control_generations() {
     let a = device(&store, "keyword-final-control").await;
     let source = capture(&store, &a, "source", "source", "report 邮件", &[]).await;
     let frame = Frame::new(&store, &a).await;
-    let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&source))
-        .one(&store.db)
-        .await
-        .unwrap()
-        .unwrap();
     assert!(
-        keyword_search::readable_history_on(
-            &store.db,
-            &frame.borrowed(),
-            &source,
-            1,
-            &row.content_sha256
-        )
-        .await
-        .is_ok()
+        keyword_search::readable_history_on(&store.db, &frame.borrowed(), &source, 1)
+            .await
+            .is_ok()
     );
     let old = runtime_on(&store.db, "1").await.unwrap();
     runtime::Entity::update_many()
@@ -520,15 +502,9 @@ async fn an_individual_selected_source_rechecks_current_control_generations() {
         .await
         .unwrap();
     assert!(
-        keyword_search::readable_history_on(
-            &store.db,
-            &frame.borrowed(),
-            &source,
-            1,
-            &row.content_sha256
-        )
-        .await
-        .is_err()
+        keyword_search::readable_history_on(&store.db, &frame.borrowed(), &source, 1)
+            .await
+            .is_err()
     );
 }
 
@@ -616,22 +592,10 @@ async fn indexed_native_columns_and_state_cannot_be_changed_without_the_original
         .await
         .remove(0);
         let frame = Frame::new(&store, &device).await;
-        let row = history::Entity::find()
-            .filter(history::Column::SourceId.eq(&source))
-            .one(&store.db)
-            .await
-            .unwrap()
-            .unwrap();
         assert!(
-            keyword_search::readable_history_on(
-                &store.db,
-                &frame.borrowed(),
-                &source,
-                1,
-                &row.content_sha256
-            )
-            .await
-            .is_ok()
+            keyword_search::readable_history_on(&store.db, &frame.borrowed(), &source, 1)
+                .await
+                .is_ok()
         );
         let mut change =
             history::Entity::update_many().filter(history::Column::SourceId.eq(&source));
@@ -651,15 +615,9 @@ async fn indexed_native_columns_and_state_cannot_be_changed_without_the_original
         };
         change.exec(&store.db).await.unwrap();
         assert!(
-            keyword_search::readable_history_on(
-                &store.db,
-                &frame.borrowed(),
-                &source,
-                1,
-                &row.content_sha256
-            )
-            .await
-            .is_err()
+            keyword_search::readable_history_on(&store.db, &frame.borrowed(), &source, 1)
+                .await
+                .is_err()
         );
         assert_eq!(
             store

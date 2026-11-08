@@ -174,7 +174,6 @@ pub async fn prepare_on<C: ConnectionTrait>(
                 .try_into()
                 .map_err(|_| AssistantStoreError::Capacity)?,
             policy_revision: signed(policy.revision)?,
-            content_sha256: next.content_sha256.clone(),
             partial: projected.partial,
             expires_at_ms: body_expiry,
         };

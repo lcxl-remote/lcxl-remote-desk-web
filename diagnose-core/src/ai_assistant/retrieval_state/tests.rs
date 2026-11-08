@@ -61,7 +61,6 @@ fn source(label: &str, revision: u64) -> QuerySourceVersion {
     QuerySourceVersion {
         source_id: native_ids::stable(Kind::AssistantSource, &label),
         revision,
-        content_sha256: "c".repeat(64),
     }
 }
 fn selection() -> RetrievalSelection {
@@ -561,11 +560,6 @@ fn emitted_versions_and_cursor_identity_conflicts_fail_atomically() {
         .remember(&[source("one", 1), source("one", 1)])
         .unwrap();
     assert_eq!(query.seen_sources.len(), 1);
-    let before = query.clone();
-    let mut tampered = source("one", 1);
-    tampered.content_sha256 = "e".repeat(64);
-    assert!(query.remember(&[source("new", 1), tampered]).is_err());
-    assert_eq!(query, before);
     let cursor = query
         .add_page(token("next"), PageAnchor::Relevance { next_offset: 1 })
         .unwrap();

@@ -17,7 +17,6 @@ use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
     QueryTrait, TransactionTrait,
 };
-use sha2::{Digest, Sha256};
 
 pub(crate) async fn memories(
     db: &crate::config::connection::DatabaseConnection,
@@ -119,7 +118,6 @@ pub(crate) async fn owner_record_on<C: ConnectionTrait + ConfigConnection>(
     if row.actor_id != actor
         || !native_ids::is(Kind::Memory, &row.memory_id)
         || row.revision <= 0
-        || row.content_sha256 != content_hash(&row.body, row.context.as_deref())
         || row.body.is_empty()
     {
         return Ok(None);
@@ -152,7 +150,6 @@ pub(crate) async fn owner_record_on<C: ConnectionTrait + ConfigConnection>(
     };
     if current_revision.body != row.body
         || current_revision.context != row.context
-        || current_revision.content_sha256 != row.content_sha256
         || current_revision.status != row.status
         || current_revision.accepted_input_seq != row.accepted_input_seq
         || current_revision.state_generation != row.state_generation
@@ -198,10 +195,6 @@ pub(crate) async fn owner_record_on<C: ConnectionTrait + ConfigConnection>(
     }))
 }
 
-pub(crate) fn content_hash(body: &str, context: Option<&str>) -> String {
-    desk_diagnose_core::ai_assistant::memory_content::content_sha256(body, context)
-}
-
 pub(crate) async fn evidence_allowed_on<C: ConnectionTrait + ConfigConnection>(
     db: &C,
     actor: &str,
@@ -209,10 +202,6 @@ pub(crate) async fn evidence_allowed_on<C: ConnectionTrait + ConfigConnection>(
     now: u64,
 ) -> Result<bool, AssistantStoreError> {
     desk_diagnose_core::future::boxed(|| super::evidence::allowed_on(db, actor, row, now)).await
-}
-
-pub(crate) fn content_hash_evidence(body: &str) -> String {
-    format!("{:x}", Sha256::digest(body.as_bytes()))
 }
 
 pub(crate) async fn source_device_on<C: ConnectionTrait + ConfigConnection>(

@@ -250,7 +250,6 @@ async fn prepare_on(
 struct Candidate {
     memory_id: String,
     revision: i64,
-    content_sha256: String,
     updated_at_ms: i64,
 }
 
@@ -287,7 +286,6 @@ async fn select_on(
             .columns([
                 memory::Column::MemoryId,
                 memory::Column::Revision,
-                memory::Column::ContentSha256,
                 memory::Column::UpdatedAtMs,
             ])
             .filter(memory::Column::ActorId.eq(context.actor_id))
@@ -337,7 +335,6 @@ async fn select_on(
             let version = QuerySourceVersion {
                 source_id: candidate.memory_id,
                 revision: unsigned(candidate.revision)?,
-                content_sha256: candidate.content_sha256,
             };
             let result = desk_diagnose_core::future::boxed(|| {
                 memory_view::read_on(db, context, &version, MemoryUsePurpose::CurrentFact)
@@ -404,7 +401,6 @@ async fn validate_payload_on(
         let version = QuerySourceVersion {
             source_id: record.memory_id.clone(),
             revision: record.revision,
-            content_sha256: super::memory::content_hash(&record.content, record.context.as_deref()),
         };
         let current = desk_diagnose_core::future::boxed(|| {
             memory_view::read_on(db, context, &version, MemoryUsePurpose::CurrentFact)

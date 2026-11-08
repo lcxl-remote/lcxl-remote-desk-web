@@ -217,10 +217,10 @@ async fn write_on(
                 else {
                     return Ok(skipped("source_unavailable"));
                 };
-                if !fence.observed_version(&reference.id).is_some_and(|seen| {
-                    seen.revision == row.memory_revision as u64
-                        && seen.content_sha256 == row.content_sha256
-                }) {
+                if fence
+                    .observed_version(&reference.id)
+                    .is_none_or(|seen| seen.revision != row.memory_revision as u64)
+                {
                     return Ok(skipped("source_not_observed"));
                 }
                 let Some(metadata) =

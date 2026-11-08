@@ -34,7 +34,6 @@ fn source_proof(key: &str) -> ReadProjectionProof {
     proof.usage.history_dependencies.push(HistoryDependency {
         source_id: native_ids::stable(Kind::AssistantSource, &"source"),
         source_revision: 1,
-        content_sha256: "a".repeat(64),
         origin_id: native_ids::stable(Kind::AssistantOrigin, &"origin"),
         origin_deletion_generation: 1,
         policy_revision: 1,

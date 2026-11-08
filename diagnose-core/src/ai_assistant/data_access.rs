@@ -46,7 +46,6 @@ pub fn scope_sha256(session: &PersistedAgentSession) -> Result<String, &'static 
         &data.history_access_scope,
         &data.memory_access_scope,
         data.instructions.revision,
-        &data.instructions.content_sha256,
     ))
     .map_err(|_| "invalid assistant scope fingerprint")?;
     Ok(format!("{:x}", sha2::Sha256::digest(bytes)))

@@ -82,11 +82,6 @@ async fn memory_identity_on<C: ConnectionTrait + crate::config::ConfigConnection
         || original.created_at_ms <= 0
         || original.state_generation <= 0
         || original.state_generation > fact.state_generation
-        || original.content_sha256.len() != 64
-        || !original
-            .content_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
         || original
             .expires_at_ms
             .is_some_and(|until| until <= original.created_at_ms)

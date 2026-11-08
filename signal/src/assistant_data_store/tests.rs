@@ -225,7 +225,6 @@ pub(crate) async fn ensure_tables(db: &crate::config::connection::DatabaseConnec
         .col(suppression::Column::SourceId)
         .col(suppression::Column::SourceRevision)
         .col(suppression::Column::OriginId)
-        .col(suppression::Column::ContentSha256)
         .unique()
         .to_owned();
     db.execute(&suppression_slot).await.unwrap();

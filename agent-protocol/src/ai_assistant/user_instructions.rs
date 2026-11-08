@@ -98,7 +98,6 @@ pub struct AssistantDataSettingsUpdate {
 pub struct UserInstructionsSnapshot {
     pub revision: u64,
     pub content: String,
-    pub content_sha256: String,
     /// Zero only for a native scheduled conversation frozen from its owner
     /// task definition, without an accepted chat input.
     pub accepted_input_seq: u64,

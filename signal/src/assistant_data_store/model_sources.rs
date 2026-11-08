@@ -36,13 +36,12 @@ enum SourceContentUse {
     RetainedIdentity,
 }
 
-type SourceKey = (String, u64, String, String);
+type SourceKey = (String, u64, String);
 fn key(source: &HistoryDependency) -> SourceKey {
     (
         source.source_id.clone(),
         source.source_revision,
         source.origin_id.clone(),
-        source.content_sha256.clone(),
     )
 }
 
@@ -332,7 +331,6 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
             }
             if unsigned(row.memory_revision)? != dependency.source_revision
                 || row.origin_id != dependency.origin_id
-                || row.content_sha256 != dependency.content_sha256
             {
                 return Err(AssistantStoreError::Inaccessible);
             }
@@ -368,7 +366,6 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
                 .await?;
             if let Some(row) = row {
                 if unsigned(row.revision)? != dependency.source_revision
-                    || row.content_sha256 != dependency.content_sha256
                     || row.origin_id != dependency.origin_id
                     || row.deleted_at_ms.is_some()
                 {
@@ -511,8 +508,6 @@ async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::Conf
         original.status.as_str(),
         "active" | "pending_conflict" | "superseded"
     ) || original.body.trim().is_empty()
-        || original.content_sha256
-            != super::memory::content_hash(&original.body, original.context.as_deref())
         || original.accepted_input_seq <= 0
         || original.created_at_ms <= 0
         || original
@@ -525,7 +520,6 @@ async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::Conf
     if reference.revision == unsigned(fact.revision)?
         && (original.body != fact.body
             || original.context != fact.context
-            || original.content_sha256 != fact.content_sha256
             || original.status != fact.status
             || original.accepted_input_seq != fact.accepted_input_seq
             || original.state_generation != fact.state_generation)
@@ -632,7 +626,6 @@ async fn evidence_with_control_on<C: ConnectionTrait + crate::config::ConfigConn
     let own = HistoryDependency {
         source_id: row.source_id.clone(),
         source_revision: unsigned(row.memory_revision)?,
-        content_sha256: row.content_sha256.clone(),
         origin_id: row.origin_id.clone(),
         origin_deletion_generation: unsigned(original.deletion_generation)?,
         policy_revision: policy.policy_revision,
@@ -794,7 +787,6 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         .filter(document::Column::SourceKind.eq("history"))
         .filter(document::Column::SourceId.eq(&row.source_id))
         .filter(document::Column::SourceRevision.eq(row.revision))
-        .filter(document::Column::ContentSha256.eq(&row.content_sha256))
         .limit(2)
         .all(db)
         .await?;
@@ -892,7 +884,6 @@ fn control_owns(
             source_id: dependency.source_id.clone(),
             revision: dependency.source_revision,
             origin_id: dependency.origin_id.clone(),
-            content_sha256: dependency.content_sha256.clone(),
         })
     })
 }

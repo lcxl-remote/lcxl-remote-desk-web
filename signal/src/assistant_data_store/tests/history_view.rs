@@ -19,7 +19,6 @@ async fn version(store: &TestStore, source: &str) -> QuerySourceVersion {
     QuerySourceVersion {
         source_id: row.source_id,
         revision: row.revision as u64,
-        content_sha256: row.content_sha256,
     }
 }
 
@@ -52,7 +51,13 @@ async fn exact_fragment_locator_hash_and_full_unicode_body_survive_bounded_searc
     let small = view.search_hit(17).unwrap();
     assert!(small.snippet.len() <= 17 && content.starts_with(&small.snippet));
     assert_eq!(hit.source_id, source);
-    assert_eq!(hit.locator.content_sha256, expected.content_sha256);
+    assert_eq!(
+        hit.locator.content_sha256,
+        format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(content.as_bytes())
+        )
+    );
     assert_eq!(hit.locator.conversation_id, "original-root");
     assert_eq!(hit.locator.root_conversation_id, "original-root");
     assert_eq!(

@@ -21,7 +21,6 @@ pub struct Model {
     pub role: String,
     #[sea_orm(column_type = "Text")]
     pub body: String,
-    pub content_sha256: String,
     /// Original retained byte count remains after natural body cleanup.
     pub retained_bytes: i32,
     pub body_cleared_at_ms: Option<i64>,

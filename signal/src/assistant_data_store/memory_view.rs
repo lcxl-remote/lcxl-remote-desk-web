@@ -101,7 +101,6 @@ pub(crate) async fn read_on<C: ConnectionTrait + crate::config::ConfigConnection
     if row.revision <= 0
         || !readable_statuses(context).contains(&row.status.as_str())
         || unsigned(row.revision)? != version.revision
-        || row.content_sha256 != version.content_sha256
         || row.state_generation <= 0
         || unsigned(row.state_generation)? > context.observation_generation
         || (!row.device_ref.is_empty()
@@ -269,7 +268,6 @@ pub(crate) async fn read_history_on<C: ConnectionTrait + crate::config::ConfigCo
     let version = QuerySourceVersion {
         source_id: original.memory_id.clone(),
         revision: unsigned(original.revision)?,
-        content_sha256: original.content_sha256.clone(),
     };
     let usage = desk_diagnose_core::future::send_phase(|| {
         read_proof_on(
@@ -404,7 +402,6 @@ impl AuthorizedMemoryView {
         Ok(QuerySourceVersion {
             source_id: self.row.memory_id.clone(),
             revision: unsigned(self.row.revision)?,
-            content_sha256: self.row.content_sha256.clone(),
         })
     }
 }
