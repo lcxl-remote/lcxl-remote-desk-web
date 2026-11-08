@@ -216,18 +216,15 @@ async fn apply_task_control_with_source_on(
         input_observation.permission(PermissionOutcome::PolicyRejected);
         return Err(invalid());
     }
-    let operation_key = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                &parent.conversation_id,
-                &parent.actor_id,
-                &parent.device_id,
-                "subagent_control",
-                &request.client_request_id,
-            ))
-            .map_err(|_| invalid())?
-        )
+    let reservation_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::DelegationReservation,
+        &(
+            &parent.conversation_id,
+            &parent.actor_id,
+            &parent.device_id,
+            "subagent_control",
+            &request.client_request_id,
+        ),
     );
     let arguments = format!(
         "{:x}",
@@ -235,7 +232,7 @@ async fn apply_task_control_with_source_on(
     );
     if let Some(receipt) = desk_diagnose_core::future::boxed(|| async {
         receipt_row::Entity::find()
-            .filter(receipt_row::Column::LogicalKeySha256.eq(&operation_key))
+            .filter(receipt_row::Column::ReservationId.eq(&reservation_id))
             .one(txn)
             .await
     })
@@ -341,7 +338,7 @@ async fn apply_task_control_with_source_on(
                         super::native_cancel::cancel_native_actions_on(
                             txn,
                             &child,
-                            &operation_key,
+                            &reservation_id,
                             now_ms,
                         )
                         .await
@@ -392,7 +389,7 @@ async fn apply_task_control_with_source_on(
                         label.clone()
                     }
                     None => desk_diagnose_core::model_message_labels::model_bound_user_message(
-                        format!("owner-adjustment-{operation_key}"),
+                        format!("owner-adjustment-{reservation_id}"),
                         message.clone(),
                         creation.source.model_destination.clone(),
                     )
@@ -467,8 +464,7 @@ async fn apply_task_control_with_source_on(
     })
     .await?;
     receipt_row::ActiveModel {
-        reservation_id: Set(format!("subagent-control-{operation_key}")),
-        logical_key_sha256: Set(operation_key),
+        reservation_id: Set(reservation_id.clone()),
         root_conversation_id: Set(parent.conversation_id.clone()),
         group_id: Set(row.group_id.clone()),
         conversation_id: Set(parent.conversation_id.clone()),

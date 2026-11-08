@@ -8,7 +8,6 @@ use desk_diagnose_core::subagent::{
     reservation::{DelegationCallKind, DelegationCallReservation, ReviewCallAuthority},
 };
 use sea_orm::ActiveModelTrait;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetAdmission {
@@ -57,10 +56,12 @@ pub(super) fn decode_reservation(
             .as_ref()
             .is_some_and(|kind| !matches!(kind.as_str(), "manager_ai_call" | "oss_model_egress"))
         || (reservation.kind == DelegationCallKind::Tool && row.provider_receipt_id.is_some())
-        || row
-            .source_schedule_budget_id
-            .as_ref()
-            .is_some_and(|id| id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || row.source_schedule_budget_id.as_ref().is_some_and(|id| {
+            !desk_diagnose_core::native_ids::is(
+                desk_diagnose_core::native_ids::Kind::TaskBudgetReservation,
+                id,
+            )
+        })
         || (reservation.kind == DelegationCallKind::Tool && row.source_schedule_budget_id.is_some())
         || row.version <= 0
     {
@@ -172,21 +173,18 @@ pub(super) async fn reserve_budget_for_session_on(
     .ok_or_else(|| invalid())?;
     let mut group = boxed_group(&row)?;
     let child = session.agent_role.binding();
-    let logical_key = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                root,
-                group_id,
-                &session.conversation_id,
-                "delegation_budget",
-                logical_call_id,
-            ))
-            .map_err(|_| invalid())?
-        )
+    let reservation_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::DelegationReservation,
+        &(
+            root,
+            group_id,
+            &session.conversation_id,
+            "delegation_budget",
+            logical_call_id,
+        ),
     );
     let reservation = DelegationCallReservation {
-        reservation_id: format!("delegation-call-{logical_key}"),
+        reservation_id: reservation_id.clone(),
         logical_call_id: logical_call_id.into(),
         root_conversation_id: root.into(),
         group_id: group_id.into(),
@@ -205,7 +203,7 @@ pub(super) async fn reserve_budget_for_session_on(
     reservation.validate().map_err(|_| invalid())?;
     if let Some(old) = desk_diagnose_core::future::boxed(|| async {
         reservation_row::Entity::find()
-            .filter(reservation_row::Column::LogicalKeySha256.eq(&logical_key))
+            .filter(reservation_row::Column::ReservationId.eq(&reservation_id))
             .one(txn)
             .await
     })
@@ -325,7 +323,6 @@ pub(super) async fn reserve_budget_for_session_on(
     .await?;
     reservation_row::ActiveModel {
         reservation_id: Set(reservation.reservation_id.clone()),
-        logical_key_sha256: Set(logical_key),
         root_conversation_id: Set(root.into()),
         group_id: Set(group_id.into()),
         conversation_id: Set(session.conversation_id.clone()),

@@ -38,8 +38,13 @@ pub struct TaskBudgetRequest<'a> {
     pub units: u64,
 }
 
-fn reservation_id(run: &str, kind: &str, key_hash: &str) -> Result<String, ScheduleStoreError> {
-    Ok(digest(&json(&(run, kind, key_hash))?))
+/// The reservation id is the unique identity of one budgeted call in a run.
+fn reservation_id(run: &str, kind: &str, logical_key: &str) -> Result<String, ScheduleStoreError> {
+    key(logical_key)?;
+    Ok(desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::TaskBudgetReservation,
+        &(run, kind, logical_key),
+    ))
 }
 
 async fn insert(
@@ -51,8 +56,7 @@ async fn insert(
     units: i64,
     rule_id: Option<&str>,
 ) -> Result<ledger::Model, ScheduleStoreError> {
-    let logical_key_sha256 = digest(logical_key);
-    let id = reservation_id(&authority.run().run_id, kind, &logical_key_sha256)?;
+    let id = reservation_id(&authority.run().run_id, kind, logical_key)?;
     ledger::Entity::insert(ledger::ActiveModel {
         reservation_id: Set(id.clone()),
         schedule_id: Set(authority.provenance().schedule_id.clone()),
@@ -62,7 +66,7 @@ async fn insert(
         rule_id: Set(rule_id.map(str::to_owned)),
         exception_grant_id: Set(None),
         utc_day: Set(authority.verified_at().div_euclid(86_400_000)),
-        logical_key_sha256: Set(logical_key_sha256),
+        logical_key: Set(logical_key.into()),
         input_sha256: Set(input.into()),
         authority_sha256: Set(digest(&json(authority.provenance())?)),
         reserved_units: Set(units),
@@ -95,8 +99,7 @@ fn validate_row(row: &ledger::Model) -> Result<(), ScheduleStoreError> {
         }
         key(grant)?;
     }
-    if row.reservation_id != reservation_id(&row.run_id, &row.kind, &row.logical_key_sha256)?
-        || !valid_digest(&row.logical_key_sha256)
+    if row.reservation_id != reservation_id(&row.run_id, &row.kind, &row.logical_key)?
         || !valid_digest(&row.input_sha256)
         || !valid_digest(&row.authority_sha256)
         || row.reserved_units <= 0
@@ -138,7 +141,7 @@ pub(super) async fn reserve_run_budget(
     let base = ledger::Entity::find()
         .filter(ledger::Column::RunId.eq(&authority.run().run_id))
         .filter(ledger::Column::OwnerUserId.eq(authority.run().owner_user_id));
-    let run_id = reservation_id(authority.run().run_id.as_str(), "run", &digest("run"))?;
+    let run_id = reservation_id(authority.run().run_id.as_str(), "run", "run")?;
     if let Some(existing) = base
         .clone()
         .filter(ledger::Column::ReservationId.eq(run_id))
@@ -265,11 +268,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::BudgetExceeded);
         }
-        let id = reservation_id(
-            request.run_id,
-            request.kind.name(),
-            &digest(request.logical_key),
-        )?;
+        let id = reservation_id(request.run_id, request.kind.name(), request.logical_key)?;
         let existing_call = base
             .clone()
             .filter(ledger::Column::ReservationId.eq(id))

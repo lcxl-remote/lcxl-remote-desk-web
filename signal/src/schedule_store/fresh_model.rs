@@ -182,11 +182,9 @@ impl ScheduleStore {
             .filter(agent_task_budget_reservation::Column::OwnerUserId.eq(owner))
             .filter(agent_task_budget_reservation::Column::RunId.eq(run_id))
             .filter(agent_task_budget_reservation::Column::Kind.eq("model_tokens"))
-            .filter(
-                agent_task_budget_reservation::Column::LogicalKeySha256.eq(super::digest(
-                    &Self::model_dispatch_budget_key(u64::from(ordinal), compression),
-                )),
-            )
+            .filter(agent_task_budget_reservation::Column::LogicalKey.eq(
+                Self::model_dispatch_budget_key(u64::from(ordinal), compression),
+            ))
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;

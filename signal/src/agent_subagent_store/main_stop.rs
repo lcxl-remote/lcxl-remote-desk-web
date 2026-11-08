@@ -136,12 +136,9 @@ impl SubAgentStore {
         {
             return Err(invalid());
         }
-        let key = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(root, actor, device, "main_stop", &control.client_request_id))
-                    .map_err(|_| invalid())?
-            )
+        let reservation_id = desk_diagnose_core::native_ids::stable(
+            desk_diagnose_core::native_ids::Kind::DelegationReservation,
+            &(root, actor, device, "main_stop", &control.client_request_id),
         );
         let digest = format!(
             "{:x}",
@@ -149,7 +146,7 @@ impl SubAgentStore {
         );
         if let Some(receipt) = desk_diagnose_core::future::boxed(|| async {
             receipt_row::Entity::find()
-                .filter(receipt_row::Column::LogicalKeySha256.eq(&key))
+                .filter(receipt_row::Column::ReservationId.eq(&reservation_id))
                 .one(&txn)
                 .await
         })
@@ -233,7 +230,7 @@ impl SubAgentStore {
         }
         let scope = StopScope {
             children: &children,
-            key: &key,
+            key: &reservation_id,
             choice: control.subagent_choice,
             now,
         };
@@ -259,8 +256,7 @@ impl SubAgentStore {
             cancel_request_ids: effects.cancel_request_ids,
         };
         receipt_row::ActiveModel {
-            reservation_id: Set(format!("main-stop-{key}")),
-            logical_key_sha256: Set(key),
+            reservation_id: Set(reservation_id.clone()),
             root_conversation_id: Set(root.into()),
             group_id: Set(parent
                 .delegation_group_id

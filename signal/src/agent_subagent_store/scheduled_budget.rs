@@ -115,8 +115,7 @@ async fn linked_on(
         || allocation.kind != "model_tokens"
         || allocation.rule_id.is_some()
         || allocation.exception_grant_id.is_some()
-        || allocation.logical_key_sha256
-            != format!("{:x}", Sha256::digest(key(reservation).as_bytes()))
+        || allocation.logical_key != key(reservation)
         || allocation.input_sha256 != reservation.arguments_sha256
         || u64::try_from(allocation.reserved_units).ok() != Some(reservation.upper.tokens)
     {

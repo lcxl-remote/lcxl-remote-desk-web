@@ -70,11 +70,7 @@ async fn states_for(
             [budget] => {
                 let matching: Vec<_> = works
                     .iter()
-                    .filter(|work| {
-                        let grant = identity(run_id, &work.tool_call_id);
-                        format!("{:x}", Sha256::digest(grant.as_bytes()))
-                            == budget.logical_key_sha256
-                    })
+                    .filter(|work| identity(run_id, &work.tool_call_id) == budget.logical_key)
                     .collect();
                 let [work] = matching.as_slice() else {
                     return Err(invalid());

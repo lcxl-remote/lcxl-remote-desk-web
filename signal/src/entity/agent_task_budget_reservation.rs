@@ -20,7 +20,7 @@ pub struct Model {
     /// Original one-use owner decision consumed for this exact call, if exceptional.
     pub exception_grant_id: Option<String>,
     pub utc_day: i64,
-    pub logical_key_sha256: String,
+    pub logical_key: String,
     pub input_sha256: String,
     pub authority_sha256: String,
     pub reserved_units: i64,

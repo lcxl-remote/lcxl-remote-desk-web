@@ -43,6 +43,8 @@ pub enum Kind {
     SubagentEvent,
     WorkerReport,
     DelegationGroup,
+    TaskBudgetReservation,
+    DelegationReservation,
 }
 
 impl Kind {
@@ -85,6 +87,8 @@ impl Kind {
             Self::SubagentEvent => "sev",
             Self::WorkerReport => "wr",
             Self::DelegationGroup => "dg",
+            Self::TaskBudgetReservation => "tb",
+            Self::DelegationReservation => "dr",
         }
     }
 }
