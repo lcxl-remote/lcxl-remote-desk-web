@@ -916,6 +916,9 @@ pub(crate) fn project_model_message(
                 references.alias_conversation_arguments(&call.name, &mut value);
             }
             project_arguments(&call.name, &mut value, locators);
+            if let Some(references) = references {
+                references.alias_result_ids(&mut value);
+            }
             crate::model_input::project_protocol_versions(&call.name, &mut value);
             if call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
                 && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
@@ -964,6 +967,7 @@ pub(crate) fn project_model_message(
                                     references.alias_native_id(id);
                                 }
                             }
+                            references.alias_result_ids(exact);
                         }
                         crate::model_input::project_protocol_versions(&tool, exact);
                     }

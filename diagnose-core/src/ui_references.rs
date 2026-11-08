@@ -158,6 +158,51 @@ fn visit_references(value: &Value, visitor: &mut impl FnMut(&Value)) {
     }
 }
 
+/// Result fields the model copies into later calls. Each holds the message id
+/// of a verified result and is presented to the model as a `res` alias.
+const RESULT_OUTPUT_FIELDS: [&str; 5] = [
+    "search_result_id",
+    "artifact_result_id",
+    "file_version_id",
+    "file_result_call_id",
+    "handoff_result_id",
+];
+
+fn visit_result_selectors(value: &mut Value, visitor: &mut impl FnMut(&mut Value)) {
+    for field in [
+        "file_result_call_id",
+        "file_version_id",
+        "web_search_result_id",
+        "handoff_result_id",
+    ] {
+        if let Some(id) = value.get_mut(field) {
+            visitor(id);
+        }
+    }
+    for path in [
+        "/source/file_result_call_id",
+        "/attachment/artifact_result_id",
+    ] {
+        if let Some(id) = value.pointer_mut(path) {
+            visitor(id);
+        }
+    }
+    for field in ["sources", "file_sources"] {
+        if let Some(sources) = value.get_mut(field).and_then(Value::as_array_mut) {
+            for source in sources {
+                if let Some(id) = source.get_mut("file_result_call_id") {
+                    visitor(id);
+                }
+            }
+        }
+    }
+}
+
+fn result_alias_shape(id: &str) -> bool {
+    id.strip_prefix("res")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl UiReferenceState {
     fn rebuild_indexes(&mut self) {
         self.native_index.clear();
@@ -303,7 +348,73 @@ impl UiReferenceState {
                 )?;
             }
         }
+        self.observe_results(history)?;
         Ok(*self != before)
+    }
+
+    /// A result alias names the verified message whose projection offers it.
+    fn observe_results(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
+        for message in history {
+            if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
+                continue;
+            }
+            let mut projected = message.clone();
+            crate::result_model_ids::project_result_message(&mut projected);
+            let Ok(value) = serde_json::from_str::<Value>(&projected.text) else {
+                continue;
+            };
+            if RESULT_OUTPUT_FIELDS
+                .iter()
+                .any(|field| value.get(*field).and_then(Value::as_str) == Some(&message.message_id))
+            {
+                self.register_entry(
+                    "res",
+                    message.message_id.clone(),
+                    &serde_json::json!({"result_message_id": message.message_id}),
+                    ReferenceSource::Message(message.message_id.clone()),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace result aliases with the message ids that result resolution reads.
+    pub(crate) fn expand_result_ids(&self, value: &mut Value) -> Result<(), AgentError> {
+        let mut error = None;
+        visit_result_selectors(value, &mut |id| {
+            let Some(selected) = id.as_str() else {
+                return;
+            };
+            match self.entries.get(selected) {
+                Some(entry) if entry.prefix == "res" && !entry.sources.is_empty() => {
+                    *id = Value::String(entry.native_id.clone());
+                }
+                Some(_) => {
+                    error.get_or_insert(invalid(
+                        "Result ID has the wrong type; copy the result ID from the verified result",
+                    ));
+                }
+                None if result_alias_shape(selected) => {
+                    error.get_or_insert(invalid(
+                        "Result ID is unavailable in this conversation; copy it from a current verified result",
+                    ));
+                }
+                None => {}
+            }
+        });
+        error.map_or(Ok(()), Err)
+    }
+
+    /// Present recorded result selectors with the aliases the model saw.
+    pub(crate) fn alias_result_ids(&self, value: &mut Value) {
+        visit_result_selectors(value, &mut |id| {
+            if let Some(alias) = id
+                .as_str()
+                .and_then(|native| self.alias("res", native, None))
+            {
+                *id = Value::String(alias.into());
+            }
+        });
     }
 
     fn cursor_paths(tool: &str) -> &'static [&'static str] {
@@ -885,6 +996,15 @@ impl UiReferenceState {
                         }
                     }
                 }
+                for field in RESULT_OUTPUT_FIELDS {
+                    if let Some(id) = object.get_mut(field)
+                        && let Some(alias) = id
+                            .as_str()
+                            .and_then(|native| self.alias("res", native, None))
+                    {
+                        *id = Value::String(alias.into());
+                    }
+                }
                 for (field, child) in object.iter_mut() {
                     if !is_business_content(field) {
                         self.shorten_value(child, source);
@@ -1087,6 +1207,7 @@ impl UiReferenceState {
         value: &mut Value,
         expected: &mut Vec<Value>,
     ) -> Result<(), AgentError> {
+        self.expand_result_ids(value)?;
         if !Self::cursor_paths(tool).is_empty()
             && let Some(id) = value.get_mut("cursor")
             && let Some(selector) = id.as_str().filter(|id| id.parse::<i64>().is_err())

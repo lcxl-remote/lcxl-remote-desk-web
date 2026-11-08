@@ -261,13 +261,15 @@ fn source_directory(
                 .then(|| Some(root.object_ref.clone()))
                 .ok_or_else(|| invalid("The source root is not a directory."));
         }
+        let mut value: Value = serde_json::from_str(&call.arguments_json)
+            .map_err(|_| invalid("The source input is unavailable."))?;
+        // A recorded model call names its source by the alias the model saw.
+        session.ui_references.expand_result_ids(&mut value)?;
         let source = ToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
-            arguments_json: call.arguments_json.clone(),
+            arguments_json: value.to_string(),
         };
-        let value: Value = serde_json::from_str(&source.arguments_json)
-            .map_err(|_| invalid("The source input is unavailable."))?;
         if let Some(id) = value.get("directory_request_id").and_then(Value::as_str) {
             let root = session.file_scope.records().iter().find(|record| record.proposal.request_id == id).ok_or_else(|| invalid("The source directory record is unavailable. Select a currently approved directory explicitly."))?;
             return Ok(Some(root.proposal.directory.clone()));

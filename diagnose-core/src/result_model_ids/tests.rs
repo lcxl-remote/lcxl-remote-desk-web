@@ -582,3 +582,46 @@ fn derived_locators_are_frozen_for_repeated_projection() {
     );
     assert!(request.result_locators.is_empty());
 }
+
+#[test]
+fn result_ids_are_presented_and_accepted_as_session_aliases() {
+    let history = read_history();
+    let mut references = crate::ui_references::UiReferenceState::default();
+    references.observe(&history).unwrap();
+    let mut projected = history.last().unwrap().clone();
+    crate::ui_model_ids::project_result_view(&mut projected, Some(&references));
+    let output: Value = serde_json::from_str(&projected.text).unwrap();
+    assert_eq!(output["file_version_id"], "res1");
+    assert_eq!(output["file_result_call_id"], "res1");
+    assert!(!projected.text.contains("\"receipt\""));
+
+    let mut input =
+        json!({"file_version_id":"res1","change":{"kind":"replace_all","content_utf8":"new"}});
+    references.expand_result_ids(&mut input).unwrap();
+    assert_eq!(input["file_version_id"], "receipt");
+    let call = ToolCall {
+        id: "change".into(),
+        name: "update_text_file".into(),
+        arguments_json: input.to_string(),
+    };
+    let resolved: Value = serde_json::from_str(
+        &crate::ui_model_ids::resolve_call(&call, &history, 1)
+            .unwrap()
+            .arguments_json,
+    )
+    .unwrap();
+    assert_eq!(resolved["file_result_call_id"], "provider-call-long");
+    assert_eq!(
+        resolved["expected_sha256"],
+        format!("{:x}", Sha256::digest(b"old"))
+    );
+
+    assert!(
+        references
+            .expand_result_ids(&mut json!({"file_version_id":"res9"}))
+            .is_err()
+    );
+    let mut recorded = json!({"source":{"file_result_call_id":"receipt"}});
+    references.alias_result_ids(&mut recorded);
+    assert_eq!(recorded["source"]["file_result_call_id"], "res1");
+}
