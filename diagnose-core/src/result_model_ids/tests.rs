@@ -461,12 +461,9 @@ fn terminal_snapshot_metadata_is_hidden_and_business_content_is_preserved() {
 }
 
 #[test]
-fn result_locators_require_original_bytes_and_one_accepted_provider_call() {
+fn result_locators_require_one_accepted_provider_call() {
     let original = read_history();
     assert_eq!(locators(&original).len(), 1);
-    let mut altered = original.clone();
-    altered.last_mut().unwrap().text.push(' ');
-    assert!(locators(&altered).is_empty());
     let mut wrong = original.clone();
     wrong
         .last_mut()

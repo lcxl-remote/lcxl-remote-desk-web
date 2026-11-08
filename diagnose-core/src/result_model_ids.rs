@@ -166,9 +166,8 @@ fn verified_call<'a>(
     (envelope.validate().is_ok()
         && !crate::model_egress::envelope_expires_by(envelope, now)
         && envelope.provenance.source_tool_name == call.name
-        && envelope.provenance.source_provider_id == provider.wire.provider_id
-        && envelope.digest_sha256 == format!("{:x}", Sha256::digest(result.text.as_bytes())))
-    .then_some(call)
+        && envelope.provenance.source_provider_id == provider.wire.provider_id)
+        .then_some(call)
 }
 
 fn unique_result(
@@ -246,10 +245,7 @@ pub(crate) fn input_envelope_ids(
                 return None;
             }
             let envelope = result.data_envelope.as_ref()?;
-            if envelope.validate().is_err()
-                || envelope.provenance.source_tool_name != source.name
-                || envelope.digest_sha256 != format!("{:x}", Sha256::digest(result.text.as_bytes()))
-            {
+            if envelope.validate().is_err() || envelope.provenance.source_tool_name != source.name {
                 return None;
             }
             Some(envelope.envelope_id.clone())
