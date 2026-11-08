@@ -418,7 +418,6 @@ async fn a_source_policy_change_blocks_current_cache_replay_and_does_not_create_
         .unwrap();
     let mut policy: SourceUsePolicy = serde_json::from_str(&original.policy_json).unwrap();
     policy.no_export = true;
-    policy.policy_sha256 = desk_diagnose_core::ai_assistant::source::policy_hash(&policy).unwrap();
     origin::Entity::update_many()
         .col_expr(
             origin::Column::PolicyJson,

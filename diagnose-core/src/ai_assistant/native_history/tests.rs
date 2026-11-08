@@ -224,7 +224,7 @@ fn capture_binds_native_projection_bytes_and_keeps_the_original_source_policy_re
     };
     let prepared = prepare_capture(&capture, &platform).unwrap().unwrap();
     assert!(prepared.index.partial);
-    assert_eq!(prepared.proof.policy_revision, 1);
+    assert_eq!(prepared.proof.source_policy.policy_revision, 1);
     assert_eq!(
         prepared.proof.native_metadata_sha256,
         metadata_sha256(Some(&native)).unwrap()

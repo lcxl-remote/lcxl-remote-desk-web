@@ -38,14 +38,14 @@ pub(crate) fn resolve_policy_on<'a>(
         let sources = root.sources.input_snapshot.policy_sources();
         let registration = &root.input_policies;
         let reads = super::super::native_export::load_owner_history_set_on(db, root).await?;
-        let mut policies = BTreeMap::new();
+        let mut policies = std::collections::BTreeSet::new();
         let mut roots = BTreeMap::new();
         let mut read_inputs = BTreeMap::new();
         for read in &reads {
             let Some(policy) = read.snapshot_policy() else {
                 return Ok(None);
             };
-            policies.insert(policy.policy_sha256.clone(), policy.clone());
+            policies.insert(policy.clone());
             read_inputs.insert(
                 read.input_envelope().envelope_id.clone(),
                 read.input_envelope(),
@@ -84,7 +84,7 @@ pub(crate) fn resolve_policy_on<'a>(
                     policy,
                     read_roots: summary.retained_roots,
                 };
-                policies.insert(retained.policy.policy_sha256.clone(), retained.policy);
+                policies.insert(retained.policy);
                 for source in &retained.read_roots {
                     roots.insert(
                         (source.source_id.clone(), source.source_revision),
@@ -124,25 +124,24 @@ pub(crate) fn resolve_policy_on<'a>(
                 let Some(policy) = inputs::owner_text_on(db, root, source).await? else {
                     return Ok(None);
                 };
-                policies.insert(policy.policy_sha256.clone(), policy);
+                policies.insert(policy);
             } else if leaf.contract == RegisteredSourceContract::PublishedTaskInput {
                 let Some(policy) = inputs::published_on(db, root, source, now).await? else {
                     return Ok(None);
                 };
-                policies.insert(policy.policy_sha256.clone(), policy);
+                policies.insert(policy);
             } else {
                 let policy = registration
-                    .policies
-                    .get(&leaf.policy_sha256)
+                    .policy(leaf)
                     .ok_or(AssistantStoreError::Inaccessible)?;
-                policies.insert(policy.policy_sha256.clone(), policy.clone());
+                policies.insert(policy.clone());
             }
         }
         if policies.is_empty() {
             return Ok(None);
         }
         let policy = derive_visible_text_policy(
-            &policies.into_values().collect::<Vec<_>>(),
+            &policies.into_iter().collect::<Vec<_>>(),
             root.source_set.context.policy_revision,
         )
         .map_err(AssistantStoreError::Invalid)?;

@@ -57,8 +57,6 @@ impl ScheduleStore {
             let Some(retained) = data::retained_native_sources(&archive.proof) else { return Ok(None); };
             let mut source_policy = retained.policy;
             source_policy.independent_fact_allowed = false;
-            source_policy.policy_sha256 = desk_diagnose_core::ai_assistant::source::policy_hash(&source_policy)
-                .map_err(data::AssistantStoreError::Invalid)?;
             let dependencies = Vec::new();
             let proof = desk_diagnose_core::schedule::published_input::TaskPromptRetention {
                 actor_id: session.actor_id.clone(), target_device_id: task.target_device_id.clone(), policy: source_policy, dependencies,

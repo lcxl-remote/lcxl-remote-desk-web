@@ -129,8 +129,7 @@ pub async fn load_on<C: ConnectionTrait>(
         || proof.device_ref != row.device_ref
         || proof.accepted_input_seq != input.accepted_input_seq as u64
         || proof.original_content_sha256 != input.original_sha256
-        || proof.source_policy_sha256 != policy.policy_sha256
-        || proof.policy_revision != policy.policy_revision
+        || proof.source_policy != policy
         || policy.policy_revision
             != data
                 .memory_access_scope

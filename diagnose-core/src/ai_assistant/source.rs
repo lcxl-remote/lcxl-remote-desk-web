@@ -41,18 +41,10 @@ pub fn valid_statement_timezone(value: &str) -> bool {
     value.len() <= 128 && value.parse::<chrono_tz::Tz>().is_ok()
 }
 
-pub fn policy_hash(policy: &SourceUsePolicy) -> Result<String, &'static str> {
-    let mut unsigned = policy.clone();
-    unsigned.policy_sha256.clear();
-    let bytes = serde_json::to_vec(&unsigned).map_err(|_| "invalid source policy")?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
 /// Called by the trusted input producer, never from model-supplied policy fields.
 pub fn owner_text_policy(revision: u64, temporary: bool) -> SourceUsePolicy {
-    let mut policy = SourceUsePolicy {
+    SourceUsePolicy {
         policy_revision: revision,
-        policy_sha256: String::new(),
         class: SourcePolicyClass::UserText,
         history_retention_allowed: !temporary,
         independent_fact_allowed: !temporary,
@@ -62,14 +54,11 @@ pub fn owner_text_policy(revision: u64, temporary: bool) -> SourceUsePolicy {
         content_hard_expires_at_unix_ms: None,
         reference_fresh_until_unix_ms: None,
         fixed_destinations: Vec::new(),
-    };
-    policy.policy_sha256 = policy_hash(&policy).expect("static source policy");
-    policy
+    }
 }
 
 pub fn validate_policy(policy: &SourceUsePolicy) -> Result<(), &'static str> {
     if policy.policy_revision == 0
-        || policy.policy_sha256 != policy_hash(policy)?
         || policy
             .fixed_destinations
             .iter()
@@ -168,9 +157,8 @@ pub fn derive_visible_text_policy(
             SourcePolicyClass::ProviderPrivate | SourcePolicyClass::Unknown
         )
     });
-    let mut result = SourceUsePolicy {
+    let result = SourceUsePolicy {
         policy_revision: revision,
-        policy_sha256: String::new(),
         class: SourcePolicyClass::AssistantText,
         history_retention_allowed: !unclassified_or_private
             && parents
@@ -199,7 +187,6 @@ pub fn derive_visible_text_policy(
             .min(),
         fixed_destinations: fixed.unwrap_or_default().into_iter().collect(),
     };
-    result.policy_sha256 = policy_hash(&result)?;
     Ok(result)
 }
 
@@ -215,8 +202,9 @@ pub struct HistoryRetentionProof {
     pub retained_content_sha256: String,
     pub production_dependencies_sha256: String,
     pub native_metadata_sha256: String,
-    pub source_policy_sha256: String,
-    pub policy_revision: u64,
+    /// The origin's policy at capture; the origin row's policy never changes
+    /// after insertion, so readers compare values.
+    pub source_policy: SourceUsePolicy,
     pub recorded_at_unix_ms: u64,
     pub statement_timezone: String,
     pub expires_at_unix_ms: u64,
@@ -455,8 +443,7 @@ pub fn prepare_capture(
             retained_content_sha256: content_sha256.clone(),
             production_dependencies_sha256,
             native_metadata_sha256,
-            source_policy_sha256: capture.source_policy.policy_sha256.clone(),
-            policy_revision: capture.source_policy.policy_revision,
+            source_policy: capture.source_policy.clone(),
             recorded_at_unix_ms: capture.recorded_at_unix_ms,
             statement_timezone: capture.statement_timezone.into(),
             expires_at_unix_ms: expires_at,
@@ -489,10 +476,8 @@ mod tests {
         let mut a = owner_text_policy(1, false);
         a.fixed_destinations = vec![model("a")];
         a.content_hard_expires_at_unix_ms = Some(50);
-        a.policy_sha256 = policy_hash(&a).unwrap();
         let mut b = owner_text_policy(1, false);
         b.fixed_destinations = vec![model("b")];
-        b.policy_sha256 = policy_hash(&b).unwrap();
         let result = derive_visible_text_policy(&[a.clone(), b], 1).unwrap();
         assert!(result.no_export);
         assert!(!allows_model_use(&result, &model("a"), 10));
@@ -502,11 +487,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_modified_policies_cannot_grant_retention() {
-        let mut policy = owner_text_policy(1, true);
+    fn temporary_input_and_empty_parents_cannot_grant_retention() {
+        let policy = owner_text_policy(1, true);
         assert!(!policy.history_retention_allowed);
-        policy.history_retention_allowed = true;
-        assert!(validate_policy(&policy).is_err());
         assert!(derive_visible_text_policy(&[], 1).is_err());
     }
 
@@ -518,7 +501,6 @@ mod tests {
         ] {
             let mut parent = owner_text_policy(1, false);
             parent.class = class;
-            parent.policy_sha256 = policy_hash(&parent).unwrap();
             validate_policy(&parent).unwrap();
             let derived =
                 derive_visible_text_policy(&[parent, owner_text_policy(1, false)], 1).unwrap();
@@ -540,7 +522,6 @@ mod tests {
         let mut parent = owner_text_policy(1, false);
         parent.class = SourcePolicyClass::Media;
         parent.content_hard_expires_at_unix_ms = Some(100);
-        parent.policy_sha256 = policy_hash(&parent).unwrap();
         assert!(!allows_model_use(&parent, &model("any"), 10));
         let derived = derive_visible_text_policy(&[parent], 1).unwrap();
         assert!(derived.history_retention_allowed && derived.derived_visible_text_allowed);
@@ -561,7 +542,6 @@ mod tests {
                 2 => policy.content_hard_expires_at_unix_ms = Some(i64::MAX as u64 + 1),
                 _ => policy.fixed_destinations = vec![model("one"), model("one")],
             }
-            policy.policy_sha256 = policy_hash(&policy).unwrap();
             assert!(validate_policy(&policy).is_err());
             assert!(derive_visible_text_policy(&[policy], 1).is_err());
         }
@@ -574,7 +554,6 @@ mod tests {
         policy.history_retention_allowed = false;
         policy.fixed_destinations = vec![model("original-account")];
         policy.content_hard_expires_at_unix_ms = Some(100);
-        policy.policy_sha256 = policy_hash(&policy).unwrap();
         assert!(!allows_model_use(&policy, &model("original-account"), 10));
         assert!(allows_independent_fact_use(
             &policy,
@@ -592,7 +571,6 @@ mod tests {
             100
         ));
         policy.no_export = true;
-        policy.policy_sha256 = policy_hash(&policy).unwrap();
         assert!(!allows_independent_fact_use(
             &policy,
             &model("original-account"),
@@ -600,7 +578,6 @@ mod tests {
         ));
         policy.no_export = false;
         policy.no_copy = true;
-        policy.policy_sha256 = policy_hash(&policy).unwrap();
         assert!(!allows_independent_fact_use(
             &policy,
             &model("original-account"),

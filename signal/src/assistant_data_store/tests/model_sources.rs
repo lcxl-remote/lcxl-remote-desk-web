@@ -16,7 +16,6 @@ use desk_diagnose_core::{
         data_access::{AssistantDataToolAccess, owner_history_scope},
         data_control::CurrentMemoryUse,
         seam::{AssistantDataReadUse, AssistantReadRoot},
-        source::policy_hash,
     },
     native_ids::{self, Kind},
 };
@@ -304,7 +303,6 @@ async fn owner_view_and_no_export_retention_never_become_model_read_permission()
         .unwrap();
     let mut policy: SourceUsePolicy = serde_json::from_str(&original.policy_json).unwrap();
     policy.no_export = true;
-    policy.policy_sha256 = policy_hash(&policy).unwrap();
     let encoded = serde_json::to_string(&policy).unwrap();
     origin::Entity::update_many()
         .col_expr(

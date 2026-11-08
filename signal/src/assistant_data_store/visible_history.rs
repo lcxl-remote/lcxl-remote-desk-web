@@ -16,7 +16,7 @@ use desk_diagnose_core::{
     ai_assistant::{
         data_access::eligible_origin,
         output_archive::ArchivedAssistantOutput,
-        source::{HistoryCapture, HistorySourceDirectory, policy_hash},
+        source::{HistoryCapture, HistorySourceDirectory},
         source_registry::is_native_output_policy_source,
     },
     chat::{ChatMessage, ChatRole},
@@ -475,9 +475,8 @@ fn draft(
 }
 
 pub(crate) fn unresolved_policy(revision: u64) -> Result<SourceUsePolicy, AssistantStoreError> {
-    let mut policy = SourceUsePolicy {
+    let policy = SourceUsePolicy {
         policy_revision: revision,
-        policy_sha256: String::new(),
         class: SourcePolicyClass::Unknown,
         history_retention_allowed: false,
         independent_fact_allowed: false,
@@ -488,7 +487,6 @@ pub(crate) fn unresolved_policy(revision: u64) -> Result<SourceUsePolicy, Assist
         reference_fresh_until_unix_ms: None,
         fixed_destinations: Vec::new(),
     };
-    policy.policy_sha256 = policy_hash(&policy).map_err(AssistantStoreError::Invalid)?;
     Ok(policy)
 }
 

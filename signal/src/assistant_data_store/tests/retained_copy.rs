@@ -11,7 +11,7 @@ use desk_agent_protocol::ai_assistant::{
 use desk_diagnose_core::{
     ai_assistant::{
         data_access::owner_history_scope,
-        source::{HistoryCapture, derive_visible_text_policy, policy_hash},
+        source::{HistoryCapture, derive_visible_text_policy},
     },
     model_message_labels::model_bound_user_message,
     native_ids::{self, Kind},
@@ -287,7 +287,6 @@ async fn a_new_fact_keeps_its_full_producer_constraints_after_the_old_fact_body_
         .unwrap();
     let mut policy: SourceUsePolicy = serde_json::from_str(&row.policy_json).unwrap();
     policy.policy_revision = 2;
-    policy.policy_sha256 = policy_hash(&policy).unwrap();
     evidence::Entity::update_many()
         .col_expr(
             evidence::Column::PolicyJson,
@@ -509,7 +508,6 @@ async fn retained_evidence_policy_has_its_own_revision_and_real_hard_deadline() 
     let mut source_policy: SourceUsePolicy = serde_json::from_str(&row.policy_json).unwrap();
     source_policy.policy_revision = 2;
     source_policy.content_hard_expires_at_unix_ms = Some(50 * DAY);
-    source_policy.policy_sha256 = policy_hash(&source_policy).unwrap();
     evidence::Entity::update_many()
         .col_expr(
             evidence::Column::PolicyJson,

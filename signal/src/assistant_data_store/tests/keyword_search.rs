@@ -11,7 +11,7 @@ use desk_agent_protocol::ai_assistant::{
 use desk_diagnose_core::{
     ai_assistant::{
         data_access::{AssistantDataToolAccess, owner_history_scope},
-        source::{HistoryCapture, HistoryRetentionProof, owner_text_policy, policy_hash},
+        source::{HistoryCapture, HistoryRetentionProof, owner_text_policy},
     },
     model_message_labels::model_bound_user_message,
     native_ids::{self, Kind},
@@ -153,7 +153,6 @@ pub(super) async fn capture_many_native_at(
         source_policy.class =
             desk_agent_protocol::ai_assistant::source::SourcePolicyClass::CommunicationReceipt;
         source_policy.independent_fact_allowed = false;
-        source_policy.policy_sha256 = policy_hash(&source_policy).unwrap();
     }
     let native_id = native_ids::stable(Kind::Message, &(label, root));
     let message =
@@ -221,9 +220,8 @@ pub(super) async fn private_source(store: &TestStore, source: &str) {
         .unwrap();
     let mut policy: SourceUsePolicy = serde_json::from_str(&original.policy_json).unwrap();
     policy.no_export = true;
-    policy.policy_sha256 = policy_hash(&policy).unwrap();
     let mut proof: HistoryRetentionProof = serde_json::from_str(&row.retention_proof_json).unwrap();
-    proof.source_policy_sha256 = policy.policy_sha256.clone();
+    proof.source_policy = policy.clone();
     origin::Entity::update_many()
         .col_expr(
             origin::Column::PolicyJson,

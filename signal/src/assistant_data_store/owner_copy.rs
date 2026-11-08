@@ -11,10 +11,10 @@ use desk_agent_protocol::ai_assistant::source::{
 };
 use desk_diagnose_core::ai_assistant::{
     retained_copy::OwnerHistoryReadValidation,
-    source::{derive_visible_text_policy, policy_hash, validate_policy},
+    source::{derive_visible_text_policy, validate_policy},
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub(crate) struct RetainedReadCopy {
     pub policy: SourceUsePolicy,
@@ -96,7 +96,7 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         }
         SourceReadPurpose::OwnerHistory => return Ok(None),
     }
-    let mut policies = BTreeMap::new();
+    let mut policies = std::collections::BTreeSet::new();
     for source in &usage.history_dependencies {
         if source.expires_at_unix_ms.is_some_and(|until| until <= now) {
             return Ok(None);
@@ -157,7 +157,7 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
                 return Ok(None);
             }
             let revision = policy.policy_revision;
-            policies.insert(policy.policy_sha256.clone(), policy);
+            policies.insert(policy);
             revision
         } else {
             // A naturally reclaimed history body is not required again: its
@@ -191,13 +191,12 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         if policy_revision != source.policy_revision {
             return Ok(None);
         }
-        policies.insert(original_policy.policy_sha256.clone(), original_policy);
+        policies.insert(original_policy);
     }
     // A typed empty result has no source body. This baseline carries only the
     // original explicit deadline; all actual source policies narrow it below.
-    let mut baseline = SourceUsePolicy {
+    let baseline = SourceUsePolicy {
         policy_revision: usage.policy_revision,
-        policy_sha256: String::new(),
         class: SourcePolicyClass::AssistantText,
         history_retention_allowed: true,
         independent_fact_allowed: false,
@@ -208,11 +207,10 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         reference_fresh_until_unix_ms: None,
         fixed_destinations: Vec::new(),
     };
-    baseline.policy_sha256 = policy_hash(&baseline).map_err(AssistantStoreError::Invalid)?;
-    policies.insert(baseline.policy_sha256.clone(), baseline);
+    policies.insert(baseline);
     Ok(Some(RetainedReadCopy {
         policy: derive_visible_text_policy(
-            &policies.into_values().collect::<Vec<_>>(),
+            &policies.into_iter().collect::<Vec<_>>(),
             usage.policy_revision,
         )
         .map_err(AssistantStoreError::Invalid)?,

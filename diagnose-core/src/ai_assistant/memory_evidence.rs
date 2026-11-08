@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 1;
+pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 2;
 
 /// An authenticated independent copy keeps the origin's hard constraints,
 /// rather than the original chat fragment's temporary read availability.
@@ -24,8 +24,8 @@ pub struct RetainedMemoryOrigin {
     pub deletion_generation: u64,
     pub accepted_input_seq: u64,
     pub content_sha256: String,
-    pub policy_sha256: String,
-    pub content_hard_expires_at_unix_ms: Option<u64>,
+    /// The origin row's policy, including its hard content deadline.
+    pub policy: SourceUsePolicy,
 }
 
 /// Built from authenticated source and memory-revision rows. No transport or
@@ -70,9 +70,8 @@ pub struct MemoryEvidenceRetentionProof {
     pub origin_content_sha256: String,
     pub retained_content_sha256: String,
     pub retained_bytes: u32,
-    pub origin_policy_sha256: String,
-    pub evidence_policy_sha256: String,
-    pub evidence_policy_revision: u64,
+    /// The origin row's policy; the evidence policy lives in this proof's own row.
+    pub origin_policy: SourceUsePolicy,
     pub known_sources_sha256: String,
     pub forget_sources_sha256: String,
     pub production_dependencies_sha256: String,
@@ -183,7 +182,7 @@ impl MemoryEvidenceRetentionProof {
         .chain(
             retained_origins
                 .iter()
-                .filter_map(|origin| origin.content_hard_expires_at_unix_ms),
+                .filter_map(|origin| origin.policy.content_hard_expires_at_unix_ms),
         )
         .min();
         if hard_expires
@@ -206,9 +205,7 @@ impl MemoryEvidenceRetentionProof {
             origin_content_sha256: source.origin_content_sha256.into(),
             retained_content_sha256: retained_sha256.into(),
             retained_bytes,
-            origin_policy_sha256: source.origin_policy.policy_sha256.clone(),
-            evidence_policy_sha256: source.evidence_policy.policy_sha256.clone(),
-            evidence_policy_revision: source.evidence_policy.policy_revision,
+            origin_policy: source.origin_policy.clone(),
             known_sources_sha256: digest(&known)?,
             forget_sources_sha256: digest(&forget)?,
             production_dependencies_sha256: digest(&dependencies)?,
@@ -331,8 +328,9 @@ pub fn canonical_retained_origins(
             || origin.accepted_input_seq == 0
             || origin.accepted_input_seq > i64::MAX as u64
             || !hash(&origin.content_sha256)
-            || !hash(&origin.policy_sha256)
+            || validate_policy(&origin.policy).is_err()
             || origin
+                .policy
                 .content_hard_expires_at_unix_ms
                 .is_some_and(|until| until == 0 || until > i64::MAX as u64)
         {
@@ -378,7 +376,7 @@ fn hash(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::source::{owner_text_policy, policy_hash};
+    use super::super::source::owner_text_policy;
     use super::*;
 
     struct Fixture {
@@ -572,7 +570,6 @@ mod tests {
     fn hard_source_deadlines_survive_independent_retention_and_additional_expiry_only_narrows() {
         let mut data = Fixture::new();
         data.policy.content_hard_expires_at_unix_ms = Some(1000);
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).unwrap();
         assert!(
             proof
@@ -612,10 +609,8 @@ mod tests {
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_err());
         data.kind = AssistantSourceKind::Receipt;
         data.policy.class = SourcePolicyClass::CommunicationReceipt;
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_err());
         data.policy.class = SourcePolicyClass::StructuredObservation;
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_ok());
     }
 
@@ -641,7 +636,6 @@ mod tests {
         });
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_ok());
         data.policy.no_copy = true;
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).is_err());
     }
 
@@ -697,7 +691,6 @@ mod tests {
     fn identity_proof_keeps_hard_deadlines_and_no_copy_after_natural_body_cleanup() {
         let mut data = Fixture::new();
         data.policy.content_hard_expires_at_unix_ms = Some(1000);
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&data.snapshot()).unwrap();
         data.body.clear();
         proof
@@ -743,7 +736,6 @@ mod tests {
                 .is_err()
         );
         data.policy.no_copy = true;
-        data.policy.policy_sha256 = policy_hash(&data.policy).unwrap();
         assert!(
             proof
                 .validate_identity(
@@ -768,8 +760,7 @@ mod tests {
             deletion_generation: 2,
             accepted_input_seq: 3,
             content_sha256: "a".repeat(64),
-            policy_sha256: data.policy.policy_sha256.clone(),
-            content_hard_expires_at_unix_ms: None,
+            policy: data.policy.clone(),
         };
         data.known.push(source);
         origin
@@ -798,7 +789,7 @@ mod tests {
     fn independently_retained_background_still_binds_hard_expiry_and_exact_origin_membership() {
         let mut data = Fixture::new();
         let mut origin = background_origin(&mut data);
-        origin.content_hard_expires_at_unix_ms = Some(5000);
+        origin.policy.content_hard_expires_at_unix_ms = Some(5000);
         let mut snapshot = data.snapshot();
         snapshot.retained_origins = std::slice::from_ref(&origin);
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&snapshot).unwrap();
@@ -813,7 +804,7 @@ mod tests {
                 .is_err()
         );
         let mut changed = origin.clone();
-        changed.policy_sha256 = "c".repeat(64);
+        changed.policy.no_export = !changed.policy.no_export;
         assert!(canonical_retained_origins(&[origin.clone(), changed]).is_err());
         let mut future = origin.clone();
         future.accepted_input_seq = 5;
@@ -841,8 +832,7 @@ mod tests {
                 deletion_generation: 1,
                 accepted_input_seq: 1,
                 content_sha256: "b".repeat(64),
-                policy_sha256: data.policy.policy_sha256.clone(),
-                content_hard_expires_at_unix_ms: None,
+                policy: data.policy.clone(),
             });
         }
         let mut snapshot = data.snapshot();
@@ -855,7 +845,6 @@ mod tests {
         let data = Fixture::new();
         let mut derived = data.policy.clone();
         derived.independent_fact_allowed = false;
-        derived.policy_sha256 = policy_hash(&derived).unwrap();
         let mut snapshot = data.snapshot();
         snapshot.evidence_policy = &derived;
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&snapshot).is_ok());
@@ -866,14 +855,12 @@ mod tests {
                 1 => restricted.derived_visible_text_allowed = false,
                 _ => restricted.no_copy = true,
             }
-            restricted.policy_sha256 = policy_hash(&restricted).unwrap();
             let mut restricted_snapshot = data.snapshot();
             restricted_snapshot.evidence_policy = &restricted;
             assert!(MemoryEvidenceRetentionProof::from_snapshot(&restricted_snapshot).is_err());
         }
         let mut original = data.policy.clone();
         original.independent_fact_allowed = false;
-        original.policy_sha256 = policy_hash(&original).unwrap();
         snapshot.evidence_policy = &derived;
         snapshot.origin_policy = &original;
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&snapshot).is_err());

@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     ai_assistant::source::{
         HistoryCapture, HistorySourceDirectory, history_origin_id, history_source_id,
-        owner_text_policy, policy_hash,
+        owner_text_policy,
     },
     native_ids::{self, Kind},
 };
@@ -77,7 +77,6 @@ impl NativeStatusHistoryProjection {
         let mut policy = owner_text_policy(policy_revision, false);
         policy.class = SourcePolicyClass::StructuredObservation;
         policy.independent_fact_allowed = false;
-        policy.policy_sha256 = policy_hash(&policy)?;
         let envelope = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("native-status-{native_id}"),

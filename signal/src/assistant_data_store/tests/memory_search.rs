@@ -457,7 +457,6 @@ async fn source_export_policy_changes_block_a_cached_memory_without_fabricating_
         .unwrap();
     let mut policy: SourceUsePolicy = serde_json::from_str(&row.policy_json).unwrap();
     policy.no_export = true;
-    policy.policy_sha256 = desk_diagnose_core::ai_assistant::source::policy_hash(&policy).unwrap();
     origin::Entity::update_many()
         .col_expr(
             origin::Column::PolicyJson,

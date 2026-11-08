@@ -2,7 +2,7 @@
 
 use super::contract::ValidatedTaskContract;
 use crate::ai_assistant::{
-    source::{history_dependencies_sha256, owner_text_policy, policy_hash, validate_policy},
+    source::{history_dependencies_sha256, owner_text_policy, validate_policy},
     source_registry::NativeDerivedInputPolicy,
 };
 use crate::chat::{ChatMessage, ChatRole};
@@ -39,7 +39,6 @@ impl TaskPromptRetention {
         let mut policy = owner_text_policy(revision, false);
         // A published requirement is not a new assertion of a stable fact.
         policy.independent_fact_allowed = false;
-        policy.policy_sha256 = policy_hash(&policy).expect("native task prompt policy");
         Self {
             actor_id: actor.into(),
             target_device_id: device.into(),
@@ -202,11 +201,9 @@ mod tests {
         assert!(original.validate("1", "another-device").is_err());
         let mut forged = original.clone();
         forged.policy.independent_fact_allowed = true;
-        forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
         assert!(forged.validate("1", "device").is_err());
         let mut forged = original.clone();
         forged.policy.content_hard_expires_at_unix_ms = Some(10);
-        forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
         assert!(forged.validate("1", "device").is_err());
     }
 

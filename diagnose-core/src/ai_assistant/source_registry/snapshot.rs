@@ -3,13 +3,14 @@
 
 use super::*;
 use crate::model_egress::{NativeModelInputSnapshot, sink_metadata_sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeInputLeafPolicy {
     pub contract: RegisteredSourceContract,
-    pub policy_sha256: String,
+    /// Index into `NativeInputPolicyRegistration::policies`.
+    pub policy_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,13 +19,19 @@ pub struct NativeInputPolicyRegistration {
     pub source_contract_revision: u64,
     pub policy_revision: u64,
     pub input_snapshot_sha256: String,
-    /// Ordered one-to-one with the complete original snapshot. Equivalent
-    /// policies share a dictionary entry; actual inputs are never deduplicated.
+    /// Ordered one-to-one with the complete original snapshot. Equal policies
+    /// share one entry; actual inputs are never deduplicated.
     pub leaves: Vec<Option<NativeInputLeafPolicy>>,
-    pub policies: BTreeMap<String, SourceUsePolicy>,
+    /// Distinct policies in first-use order, so a leaf keeps its index across
+    /// later calls that only append inputs.
+    pub policies: Vec<SourceUsePolicy>,
 }
 
 impl NativeInputPolicyRegistration {
+    pub fn policy(&self, leaf: &NativeInputLeafPolicy) -> Option<&SourceUsePolicy> {
+        self.policies.get(usize::try_from(leaf.policy_index).ok()?)
+    }
+
     pub fn capture(
         snapshot: &NativeModelInputSnapshot,
         source_contract_revision: u64,
@@ -34,23 +41,24 @@ impl NativeInputPolicyRegistration {
             return Err("missing original input policy revision");
         }
         let input_snapshot_sha256 = snapshot.fingerprint()?;
-        let mut policies = BTreeMap::new();
+        let mut policies: Vec<SourceUsePolicy> = Vec::new();
         let mut leaves = Vec::with_capacity(snapshot.envelopes.len());
         for registration in registered_inputs(snapshot, source_contract_revision, policy_revision)?
         {
             leaves.push(match registration {
                 Some(entry) => {
-                    let reference = NativeInputLeafPolicy {
-                        contract: entry.contract,
-                        policy_sha256: entry.policy.policy_sha256.clone(),
+                    let index = match policies.iter().position(|policy| *policy == entry.policy) {
+                        Some(index) => index,
+                        None => {
+                            policies.push(entry.policy.clone());
+                            policies.len() - 1
+                        }
                     };
-                    if policies
-                        .insert(reference.policy_sha256.clone(), entry.policy.clone())
-                        .is_some_and(|old| old != entry.policy)
-                    {
-                        return Err("conflicting native policy dictionary entry");
-                    }
-                    Some(reference)
+                    Some(NativeInputLeafPolicy {
+                        contract: entry.contract,
+                        policy_index: u32::try_from(index)
+                            .map_err(|_| "too many native input policies")?,
+                    })
                 }
                 None => None,
             });
@@ -83,19 +91,25 @@ impl NativeInputPolicyRegistration {
         {
             return Err("native policy registration changed its original snapshot");
         }
-        let mut referenced = BTreeSet::new();
+        // Leaves reference policies in first-use order, which makes the
+        // encoding unique: no gaps, no duplicates and no unused entries.
+        let mut next = 0u32;
         for entry in self.leaves.iter().flatten() {
-            if !self.policies.contains_key(&entry.policy_sha256) {
-                return Err("native leaf policy dictionary is incomplete");
+            if entry.policy_index > next {
+                return Err("native leaf policy dictionary is not in first-use order");
             }
-            referenced.insert(&entry.policy_sha256);
+            if entry.policy_index == next {
+                next += 1;
+            }
         }
-        if referenced.len() != self.policies.len() {
+        if usize::try_from(next).ok() != Some(self.policies.len()) {
             return Err("native policy dictionary contains unused policy claims");
         }
-        for (hash, policy) in &self.policies {
+        for (index, policy) in self.policies.iter().enumerate() {
             validate_policy(policy)?;
-            if hash != &policy.policy_sha256 || policy.policy_revision != self.policy_revision {
+            if policy.policy_revision != self.policy_revision
+                || self.policies[..index].contains(policy)
+            {
                 return Err("native leaf policy dictionary changed");
             }
         }
@@ -128,9 +142,7 @@ impl NativeInputPolicyRegistration {
                     if expected.contract == RegisteredSourceContract::NativeControl => {}
                 (Some(reference), Some(expected))
                     if reference.contract == expected.contract
-                        && reference.policy_sha256 == expected.policy.policy_sha256
-                        && self.policies.get(&reference.policy_sha256)
-                            == Some(&expected.policy) => {}
+                        && self.policy(reference) == Some(&expected.policy) => {}
                 _ => return Err("native leaf registration changed its compiled source policy"),
             }
         }
@@ -148,11 +160,8 @@ impl NativeInputPolicyRegistration {
         if self.leaves.iter().any(Option::is_none) {
             return Ok(None);
         }
-        super::super::source::derive_visible_text_policy(
-            &self.policies.values().cloned().collect::<Vec<_>>(),
-            self.policy_revision,
-        )
-        .map(Some)
+        super::super::source::derive_visible_text_policy(&self.policies, self.policy_revision)
+            .map(Some)
     }
 }
 

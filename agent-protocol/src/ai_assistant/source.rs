@@ -140,7 +140,18 @@ pub struct AssistantCitation {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SourcePolicyClass {
@@ -155,12 +166,21 @@ pub enum SourcePolicyClass {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
 )]
 #[serde(deny_unknown_fields)]
 pub struct SourceUsePolicy {
     pub policy_revision: u64,
-    pub policy_sha256: String,
     pub class: SourcePolicyClass,
     pub history_retention_allowed: bool,
     pub independent_fact_allowed: bool,

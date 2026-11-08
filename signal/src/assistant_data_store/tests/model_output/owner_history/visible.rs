@@ -141,8 +141,6 @@ async fn late_source_changes_do_not_withdraw_the_already_accepted_answer_copy() 
             } else {
                 policy.content_hard_expires_at_unix_ms = Some(2);
             }
-            policy.policy_sha256 =
-                desk_diagnose_core::ai_assistant::source::policy_hash(&policy).unwrap();
             origin::Entity::update_many()
                 .col_expr(
                     origin::Column::PolicyJson,

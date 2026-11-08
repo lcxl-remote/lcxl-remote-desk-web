@@ -19,7 +19,7 @@ use desk_diagnose_core::{
         native_history::{
             NativeSendHistoryContext, NativeSendHistoryError, NativeSendHistoryProjection,
         },
-        source::{HistoryCapture, policy_hash},
+        source::HistoryCapture,
     },
     native_ids::{self, Kind},
     seam::ToolRunOutput,
@@ -342,8 +342,6 @@ async fn prepare_on(
     let mut source_policy = sources.policy;
     source_policy.class = SourcePolicyClass::CommunicationReceipt;
     source_policy.independent_fact_allowed = false;
-    source_policy.policy_sha256 =
-        policy_hash(&source_policy).map_err(AssistantStoreError::Invalid)?;
     let native_id = native_ids::stable(
         Kind::Message,
         &(

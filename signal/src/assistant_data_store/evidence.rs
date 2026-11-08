@@ -417,12 +417,11 @@ pub(crate) fn retained_origins_allowed_on<
             let Ok(policy) = serde_json::from_str::<SourceUsePolicy>(&original.policy_json) else {
                 return Ok(false);
             };
-            if validate_policy(&policy).is_err() || policy.policy_sha256 != saved.policy_sha256
-            || policy.content_hard_expires_at_unix_ms != saved.content_hard_expires_at_unix_ms
+            if validate_policy(&policy).is_err() || policy != saved.policy
             || !policy.independent_fact_allowed || policy.no_copy
             || !matches!(policy.class, desk_agent_protocol::ai_assistant::source::SourcePolicyClass::UserText
                 | desk_agent_protocol::ai_assistant::source::SourcePolicyClass::StructuredObservation)
-            || saved.content_hard_expires_at_unix_ms.is_some_and(|until| until <= now) { return Ok(false); }
+            || saved.policy.content_hard_expires_at_unix_ms.is_some_and(|until| until <= now) { return Ok(false); }
         }
         Ok(true)
     })

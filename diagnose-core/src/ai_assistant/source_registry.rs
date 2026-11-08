@@ -1,7 +1,7 @@
 //! Compiled personal-assistant retention contracts. These registrations bind
 //! native labels, not claims in model arguments, prose, or sensitivity alone.
 
-use super::source::{policy_hash, validate_policy};
+use super::source::validate_policy;
 use desk_agent_protocol::{
     ai_assistant::source::{SourcePolicyClass, SourceUsePolicy},
     capability_provider::CapabilityEffect,
@@ -160,9 +160,8 @@ fn registration(
         }
         _ => (envelope.retention.expires_at_unix_ms, None),
     };
-    let mut policy = SourceUsePolicy {
+    let policy = SourceUsePolicy {
         policy_revision,
-        policy_sha256: String::new(),
         class,
         history_retention_allowed: whole_history,
         independent_fact_allowed: independent_fact,
@@ -175,7 +174,6 @@ fn registration(
         reference_fresh_until_unix_ms: reference_freshness,
         fixed_destinations: Vec::new(),
     };
-    policy.policy_sha256 = policy_hash(&policy)?;
     validate_policy(&policy)?;
     Ok(RegisteredSourcePolicy {
         source_contract_revision: original_contract_revision,

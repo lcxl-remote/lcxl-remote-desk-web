@@ -423,7 +423,6 @@ fn a_policy_summary_is_not_authority_and_cannot_replace_the_actual_private_paren
     policy.no_export = false;
     policy.history_retention_allowed = true;
     policy.derived_visible_text_allowed = true;
-    policy.policy_sha256 = source::policy_hash(policy).unwrap();
     reference.validate().unwrap();
     assert!(reference.validate_archive(&first).is_err());
 }

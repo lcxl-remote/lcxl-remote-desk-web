@@ -264,7 +264,7 @@ impl NativeInputPolicyGraph {
         }
         let parents = self.parent_index()?;
         let mut used = BTreeSet::new();
-        let mut policies = BTreeMap::new();
+        let mut policies = std::collections::BTreeSet::new();
         for (source, entry) in snapshot
             .policy_sources()
             .into_iter()
@@ -278,16 +278,11 @@ impl NativeInputPolicyGraph {
                 used.insert(parent.output_envelope_id.as_str());
             }
             let policy = match entry {
-                Some(entry) => registration.policies.get(&entry.policy_sha256),
+                Some(entry) => registration.policy(entry),
                 None => parent.and_then(|parent| parent.text_policy.as_ref()),
             };
             if let Some(policy) = policy {
-                if policies
-                    .insert(policy.policy_sha256.clone(), policy.clone())
-                    .is_some_and(|old| old != *policy)
-                {
-                    return Err("native policies conflict under the same hash");
-                }
+                policies.insert(policy.clone());
             } else {
                 complete = false;
             }
@@ -299,7 +294,7 @@ impl NativeInputPolicyGraph {
             return Ok(None);
         }
         derive_visible_text_policy(
-            &policies.into_values().collect::<Vec<_>>(),
+            &policies.into_iter().collect::<Vec<_>>(),
             registration.policy_revision,
         )
         .map(Some)

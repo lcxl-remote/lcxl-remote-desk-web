@@ -786,8 +786,7 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         || (proof.accepted_input_seq == 0 && !native_without_owner_input)
         || proof.accepted_input_seq != unsigned(original.accepted_input_seq)?
         || proof.original_content_sha256 != original.original_sha256
-        || proof.source_policy_sha256 != policy.policy_sha256
-        || proof.policy_revision != policy.policy_revision
+        || proof.source_policy != policy
         || proof.recorded_at_unix_ms != unsigned(row.recorded_at_ms)?
         || proof.statement_timezone != row.statement_timezone
         || !desk_diagnose_core::ai_assistant::source::valid_statement_timezone(

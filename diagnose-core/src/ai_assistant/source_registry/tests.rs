@@ -33,6 +33,13 @@ fn destination() -> DestinationIdentity {
     }
 }
 
+fn user_with_id(id: &str) -> DataEnvelope {
+    model_bound_user_message(id.into(), "Another owner input".into(), destination())
+        .unwrap()
+        .data_envelope
+        .unwrap()
+}
+
 fn user() -> DataEnvelope {
     model_bound_user_message(
         "owner-input".into(),
@@ -393,6 +400,39 @@ fn unresolved_native_parent_prevents_complete_text_policy_and_unknown_original_c
 }
 
 #[test]
+fn policy_dictionary_has_one_encoding_in_first_use_order() {
+    let original = snapshot(vec![user(), user_with_id("second")]);
+    let registration =
+        NativeInputPolicyRegistration::capture(&original, SOURCE_CONTRACT_REVISION, 1).unwrap();
+    // Equal policies share one entry.
+    let indices: Vec<_> = registration
+        .leaves
+        .iter()
+        .flatten()
+        .map(|leaf| leaf.policy_index)
+        .collect();
+    assert_eq!(indices, vec![0, 0]);
+    assert_eq!(registration.policies.len(), 1);
+    registration
+        .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+        .unwrap();
+    let mut duplicate = registration.clone();
+    duplicate.policies.push(duplicate.policies[0].clone());
+    assert!(
+        duplicate
+            .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+            .is_err()
+    );
+    let mut out_of_range = registration.clone();
+    out_of_range.leaves[0].as_mut().unwrap().policy_index = 99;
+    assert!(
+        out_of_range
+            .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+            .is_err()
+    );
+}
+
+#[test]
 fn native_snapshot_cannot_replace_a_restrictive_policy_or_rebind_a_full_input_label() {
     let mut secret = user();
     secret.sensitivity = Sensitivity::Secret;
@@ -408,12 +448,9 @@ fn native_snapshot_cannot_replace_a_restrictive_policy_or_rebind_a_full_input_la
     );
     let mut forged = registration.clone();
     let permissive = source::owner_text_policy(1, false);
-    forged.leaves[0].as_mut().unwrap().policy_sha256 = permissive.policy_sha256.clone();
+    forged.leaves[0].as_mut().unwrap().policy_index = 0;
     forged.leaves[0].as_mut().unwrap().contract = RegisteredSourceContract::OwnerText;
-    forged.policies.clear();
-    forged
-        .policies
-        .insert(permissive.policy_sha256.clone(), permissive);
+    forged.policies = vec![permissive];
     forged
         .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
         .unwrap();
@@ -477,13 +514,18 @@ fn native_controls_require_their_actual_parents_and_never_become_independent_fac
         assert!(policy.history_retention_allowed && !policy.independent_fact_allowed);
         let mut historical = registration.clone();
         historical.leaves[0] = None;
-        historical.policies.retain(|hash, _| {
-            historical
-                .leaves
-                .iter()
-                .flatten()
-                .any(|leaf| &leaf.policy_sha256 == hash)
-        });
+        // Re-encode the remaining leaves in first-use order.
+        let original_policies = std::mem::take(&mut historical.policies);
+        for leaf in historical.leaves.iter_mut().flatten() {
+            let policy = &original_policies[leaf.policy_index as usize];
+            leaf.policy_index = match historical.policies.iter().position(|p| p == policy) {
+                Some(index) => index as u32,
+                None => {
+                    historical.policies.push(policy.clone());
+                    (historical.policies.len() - 1) as u32
+                }
+            };
+        }
         historical.validate_registered_leaves(&original).unwrap();
         assert!(
             historical
