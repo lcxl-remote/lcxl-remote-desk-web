@@ -201,12 +201,11 @@ async fn reconcile_inner_on(
         if delegated {
             desk_diagnose_core::subagent::facts::validate_origin(session, &binding.origin)
                 .map_err(|_| invalid())?;
-            let canonical =
-                desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
-                    &call.name,
-                    serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
-                )
-                .map_err(|_| invalid())?;
+            let canonical = desk_diagnose_core::request_devices::native_canonical_input(
+                &call.name,
+                &call.arguments_json,
+            )
+            .ok_or_else(invalid)?;
             if call.name != payload.tool_name || canonical != payload.canonical_input_json {
                 return Err(invalid());
             }

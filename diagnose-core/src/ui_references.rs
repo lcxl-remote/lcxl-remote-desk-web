@@ -410,8 +410,9 @@ impl UiReferenceState {
     /// results or persisted delegation state receive short aliases.
     fn observe_selectors(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
         for message in history {
+            // Runtime delegation state exists only in a request projection; it
+            // reuses existing aliases and never allocates one.
             let carries = matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
-                || crate::subagent::model_ids::is_runtime(message)
                 || crate::subagent::model_ids::is_receipt(message);
             if !carries {
                 continue;
@@ -454,10 +455,10 @@ impl UiReferenceState {
             let Some(selected) = id.as_str() else {
                 continue;
             };
+            // Server-issued selectors stay valid after their result leaves
+            // the conversation; the native id names a durable record.
             match self.entries.get(selected) {
-                Some(entry)
-                    if prefixes.contains(&entry.prefix.as_str()) && !entry.sources.is_empty() =>
-                {
+                Some(entry) if prefixes.contains(&entry.prefix.as_str()) => {
                     *id = Value::String(entry.native_id.clone());
                 }
                 Some(_) => {
@@ -534,9 +535,14 @@ impl UiReferenceState {
                 Some(entry) if entry.prefix == "res" && !entry.sources.is_empty() => {
                     *id = Value::String(entry.native_id.clone());
                 }
-                Some(_) => {
+                Some(entry) if entry.prefix != "res" => {
                     error.get_or_insert(invalid(
                         "Result ID has the wrong type; copy the result ID from the verified result",
+                    ));
+                }
+                Some(_) => {
+                    error.get_or_insert(invalid(
+                        "Result ID is unavailable in this conversation; copy it from a current verified result",
                     ));
                 }
                 None if result_alias_shape(selected) => {
@@ -845,6 +851,28 @@ impl UiReferenceState {
             value: &Value,
             ids: &mut BTreeSet<String>,
         ) {
+            // Recorded calls expand result and selector aliases on recovery.
+            let mut copy = value.clone();
+            let mut found = Vec::new();
+            visit_result_selectors(&mut copy, &mut |id| {
+                if let Some(id) = id.as_str() {
+                    found.push(id.to_owned());
+                }
+            });
+            for request in
+                std::iter::once(value).chain(value["requests"].as_array().into_iter().flatten())
+            {
+                for (field, _) in SELECTOR_FIELDS {
+                    if let Some(id) = request.get(field).and_then(Value::as_str) {
+                        found.push(id.to_owned());
+                    }
+                }
+            }
+            ids.extend(
+                found
+                    .into_iter()
+                    .filter(|id| state.entries.contains_key(id)),
+            );
             let ui = matches!(
                 tool,
                 "inspect_desktop_ui"

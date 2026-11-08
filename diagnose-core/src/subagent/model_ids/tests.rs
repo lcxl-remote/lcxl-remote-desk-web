@@ -118,3 +118,81 @@ fn native_caller_comparison_keeps_control_inputs_exact() {
         ));
     }
 }
+
+#[test]
+fn runtime_state_reuses_aliases_and_recorded_calls_keep_them() {
+    let owner = crate::model_message_labels::model_bound_user_message(
+        "owner".into(),
+        "Delegate the check".into(),
+        desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "test".into(),
+            connection_revision: 1,
+            model_id: "test".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    let issued = native_ids::stable(Kind::Task, &"issued");
+    let runtime_only = native_ids::stable(Kind::Task, &"runtime-only");
+    let state =
+        json!({"runtime_delegation_state":{"tasks":[{"task_id":runtime_only}]}}).to_string();
+    let mut runtime = ChatMessage::system_event("runtime", state.clone());
+    runtime.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+        owner.data_envelope.as_ref(),
+        "runtime",
+        &state,
+        "delegation_state",
+    )
+    .unwrap();
+    assert!(is_runtime(&runtime));
+    let conversation = vec![
+        owner,
+        ChatMessage::assistant_tool_calls(
+            "proposal",
+            "",
+            vec![ToolCallRef {
+                id: "call".into(),
+                name: tools::SPAWN.into(),
+                arguments_json: "{}".into(),
+            }],
+        ),
+        ChatMessage::tool_result("result", "call", json!({"task_id":issued}).to_string()),
+        ChatMessage::assistant_tool_calls(
+            "status",
+            "",
+            vec![ToolCallRef {
+                id: "status-call".into(),
+                name: tools::STATUS.into(),
+                arguments_json: json!({"task_id":"task1"}).to_string(),
+            }],
+        ),
+    ];
+    let mut projected = conversation.clone();
+    projected.push(runtime);
+    let mut references = UiReferenceState::default();
+    assert!(references.observe(&projected).unwrap());
+    let sources = conversation
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
+    let protected = references.retained_call_aliases(&conversation, &[]);
+    assert!(protected.contains("task1"));
+    assert!(!references.retain_sources(&sources, &protected));
+    assert!(!references.observe(&projected).unwrap());
+    assert!(!references.retain_sources(&sources, &protected));
+    assert_eq!(
+        serde_json::to_value(&references).unwrap()["entries"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A recorded call keeps its alias after the issuing result leaves the conversation.
+    assert!(references.retain_sources(&Default::default(), &protected));
+    let call = ToolCall {
+        id: "status-call".into(),
+        name: tools::STATUS.into(),
+        arguments_json: json!({"task_id":"task1"}).to_string(),
+    };
+    assert!(references.expand_call(&call).is_ok());
+}

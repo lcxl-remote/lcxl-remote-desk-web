@@ -86,11 +86,11 @@ pub(super) async fn reconcile_on(
         return Err(invalid());
     }
     let (parent, call) = proposals[0];
-    let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
+    let canonical = desk_diagnose_core::request_devices::native_canonical_input(
         &call.name,
-        serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
+        &call.arguments_json,
     )
-    .map_err(|_| invalid())?;
+    .ok_or_else(invalid)?;
     if canonical != payload.canonical_input_json {
         return Err(invalid());
     }

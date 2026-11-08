@@ -111,36 +111,13 @@ async fn current_group_record_on(
 async fn begin_main_tool(
     store: &SubAgentStore,
     held: &PersistedAgentSession,
-    call: &ToolCall,
     operation: &Operation,
     input_observation: &ToolObservation,
 ) -> Result<DatabaseTransaction, DbErr> {
     let txn = crate::db::begin_write(&store.db, session_row::Entity).await?;
     let child_id = match operation {
-        Operation::Spawn(_) => {
-            let group_id = held
-                .delegation_group_id
-                .as_deref()
-                .ok_or_else(|| invalid())?;
-            let key = format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&(
-                        "subagent_creation",
-                        &held.conversation_id,
-                        group_id,
-                        &held.actor_id,
-                        &held.device_id,
-                        &call.id,
-                    ))
-                    .map_err(|_| invalid())?
-                )
-            );
-            Some(desk_diagnose_core::native_ids::stable(
-                desk_diagnose_core::native_ids::Kind::ChildConversation,
-                &key,
-            ))
-        }
+        // The SQLite writer lock already serializes child creation.
+        Operation::Spawn(_) => None,
         Operation::Cancel { task_id, .. }
         | Operation::Adjust { task_id, .. }
         | Operation::Reply {
@@ -382,7 +359,7 @@ impl SubAgentStore {
             return Err(invalid());
         }
         let txn = desk_diagnose_core::future::boxed(|| async {
-            begin_main_tool(self, held, call, &operation, input_observation).await
+            begin_main_tool(self, held, &operation, input_observation).await
         })
         .await?;
         let history = desk_diagnose_core::future::boxed(|| {
