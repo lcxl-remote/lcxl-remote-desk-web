@@ -4,6 +4,10 @@ use super::*;
 /// capture + encoder. Uses a current-thread Tokio runtime inside the
 /// thread so `media_sender.send_frame(...).await` can run without
 /// polluting the outer runtime with COM-bound state.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) fn spawn_video_pipeline_thread(
     base_settings: DeskSettings,
     payload: StartMediaPayload,

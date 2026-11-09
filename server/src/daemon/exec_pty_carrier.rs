@@ -71,6 +71,10 @@ enum CarrierDestination {
     },
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 pub enum CarrierDispatch {
     Worker {
         worker_key: Option<WorkerKey>,

@@ -113,10 +113,10 @@ impl ResidentWorkerPoolState {
     }
 
     pub fn retire(&mut self, key: &WorkerKey, incarnation: u64) -> bool {
-        if !self
+        if self
             .workers
             .get(key)
-            .is_some_and(|record| record.identity.incarnation == incarnation)
+            .is_none_or(|record| record.identity.incarnation != incarnation)
         {
             return false;
         }

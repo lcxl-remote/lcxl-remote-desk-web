@@ -780,12 +780,12 @@ impl ComputerUseBroker {
                 &fingerprint,
                 action,
             )?;
-            return Ok(SemanticActionResult {
+            Ok(SemanticActionResult {
                 changed: result.changed,
                 verified: result.verified,
                 summary: result.summary,
                 output: None,
-            });
+            })
         }
         #[cfg(windows)]
         {
@@ -3379,7 +3379,7 @@ impl ComputerUseBroker {
             })?;
             let window_bytes = window_projection
                 .as_ref()
-                .map(|window| serde_json::to_vec(window))
+                .map(serde_json::to_vec)
                 .transpose()
                 .map_err(|_| {
                     error(
@@ -3835,27 +3835,25 @@ impl ComputerUseBroker {
         };
         let token = if matches!(resolved, ResolvedObject::UiElement { .. }) {
             self.register_ui_identity(resolved.clone())?
-        } else {
-            if lifecycle {
-                use sha2::{Digest, Sha256};
-                {
-                    let identity = match &resolved {
-                        ResolvedObject::Application {
-                            process_id,
-                            process_started_at,
-                            image_path,
-                            ..
-                        } => format!("app:{process_id}:{process_started_at:?}:{image_path}"),
-                        _ => format!("{resolved:?}"),
-                    };
-                    format!(
-                        "object-{:x}",
-                        Sha256::digest(format!("{snapshot_id}:{identity}").as_bytes())
-                    )
-                }
-            } else {
-                uuid::Uuid::new_v4().to_string()
+        } else if lifecycle {
+            use sha2::{Digest, Sha256};
+            {
+                let identity = match &resolved {
+                    ResolvedObject::Application {
+                        process_id,
+                        process_started_at,
+                        image_path,
+                        ..
+                    } => format!("app:{process_id}:{process_started_at:?}:{image_path}"),
+                    _ => format!("{resolved:?}"),
+                };
+                format!(
+                    "object-{:x}",
+                    Sha256::digest(format!("{snapshot_id}:{identity}").as_bytes())
+                )
             }
+        } else {
+            uuid::Uuid::new_v4().to_string()
         };
         let mut objects = self.objects.lock().map_err(|_| {
             error(
@@ -4518,6 +4516,103 @@ fn path_eq(left: &str, right: &str) -> bool {
 #[cfg(not(windows))]
 fn path_eq(left: &str, right: &str) -> bool {
     left == right
+}
+
+/// Exact selectors never infer missing names or native identifiers.
+/// Match native text and explicit bilingual control-type aliases in one OR set.
+fn ui_matching_terms(
+    terms: &[String],
+    name: Option<&str>,
+    native_id: Option<&str>,
+    role: &str,
+) -> Vec<u32> {
+    let normalized = role.to_ascii_lowercase();
+    let aliases = if normalized.contains("datetime")
+        || normalized.contains("datepicker")
+        || normalized.contains("日期")
+        || normalized.contains("时间")
+    {
+        "日期 时间 日期选择器 时间选择器 date time datepicker timepicker"
+    } else if normalized.contains("popover")
+        || normalized.contains("dialog")
+        || normalized.contains("sheet")
+        || normalized.contains("对话框")
+        || normalized.contains("弹层")
+    {
+        "弹层 弹窗 对话框 popover popup dialog sheet"
+    } else if normalized.contains("textfield")
+        || normalized.contains("textarea")
+        || normalized == "edit"
+        || normalized.contains("编辑")
+        || normalized.contains("输入框")
+    {
+        "文本 输入框 编辑框 text input field edit"
+    } else if normalized.contains("button") || normalized.contains("按钮") {
+        "按钮 button"
+    } else if normalized.contains("checkbox") || normalized.contains("复选框") {
+        "复选框 checkbox"
+    } else if normalized.contains("combobox") || normalized.contains("组合框") {
+        "下拉框 组合框 combobox dropdown"
+    } else {
+        ""
+    };
+    desk_agent_protocol::matching_search_terms(
+        terms,
+        &[name.unwrap_or(""), native_id.unwrap_or(""), role, aliases],
+    )
+}
+
+pub(super) fn ui_query_matches(
+    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
+    node: &CollectedUiNode,
+) -> bool {
+    query.is_none_or(|q| {
+        (q.queries.is_empty()
+            || !ui_matching_terms(
+                &q.queries,
+                node.name.as_deref(),
+                node.native_id.as_deref(),
+                &node.role,
+            )
+            .is_empty())
+            && q.element_id
+                .as_ref()
+                .is_none_or(|id| id == &node.fingerprint)
+    })
+}
+
+/// Collapse collection descendants while preserving stable native targets and
+/// valid parent indices. Expanding the collection root reads its own subtree.
+fn fold_ui_collections(tree: &mut CollectedUiTree) -> std::collections::HashMap<String, u32> {
+    let mut collapsed = std::collections::HashMap::new();
+    let mut parents = Vec::<Option<u32>>::new();
+    let mut folded_under = Vec::<Option<String>>::new();
+    let mut output = Vec::new();
+    for (i, mut node) in std::mem::take(&mut tree.nodes).into_iter().enumerate() {
+        let ancestor = node
+            .parent_index
+            .and_then(|p| folded_under.get(p as usize).cloned().flatten());
+        if let Some(key) = ancestor {
+            *collapsed.entry(key.clone()).or_insert(0) += 1;
+            parents.push(None);
+            folded_under.push(Some(key));
+            continue;
+        }
+        let fold = i != 0 && node.is_collection;
+        node.parent_index = node
+            .parent_index
+            .and_then(|p| parents.get(p as usize).copied().flatten());
+        parents.push(Some(output.len() as u32));
+        folded_under.push(fold.then(|| node.fingerprint.clone()));
+        output.push(node);
+    }
+    tree.nodes = output;
+    collapsed
+}
+
+fn reference_storage_key(token: &str, snapshot_id: &str) -> String {
+    // Length-prefix the opaque token to avoid delimiter ambiguity.
+    format!("{}:{token}{snapshot_id}", token.len())
 }
 
 #[cfg(test)]
@@ -6353,101 +6448,4 @@ mod tests {
             "fixture must expose at least one protected control to prove redaction"
         );
     }
-}
-
-/// Exact selectors never infer missing names or native identifiers.
-/// Match native text and explicit bilingual control-type aliases in one OR set.
-fn ui_matching_terms(
-    terms: &[String],
-    name: Option<&str>,
-    native_id: Option<&str>,
-    role: &str,
-) -> Vec<u32> {
-    let normalized = role.to_ascii_lowercase();
-    let aliases = if normalized.contains("datetime")
-        || normalized.contains("datepicker")
-        || normalized.contains("日期")
-        || normalized.contains("时间")
-    {
-        "日期 时间 日期选择器 时间选择器 date time datepicker timepicker"
-    } else if normalized.contains("popover")
-        || normalized.contains("dialog")
-        || normalized.contains("sheet")
-        || normalized.contains("对话框")
-        || normalized.contains("弹层")
-    {
-        "弹层 弹窗 对话框 popover popup dialog sheet"
-    } else if normalized.contains("textfield")
-        || normalized.contains("textarea")
-        || normalized == "edit"
-        || normalized.contains("编辑")
-        || normalized.contains("输入框")
-    {
-        "文本 输入框 编辑框 text input field edit"
-    } else if normalized.contains("button") || normalized.contains("按钮") {
-        "按钮 button"
-    } else if normalized.contains("checkbox") || normalized.contains("复选框") {
-        "复选框 checkbox"
-    } else if normalized.contains("combobox") || normalized.contains("组合框") {
-        "下拉框 组合框 combobox dropdown"
-    } else {
-        ""
-    };
-    desk_agent_protocol::matching_search_terms(
-        terms,
-        &[name.unwrap_or(""), native_id.unwrap_or(""), role, aliases],
-    )
-}
-
-pub(super) fn ui_query_matches(
-    query: Option<&desk_agent_protocol::computer_use::UiInspectQuery>,
-    node: &CollectedUiNode,
-) -> bool {
-    query.is_none_or(|q| {
-        (q.queries.is_empty()
-            || !ui_matching_terms(
-                &q.queries,
-                node.name.as_deref(),
-                node.native_id.as_deref(),
-                &node.role,
-            )
-            .is_empty())
-            && q.element_id
-                .as_ref()
-                .is_none_or(|id| id == &node.fingerprint)
-    })
-}
-
-/// Collapse collection descendants while preserving stable native targets and
-/// valid parent indices. Expanding the collection root reads its own subtree.
-fn fold_ui_collections(tree: &mut CollectedUiTree) -> std::collections::HashMap<String, u32> {
-    let mut collapsed = std::collections::HashMap::new();
-    let mut parents = Vec::<Option<u32>>::new();
-    let mut folded_under = Vec::<Option<String>>::new();
-    let mut output = Vec::new();
-    for (i, mut node) in std::mem::take(&mut tree.nodes).into_iter().enumerate() {
-        let ancestor = node
-            .parent_index
-            .and_then(|p| folded_under.get(p as usize).cloned().flatten());
-        if let Some(key) = ancestor {
-            *collapsed.entry(key.clone()).or_insert(0) += 1;
-            parents.push(None);
-            folded_under.push(Some(key));
-            continue;
-        }
-        let fold = i != 0 && node.is_collection;
-        node.parent_index = node
-            .parent_index
-            .and_then(|p| parents.get(p as usize).copied().flatten());
-        parents.push(Some(output.len() as u32));
-        folded_under.push(fold.then(|| node.fingerprint.clone()));
-        output.push(node);
-    }
-    tree.nodes = output;
-    collapsed
-}
-
-fn reference_storage_key(token: &str, snapshot_id: &str) -> String {
-    // Length-prefix the opaque token to avoid delimiter ambiguity.
-    format!("{}:{token}{snapshot_id}", token.len())
 }

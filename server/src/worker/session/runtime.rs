@@ -24,6 +24,10 @@ impl WorkerSession {
     /// the worker constructs its own hub from `init_payload.host_upstream_url`
     /// (named-pipe daemon mode — Forwarder bridges via ws back to the
     /// daemon's aggregator).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+    )]
     pub async fn run_with_transports(
         &self,
         init_payload: WorkerInitPayload,

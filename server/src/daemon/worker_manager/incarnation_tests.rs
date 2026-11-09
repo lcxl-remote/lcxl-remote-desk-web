@@ -748,16 +748,13 @@ async fn bounded_resident_pool_churn_reclaims_workers_targets_and_bindings() {
             .1
             .is_empty()
     );
-    for index in 0..keys.len() {
+    for (index, receiver) in command_receivers.iter_mut().enumerate().take(keys.len()) {
         assert!(
             manager
                 .connection_target(&format!("connection-{index}"))
                 .is_none()
         );
-        assert!(matches!(
-            command_receivers[index].try_recv(),
-            Ok(ServiceToWorker::Shutdown)
-        ));
+        assert!(matches!(receiver.try_recv(), Ok(ServiceToWorker::Shutdown)));
     }
 }
 

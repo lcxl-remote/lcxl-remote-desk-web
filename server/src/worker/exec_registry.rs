@@ -199,6 +199,10 @@ impl ExecRegistry {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+    )]
     pub fn attach_pty(
         &self,
         generation: &str,

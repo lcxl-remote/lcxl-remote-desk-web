@@ -1918,34 +1918,29 @@ async fn local_ice_candidate_forwarder_publishes_ice_candidate_to_outbound() {
 
     let mut ice_candidate_count = 0usize;
     let deadline = Duration::from_secs(5);
-    loop {
-        match timeout(deadline, outbound_rx.recv()).await {
-            Ok(Ok(text)) => {
-                let m: SignalingModel =
-                    serde_json::from_str(&text).expect("outbound text must be a SignalingModel");
-                if m.signaling_type != SignalingType::IceCandidate {
-                    continue;
-                }
-                assert_eq!(
-                    m.to_connection_id.as_deref(),
-                    Some("conn-trickle"),
-                    "IceCandidate must target the originating browser connection"
-                );
-                let wrapped: desk_signal_facade::model::remote_session::IceCandidatePayload = m
-                    .get_data()
-                    .expect("IceCandidate payload must carry its connection epoch");
-                assert_eq!(wrapped.connection_epoch, "epoch-trickle");
-                assert!(
-                    !wrapped.candidate.candidate.is_empty(),
-                    "forwarded candidate string must be non-empty"
-                );
-                ice_candidate_count += 1;
-                // Stop after the first one to keep the test fast;
-                // counting the rest only adds flakiness.
-                break;
-            }
-            _ => break,
+    while let Ok(Ok(text)) = timeout(deadline, outbound_rx.recv()).await {
+        let m: SignalingModel =
+            serde_json::from_str(&text).expect("outbound text must be a SignalingModel");
+        if m.signaling_type != SignalingType::IceCandidate {
+            continue;
         }
+        assert_eq!(
+            m.to_connection_id.as_deref(),
+            Some("conn-trickle"),
+            "IceCandidate must target the originating browser connection"
+        );
+        let wrapped: desk_signal_facade::model::remote_session::IceCandidatePayload = m
+            .get_data()
+            .expect("IceCandidate payload must carry its connection epoch");
+        assert_eq!(wrapped.connection_epoch, "epoch-trickle");
+        assert!(
+            !wrapped.candidate.candidate.is_empty(),
+            "forwarded candidate string must be non-empty"
+        );
+        ice_candidate_count += 1;
+        // Stop after the first one to keep the test fast;
+        // counting the rest only adds flakiness.
+        break;
     }
     assert!(
         ice_candidate_count >= 1,
@@ -2028,17 +2023,12 @@ async fn handle_request_remote_registers_ice_candidate_forwarder() {
 
     let mut got_canid = false;
     let deadline = Duration::from_secs(5);
-    loop {
-        match timeout(deadline, outbound_rx.recv()).await {
-            Ok(Ok(text)) => {
-                let m: SignalingModel = serde_json::from_str(&text).unwrap();
-                if m.signaling_type == SignalingType::IceCandidate {
-                    assert_eq!(m.to_connection_id.as_deref(), Some("conn-init-ice"));
-                    got_canid = true;
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Ok(text)) = timeout(deadline, outbound_rx.recv()).await {
+        let m: SignalingModel = serde_json::from_str(&text).unwrap();
+        if m.signaling_type == SignalingType::IceCandidate {
+            assert_eq!(m.to_connection_id.as_deref(), Some("conn-init-ice"));
+            got_canid = true;
+            break;
         }
     }
     assert!(
@@ -2909,9 +2899,11 @@ fn unknown_encoder_remains_an_invalid_offer_instead_of_a_video_block() {
 
 #[test]
 fn legacy_display_geometry_does_not_masquerade_as_capture_resolution() {
-    let mut settings = desk_signal_facade::model::desk_settings::DeskSettings::default();
-    settings.image_capture = Some("TEST".to_string());
-    settings.video_device_name = "display-1".to_string();
+    let settings = desk_signal_facade::model::desk_settings::DeskSettings {
+        image_capture: Some("TEST".to_string()),
+        video_device_name: "display-1".to_string(),
+        ..Default::default()
+    };
 
     let mut display = desk_signal_facade::model::image_capture::DisplayInfo {
         device_name: "display-1".to_string(),

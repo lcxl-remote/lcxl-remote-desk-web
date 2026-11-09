@@ -340,13 +340,13 @@ impl Drop for ExclusiveGuard {
                 p.into_inner().take()
             }
         };
-        if let Some(layout) = layout {
-            if let Err(e) = leave_exclusive(&layout) {
-                tracing::error!(
-                    "[virtual-display] ExclusiveGuard drop leave_exclusive failed: {e:?}; \
+        if let Some(layout) = layout
+            && let Err(e) = leave_exclusive(&layout)
+        {
+            tracing::error!(
+                "[virtual-display] ExclusiveGuard drop leave_exclusive failed: {e:?}; \
                      physical displays may stay detached until logoff/restart (transient CDS)"
-                );
-            }
+            );
         }
     }
 }
@@ -380,6 +380,7 @@ pub enum ExclusiveCommitEvent {
 /// in-flight runner with a new one; the old runner observes the
 /// cancel and returns silently without emitting a result. Only the surviving runner publishes a matching
 /// `op_id` result, which keeps the daemon's op_id gate simple.
+#[derive(Default)]
 pub struct ExclusiveCoordinator {
     cancel: Option<oneshot::Sender<()>>,
     runner: Option<JoinHandle<()>>,
@@ -390,17 +391,6 @@ pub struct ExclusiveCoordinator {
     /// without wiring up the consumer side.
     commit_tx: Option<mpsc::UnboundedSender<ExclusiveCommitEvent>>,
     topology_lock: Option<Arc<tokio::sync::Mutex<()>>>,
-}
-
-impl Default for ExclusiveCoordinator {
-    fn default() -> Self {
-        Self {
-            cancel: None,
-            runner: None,
-            commit_tx: None,
-            topology_lock: None,
-        }
-    }
 }
 
 impl ExclusiveCoordinator {
@@ -471,6 +461,10 @@ impl ExclusiveCoordinator {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 async fn run_exclusive_reconciler(
     op_id: u64,
     desired: bool,
@@ -777,7 +771,7 @@ async fn run_leave(
 ) {
     let slot_for_blocking = Arc::clone(&layout_slot);
     let leave_join = tokio::task::spawn_blocking(move || {
-        attempt_leave_with_fn(&slot_for_blocking, |l| leave_exclusive(l))
+        attempt_leave_with_fn(&slot_for_blocking, leave_exclusive)
     })
     .await;
     let outcome = match leave_join {

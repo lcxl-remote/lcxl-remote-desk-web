@@ -29,8 +29,9 @@ pub enum DeskError {
     AnyhowError(anyhow::Error),
     /// A join error occurred.
     TokioTaskJoinError(tokio::task::JoinError),
-    /// A tokio send error occurred.
-    TokioWebrtcSendError(tokio::sync::watch::error::SendError<WebRTConnectionState>),
+    /// A tokio send error occurred. Boxed because the unsent connection state
+    /// would otherwise make every `Result<_, DeskError>` large.
+    TokioWebrtcSendError(Box<tokio::sync::watch::error::SendError<WebRTConnectionState>>),
     /// An actix ws closed error occurred.
     ActixWsClosed(actix_ws::Closed),
     /// A awc json payload error occurred.
@@ -269,7 +270,7 @@ impl From<tokio::task::JoinError> for DeskError {
 
 impl From<tokio::sync::watch::error::SendError<WebRTConnectionState>> for DeskError {
     fn from(err: tokio::sync::watch::error::SendError<WebRTConnectionState>) -> Self {
-        DeskError::TokioWebrtcSendError(err)
+        DeskError::TokioWebrtcSendError(Box::new(err))
     }
 }
 

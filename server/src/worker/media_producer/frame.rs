@@ -114,6 +114,10 @@ pub(super) fn h264_walk_nals(nal_bytes: &[u8]) -> Vec<(u8, usize)> {
     nals
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) fn build_media_frame(
     connection_id: &str,
     connection_epoch: &str,

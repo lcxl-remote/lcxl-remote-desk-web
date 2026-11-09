@@ -395,9 +395,8 @@ fn reload_durable_artifacts(state: &mut StoreState) {
     };
     let now = Utc::now();
     for (token, record) in registry.artifacts {
-        if (record.object_kind != ObjectKind::Directory && record.expires_at.is_none())
-            || (record.object_kind != ObjectKind::Directory
-                && record.expires_at.is_some_and(|expiry| expiry <= now))
+        if (record.object_kind != ObjectKind::Directory
+            && record.expires_at.is_none_or(|expiry| expiry <= now))
             || !matches!(record.object_kind, ObjectKind::File | ObjectKind::Directory)
         {
             continue;

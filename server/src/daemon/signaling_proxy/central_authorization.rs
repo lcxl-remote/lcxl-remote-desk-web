@@ -77,6 +77,10 @@ pub(super) fn gate_optional_central_wrapper(
 /// pending entry resolves rather than hanging. Only a frame that cannot be
 /// correlated at all (no `request_id`) is dropped outright.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 pub(super) enum FleetExecGateOutcome {
     /// Validated: the unwrapped frame (data = inner `ExecPlan`) plus the
     /// validated authorization block to thread into the router handler.

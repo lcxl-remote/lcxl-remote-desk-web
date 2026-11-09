@@ -75,6 +75,7 @@ pub(super) fn compute_emit_duration_ns(
 ///     internal-GOP IDR that the encoder emits without any worker
 ///     rebuild (with the default GOP=120 this happens roughly every
 ///     2 s at 60 fps).
+///
 /// Pinned as a helper so the "encoder GOP IDR is also VideoI" contract
 /// is unit-testable independently of the surrounding async loop.
 #[inline]

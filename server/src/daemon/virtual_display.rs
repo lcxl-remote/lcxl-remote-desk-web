@@ -136,6 +136,10 @@ pub type DesiredComputerFn =
 /// `Send` carries the pre-built IPC plus the state pair needed for
 /// guarded rollback on send failure.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 enum ExclusiveAction {
     None,
     Send {
@@ -288,6 +292,7 @@ pub struct VirtualDisplaySupervisor {
     ///     (display only, not authoritative)
     ///   * The router's auto `ChangeDisplaySettings` path to fill in a
     ///     refresh value when the browser sends `refresh_hz=0`.
+    ///
     /// Survives detach/re-attach intentionally — operator manual tuning
     /// during the previous attach cycle should not be lost just because
     /// the IDD bounced.
@@ -1332,31 +1337,33 @@ impl VirtualDisplaySupervisor {
         // `on_exclusive_result` already scheduled the matching delayed
         // notify so the loop will revisit at the right time. Other
         // transitions ignore the gate — only the retry path uses it.
-        if matches!(current, ExclusiveState::Active) && !desired {
-            if let Some(retry_at) = inner.next_leave_at {
-                let now = Instant::now();
-                if now < retry_at {
-                    return ExclusiveAction::None;
-                }
-                // Backoff elapsed — clear the marker so the retry
-                // fires this round (count stays until a successful
-                // Left clears it via on_exclusive_result).
-                inner.next_leave_at = None;
+        if matches!(current, ExclusiveState::Active)
+            && !desired
+            && let Some(retry_at) = inner.next_leave_at
+        {
+            let now = Instant::now();
+            if now < retry_at {
+                return ExclusiveAction::None;
             }
+            // Backoff elapsed — clear the marker so the retry
+            // fires this round (count stays until a successful
+            // Left clears it via on_exclusive_result).
+            inner.next_leave_at = None;
         }
         // Use the same gate for the symmetric
         // `(Idle, desired=true) → Entering` retry path. Without it,
         // `apply_result_transition` puts EnterFailed back into Idle
         // and the reconciler immediately resends — producing the
         // infinite re-prompt loop.
-        if matches!(current, ExclusiveState::Idle) && desired {
-            if let Some(retry_at) = inner.next_enter_at {
-                let now = Instant::now();
-                if now < retry_at {
-                    return ExclusiveAction::None;
-                }
-                inner.next_enter_at = None;
+        if matches!(current, ExclusiveState::Idle)
+            && desired
+            && let Some(retry_at) = inner.next_enter_at
+        {
+            let now = Instant::now();
+            if now < retry_at {
+                return ExclusiveAction::None;
             }
+            inner.next_enter_at = None;
         }
         inner.current_op_id = inner.current_op_id.wrapping_add(1);
         let op_id = inner.current_op_id;
@@ -1409,8 +1416,8 @@ impl VirtualDisplaySupervisor {
         }
     }
 
-    /// One iteration of the driver loop. Repeats `prepare_next_action`
-    /// + send + backoff until either there is no work to do or the
+    /// One iteration of the driver loop. Repeats `prepare_next_action`,
+    /// send and backoff until either there is no work to do or the
     /// shutdown signal fires.
     async fn reconcile_once_with_retry(&self, shutdown_rx: &mut oneshot::Receiver<()>) {
         let mut backoff = MIN_BACKOFF;

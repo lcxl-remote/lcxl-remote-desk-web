@@ -689,6 +689,7 @@ fn dedup_capture_keys_collapses_duplicates() {
 ///      it does not consult the response variant at all — so the
 ///      handler can still pick out the WGC connection on the
 ///      attached display when the outcome is Failed.
+///
 /// Tested together so a future refactor that re-couples the two
 /// fails this test rather than silently regressing the fix.
 #[test]

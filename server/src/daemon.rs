@@ -403,7 +403,7 @@ pub async fn run_service_daemon_inner(
         supervisor.shutdown().await;
     }
     if let Some(physical) = pc_registry.physical_display_supervisor()
-        && !physical_display::restore_before_exclusive(&physical, &pc_registry, &worker_mgr, None)
+        && !physical_display::restore_before_exclusive(physical, &pc_registry, &worker_mgr, None)
             .await
     {
         log::warn!("[physical-display] graceful-shutdown restore was incomplete");

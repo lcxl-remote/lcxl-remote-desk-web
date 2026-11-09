@@ -73,10 +73,10 @@ fn run_loop(bound: &str, tx: UnboundedSender<String>) {
             return;
         }
 
-        if let Some(observed) = state.observe(bound, probe_input_desktop()) {
-            if tx.send(observed).is_err() {
-                return;
-            }
+        if let Some(observed) = state.observe(bound, probe_input_desktop())
+            && tx.send(observed).is_err()
+        {
+            return;
         }
     }
 }

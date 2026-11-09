@@ -235,6 +235,10 @@ fn mutate_text_with_hooks(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 fn mutate_text_managed(
     directory: &ObjectRef,
     target: &ObjectRef,

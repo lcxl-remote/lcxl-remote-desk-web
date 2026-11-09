@@ -172,7 +172,7 @@ fn tags(dict: &plist::Dictionary) -> Vec<String> {
         }
     }
     if ["WatchPaths", "QueueDirectories"].iter().any(|key| {
-        dict.get(*key)
+        dict.get(key)
             .and_then(plist::Value::as_array)
             .is_some_and(|a| !a.is_empty())
     }) {

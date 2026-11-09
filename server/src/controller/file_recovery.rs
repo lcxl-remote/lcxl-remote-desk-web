@@ -63,7 +63,7 @@ async fn local_operation<T: Send + 'static>(
         });
     }
     let root = settings.read().await.paths().data_root().to_path_buf();
-    Ok(tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         #[cfg(windows)]
         if !local_user.is_alive()
             || crate::file_recovery_service::platform_user::current()? != local_user.sid
@@ -86,7 +86,7 @@ async fn local_operation<T: Send + 'static>(
     .await?
     .map_err(|error| {
         DeskError::FileRecoveryFailure(crate::file_recovery_service::storage_failure(error))
-    })?)
+    })
 }
 #[utoipa::path(tag = "FileRecovery", summary = "List local OS user file backups",
     request_body = FileRecoveryPageBody,

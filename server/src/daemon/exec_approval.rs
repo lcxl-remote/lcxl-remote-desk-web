@@ -64,6 +64,10 @@ pub struct ConsumedApproval {
 }
 
 /// Result of attempting to consume a pending approval.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 pub enum TakeOutcome {
     /// Consumed and removed; ready to seal/execute or audit a rejection.
     Consumed(ConsumedApproval),
@@ -87,6 +91,10 @@ impl PendingApprovalStore {
 
     /// Park an executable draft and return its freshly minted
     /// [`ExecRequestId`]. Opportunistically evicts expired entries.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+    )]
     pub fn insert(
         &self,
         input: ExecInput,
@@ -150,6 +158,11 @@ impl PendingApprovalStore {
             session_grant_template: pending.session_grant_template,
             source_request_id: pending.source_request_id,
         })
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     #[cfg(test)]

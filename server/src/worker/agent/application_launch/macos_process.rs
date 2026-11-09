@@ -69,6 +69,10 @@ fn error_diagnostic(error: *mut AnyObject) -> NativeDiagnostic {
     )
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "platform launch error carries its full diagnostic; boxing would change every caller"
+)]
 pub(crate) fn resolve(
     request: &LaunchApplicationRequest,
 ) -> Result<desk_agent_protocol::application_launch::ResolvedApplicationIdentity, LaunchError> {
@@ -147,6 +151,10 @@ pub(crate) fn resolve(
 }
 
 /// This preflight is independent of catalog lookup and executes no application.
+#[allow(
+    clippy::result_large_err,
+    reason = "platform launch error carries its full diagnostic; boxing would change every caller"
+)]
 pub(crate) fn preflight(request: &LaunchApplicationRequest) -> Result<(), LaunchError> {
     request
         .validate()

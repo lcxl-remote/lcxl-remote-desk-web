@@ -1210,9 +1210,9 @@ fn emit_computer_action_rejected(ctx: &RouterContext, model: &SignalingModel, me
             "Invalid sealed Computer Action plan",
         ),
     };
-    if let Ok(reply) = reply {
-        if let Ok(text) = serde_json::to_string(&reply) {
-            let _ = ctx.outbound_tx.send(text);
-        }
+    if let Ok(reply) = reply
+        && let Ok(text) = serde_json::to_string(&reply)
+    {
+        let _ = ctx.outbound_tx.send(text);
     }
 }

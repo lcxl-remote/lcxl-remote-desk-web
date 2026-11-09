@@ -104,33 +104,11 @@ async fn list_files_at_path(query_list: FileListParams) -> Result<FileListRespon
     let mut file_info_list = vec![];
     if query_list.page_no == 1 {
         //get parent dir
-        match path.parent() {
-            Some(parent_dir) => {
-                let mut parent_file_info = FileInfo::new(parent_dir.to_path_buf())?;
-                parent_file_info.name = "..".to_string();
-                // add parent dir to list
-                file_info_list.push(parent_file_info);
-            }
-            None => {
-                #[cfg(target_os = "windows")]
-                {
-                    use chrono::{Local, TimeZone};
-                    let fake_root_dir = FileInfo {
-                        name: "..".to_string(),
-                        path: "".to_string(),
-                        size: 0,
-                        is_dir: true,
-                        is_file: false,
-                        is_symlink: false,
-                        permissions: 0,
-                        accessed: Local.timestamp_opt(0, 0).unwrap(),
-                        created: Local.timestamp_opt(0, 0).unwrap(),
-                        modified: Local.timestamp_opt(0, 0).unwrap(),
-                        err_msg: None,
-                    };
-                    file_info_list.push(fake_root_dir);
-                }
-            }
+        if let Some(parent_dir) = path.parent() {
+            let mut parent_file_info = FileInfo::new(parent_dir.to_path_buf())?;
+            parent_file_info.name = "..".to_string();
+            // add parent dir to list
+            file_info_list.push(parent_file_info);
         }
     }
 

@@ -190,10 +190,10 @@ impl QuotaClient {
         .map(|_| ())
     }
     pub(crate) fn complete(&self, reply: FileRecoveryQuotaReply) {
-        if let Ok(mut pending) = self.pending.lock() {
-            if let Some(sender) = pending.remove(&reply.request_id) {
-                let _ = sender.send(reply.outcome);
-            }
+        if let Ok(mut pending) = self.pending.lock()
+            && let Some(sender) = pending.remove(&reply.request_id)
+        {
+            let _ = sender.send(reply.outcome);
         }
     }
 }

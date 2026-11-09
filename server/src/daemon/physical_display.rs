@@ -345,9 +345,7 @@ impl PhysicalDisplaySupervisor {
         response: &PhysicalDisplayModeResponsePayload,
     ) -> Option<bool> {
         let mut state = self.state.lock().await;
-        let Some((id, pending)) = state.pending.take() else {
-            return None;
-        };
+        let (id, pending) = state.pending.take()?;
         if id != response.operation_id
             || pending.request_id != response.request_id
             || pending.connection_epoch != response.connection_epoch

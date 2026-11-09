@@ -241,6 +241,10 @@ fn project_terminal_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&plain).into_owned()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub async fn execute_pty_plan_cancellable(
     plan: &ExecPlan,
     exec_pty_enabled: bool,

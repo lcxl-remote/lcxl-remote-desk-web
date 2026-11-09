@@ -981,18 +981,35 @@ impl MediaProducer {
                 self.update_settings(settings);
                 MediaSettingsApplyOutcome::Accepted
             }
-            MediaSettingsAction::Start { settings, .. } if guard_matches => self
-                .start_or_restart_media_slot(&command.connection_id, command.media_kind, settings)
-                .then_some(MediaSettingsApplyOutcome::Accepted)
-                .unwrap_or(MediaSettingsApplyOutcome::Failed),
-            MediaSettingsAction::Stop { .. } if guard_matches => self
-                .stop_media_slot(&command.connection_id, command.media_kind)
-                .then_some(MediaSettingsApplyOutcome::Accepted)
-                .unwrap_or(MediaSettingsApplyOutcome::Failed),
-            MediaSettingsAction::Restart { settings, .. } if guard_matches => self
-                .start_or_restart_media_slot(&command.connection_id, command.media_kind, settings)
-                .then_some(MediaSettingsApplyOutcome::Accepted)
-                .unwrap_or(MediaSettingsApplyOutcome::Failed),
+            MediaSettingsAction::Start { settings, .. } if guard_matches => {
+                if self.start_or_restart_media_slot(
+                    &command.connection_id,
+                    command.media_kind,
+                    settings,
+                ) {
+                    MediaSettingsApplyOutcome::Accepted
+                } else {
+                    MediaSettingsApplyOutcome::Failed
+                }
+            }
+            MediaSettingsAction::Stop { .. } if guard_matches => {
+                if self.stop_media_slot(&command.connection_id, command.media_kind) {
+                    MediaSettingsApplyOutcome::Accepted
+                } else {
+                    MediaSettingsApplyOutcome::Failed
+                }
+            }
+            MediaSettingsAction::Restart { settings, .. } if guard_matches => {
+                if self.start_or_restart_media_slot(
+                    &command.connection_id,
+                    command.media_kind,
+                    settings,
+                ) {
+                    MediaSettingsApplyOutcome::Accepted
+                } else {
+                    MediaSettingsApplyOutcome::Failed
+                }
+            }
             _ => MediaSettingsApplyOutcome::GenerationMismatch,
         };
         let _ = self.error_tx.send(WorkerToService::MediaSettingsApplied(

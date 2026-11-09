@@ -183,8 +183,10 @@ async fn get_mdns_conn() -> Result<std::sync::Arc<DnsConn>, webrtc_mdns::Error> 
         return Ok(conn.clone());
     }
 
-    let mut cfg = MdnsConfig::default();
-    cfg.query_interval = Duration::from_millis(200);
+    let cfg = MdnsConfig {
+        query_interval: Duration::from_millis(200),
+        ..Default::default()
+    };
 
     // Bind to an ephemeral port to avoid conflicts with any existing mDNS listener.
     let conn = DnsConn::server("0.0.0.0:0".parse().expect("valid mdns bind"), cfg)?;

@@ -19,6 +19,10 @@ pub(super) fn local_loopback_source(mode: &StartupMode) -> InboundSignalingSourc
 }
 
 /// Outcome of the source-gated authorization check for one inbound frame.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 pub(super) enum AuthzGateOutcome {
     /// Forward this (possibly unwrapped) model to the router, carrying the
     /// validated authorization block when the frame arrived wrapped from the
@@ -124,6 +128,10 @@ pub(super) fn gate_authz_frame(
 }
 
 /// Outcome of the source-gated capability-ceiling check for a `RequestRemoteAccess`.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per message; boxing variants would change matches on every platform"
+)]
 pub(super) enum RequestRemoteGateOutcome {
     /// Forward this (possibly unwrapped) model to the router, carrying the
     /// validated capability-ceiling stamp when the request arrived wrapped from

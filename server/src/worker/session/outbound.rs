@@ -4,12 +4,12 @@ use super::*;
 /// Returns the hub and, when running in Forwarder mode, the spec needed for the
 /// caller to spawn the ws-client task. Split out from `ipc_loop` so the
 /// decision can be unit-tested without an actix runtime.
+/// Upstream forwarder with its URL and token, when the worker forwards upstream.
+type UpstreamParts = Option<(Arc<UpstreamForwarder>, String, String)>;
+
 pub(super) fn build_hub_from_init(
     payload: &WorkerInitPayload,
-) -> (
-    Arc<HostControlHub>,
-    Option<(Arc<UpstreamForwarder>, String, String)>,
-) {
+) -> (Arc<HostControlHub>, UpstreamParts) {
     match payload.host_upstream_url.clone() {
         Some(url) => {
             let upstream = UpstreamForwarder::new();

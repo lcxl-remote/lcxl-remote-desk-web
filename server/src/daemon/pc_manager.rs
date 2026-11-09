@@ -1700,8 +1700,8 @@ impl PcRegistry {
             // still accept worker-bound capability frames. Fail-closed: if the
             // ceiling cannot reach the new worker we tear the connection down rather
             // than resume it uncapped (mirrors the admit path at `handle_request_remote`).
-            if let Some(Admission::Capped(ceiling)) = admission.as_ref() {
-                if let Err(e) = worker_mgr
+            if let Some(Admission::Capped(ceiling)) = admission.as_ref()
+                && let Err(e) = worker_mgr
                     .send_to_connection_worker(
                         &id,
                         ServiceToWorker::SetConnectionCeiling(
@@ -1712,21 +1712,20 @@ impl PcRegistry {
                         ),
                     )
                     .await
-                {
-                    log::warn!(
-                        "[pc_manager] resume: ceiling re-registration for capped session {id} \
+            {
+                log::warn!(
+                    "[pc_manager] resume: ceiling re-registration for capped session {id} \
                          failed ({e}); tearing down to avoid running uncapped"
-                    );
-                    cleanup_pc(
-                        self,
-                        worker_mgr,
-                        virtual_display,
-                        &id,
-                        "resume: ceiling re-registration failed",
-                    )
-                    .await;
-                    continue;
-                }
+                );
+                cleanup_pc(
+                    self,
+                    worker_mgr,
+                    virtual_display,
+                    &id,
+                    "resume: ceiling re-registration failed",
+                )
+                .await;
+                continue;
             }
             let payload = match self.prepare_fresh_recovery_payload(&id).await {
                 Ok(Some(payload)) => payload,
@@ -1893,6 +1892,10 @@ impl PcRegistry {
 
     /// Apply encoder-relevant live settings to exactly one admitted
     /// connection. Session settings are never broadcast to sibling browsers.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+    )]
     pub async fn update_media_settings_for_connection(
         &self,
         worker_mgr: &WorkerManager,

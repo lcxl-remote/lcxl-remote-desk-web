@@ -245,6 +245,10 @@ pub(super) fn collect_application_with_window_scope(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) fn collect_application_selection(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -274,6 +278,10 @@ pub(super) fn collect_application_selection(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 fn collect_application_selection_inner(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -1022,6 +1030,10 @@ fn element_identity(element: AxUiElementRef, config: &WalkConfig) -> Result<Stri
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 fn walk(
     element: AxUiElementRef,
     parent: Option<(Option<u32>, String)>,
@@ -2730,16 +2742,16 @@ pub(super) fn background_target(
                 if current.same_element(&window) {
                     break;
                 }
-                if attribute_string(current.0, "AXRole").as_deref() == Some("AXScrollArea") {
-                    if let (Some(p), Some(s)) = (
+                if attribute_string(current.0, "AXRole").as_deref() == Some("AXScrollArea")
+                    && let (Some(p), Some(s)) = (
                         attribute_point(current.0, "AXPosition"),
                         attribute_size(current.0, "AXSize"),
-                    ) {
-                        left = left.max(p.x);
-                        top = top.max(p.y);
-                        right = right.min(p.x + s.width);
-                        bottom = bottom.min(p.y + s.height);
-                    }
+                    )
+                {
+                    left = left.max(p.x);
+                    top = top.max(p.y);
+                    right = right.min(p.x + s.width);
+                    bottom = bottom.min(p.y + s.height);
                 }
                 parent = copy_attribute(current.0, "AXParent");
             }
@@ -2797,10 +2809,9 @@ pub(super) fn background_target(
                 && name
                     .as_ref()
                     .is_none_or(|name| name.is_empty() || name == &title)
+                && let Some(id) = number("kCGWindowNumber")
             {
-                if let Some(id) = number("kCGWindowNumber") {
-                    candidates.push(id as u32);
-                }
+                candidates.push(id as u32);
             }
         }
         if candidates.len() != 1 {

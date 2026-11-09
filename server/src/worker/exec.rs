@@ -515,10 +515,10 @@ fn finalize(text: String, cap: usize, overflowed: bool) -> (String, bool) {
         end -= 1;
     }
     let mut out = text[..end].to_string();
-    if end < text.len() {
-        if let Some(pos) = out.rfind(char::is_whitespace) {
-            out.truncate(pos);
-        }
+    if end < text.len()
+        && let Some(pos) = out.rfind(char::is_whitespace)
+    {
+        out.truncate(pos);
     }
     (out, true)
 }

@@ -49,6 +49,10 @@ fn should_emit_cursor(
 /// frames when its own quality knob asks for a lower rate. Heartbeat-
 /// frame behaviour: on a static desktop emit one cached frame per
 /// second so the receiver does not stall.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) async fn video_pipeline_loop(
     base_settings: DeskSettings,
     payload: StartMediaPayload,
@@ -868,6 +872,10 @@ pub(super) fn report_dimension_blocked(
     ));
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) fn report_prepare_failed(
     video_state: &AtomicU8,
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
@@ -901,6 +909,10 @@ pub(super) fn report_prepare_failed(
     ));
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "explicit per-call inputs shared by platform backends; grouping them is a separate refactor"
+)]
 pub(super) fn report_runtime_failed(
     video_state: &AtomicU8,
     error_tx: &mpsc::UnboundedSender<WorkerToService>,
