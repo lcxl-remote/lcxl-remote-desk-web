@@ -47,7 +47,8 @@ describe('durable owner stop', () => {
             question: 'Summarize this question', conversation_id: expect.any(String),
             selected_capability_ids: [], selected_attachment_ids: [], start_goal: false,
         }), undefined, expect.any(String));
-        expect(JSON.parse(JSON.stringify(sendMessage.mock.calls[0][1]))).not.toHaveProperty('temporary_conversation');
+        // Personal entry carries the explicit conversation mode, so a temporary chat can start there too.
+        expect(sendMessage.mock.calls[0][1]).toHaveProperty('temporary_conversation', false);
         expect(localStorage.getItem('ai-assistant-conversation:personal:7')).toBe(result.current.conversationId);
     });
 

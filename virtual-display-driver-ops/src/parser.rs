@@ -99,11 +99,10 @@ fn field_value(after_key: &str) -> Option<String> {
     }
 }
 
+/// Driver paths are Windows paths; split on both separators so parsing does
+/// not depend on the host platform's path rules.
 fn matches_inf(orig: &str) -> bool {
-    let basename = std::path::Path::new(orig)
-        .file_name()
-        .and_then(|os| os.to_str())
-        .unwrap_or("");
+    let basename = orig.rsplit(['\\', '/']).next().unwrap_or("");
     basename.eq_ignore_ascii_case(crate::DRIVER_INF_BASENAME)
 }
 

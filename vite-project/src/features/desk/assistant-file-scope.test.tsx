@@ -31,7 +31,7 @@ describe('conversation directories', () => {
         expect(button.getAttribute('type')).toBe('button');
         fireEvent.click(button);
         fireEvent.click(screen.getByText("choose"));
-        expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.aiAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.aiAssistant.directories.timeout');
+        expect(update).toHaveBeenCalledWith({ kind: 'select_directory', path: '/private/tmp/a directory ', purpose: 'pages.aiAssistant.directories.manualPurpose', expected_revision: 7 }, 'pages.aiAssistant.directories.timeout', 'device');
     });
 
     it('blocks unresolved targets and closes the picker when target readiness is lost', () => {

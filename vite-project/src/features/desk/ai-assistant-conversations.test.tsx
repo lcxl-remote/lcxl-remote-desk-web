@@ -135,7 +135,10 @@ it('restores the server selection in the same conversation on another client', a
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Compare these devices' } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(signaling.sendMessage).toHaveBeenCalledExactlyOnceWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+    // Capability lookups for the selected devices are separate requests; exactly one ask is sent.
+    const asks = vi.mocked(signaling.sendMessage).mock.calls
+        .filter(([type]) => type === SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT);
+    expect(asks).toEqual([[SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
         expect.objectContaining({ question: 'Compare these devices', target_refs: ['mac-ref'] }),
-        undefined, expect.any(String));
+        undefined, expect.any(String)]]);
 });

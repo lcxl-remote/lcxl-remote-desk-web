@@ -18,4 +18,11 @@ fn main() {
     if supported {
         println!("cargo::rustc-cfg=av1_supported");
     }
+    // The macOS capture backend links the Swift bridge of `screencapturekit` /
+    // `apple-cf`, which needs `@rpath/libswift_Concurrency.dylib`. Their rpath
+    // does not propagate to this package's own test binaries, so add the system
+    // Swift runtime path here (same as `server/build.rs`).
+    if os == "macos" {
+        println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
 }

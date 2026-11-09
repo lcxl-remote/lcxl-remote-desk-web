@@ -231,7 +231,7 @@ describe('independent OSS approval model configuration', () => {
         expect(h.test).toHaveBeenCalledOnce();
         expect(h.update).not.toHaveBeenCalled();
         expect(screen.getByRole('switch', { name: 'Enable approval model' })).not.toBeChecked();
-        expect(screen.queryByText('Ready. Automatic approval can be enabled separately in each conversation.')).toBeNull();
+        expect(screen.queryByText('Ready. Eligible requests in conversations using AI review will be reviewed automatically.')).toBeNull();
     });
 
     it('saves one runtime budget before testing and never submits an independent probe budget', async () => {
@@ -285,7 +285,7 @@ describe('independent OSS approval model configuration', () => {
         await open();
         fireEvent.click(screen.getByRole('switch', { name: 'Enable approval model' }));
         await save();
-        await screen.findByText('Ready. Automatic approval can be enabled separately in each conversation.');
+        await screen.findByText('Ready. Eligible requests in conversations using AI review will be reviewed automatically.');
         await expectToast('Open + → AI approval in an AI Assistant conversation');
         expect(screen.getByRole('switch', { name: 'Enable approval model' })).toBeChecked();
         expect(h.test).not.toHaveBeenCalled();
@@ -350,7 +350,7 @@ describe('independent OSS approval model configuration', () => {
         await open();
         config = { ...config, available: true, unavailable_reason: null };
         fireEvent.click(screen.getByRole('button', { name: 'Test approval model' }));
-        await screen.findByText('Ready. Automatic approval can be enabled separately in each conversation.');
+        await screen.findByText('Ready. Eligible requests in conversations using AI review will be reviewed automatically.');
         await expectToast('Passed 2 approval checks in 120 ms; 2 calls, 0 format corrections.');
         expect(h.get).toHaveBeenCalledTimes(2);
     });
@@ -391,7 +391,7 @@ describe('independent OSS approval model configuration', () => {
         await expectToast('wrong probe verdict');
         expect(screen.getByRole('button', { name: 'Test approval model' })).toBeEnabled();
         expect(screen.getByRole('switch', { name: 'Enable approval model' })).toBeChecked();
-        expect(screen.getByText('Ready. Automatic approval can be enabled separately in each conversation.')).toBeInTheDocument();
+        expect(screen.getByText('Ready. Eligible requests in conversations using AI review will be reviewed automatically.')).toBeInTheDocument();
         expect(screen.getByText(/Testing is optional. Missing or failed tests do not block automatic approval/)).toBeInTheDocument();
         expect(h.update).not.toHaveBeenCalled();
     });
