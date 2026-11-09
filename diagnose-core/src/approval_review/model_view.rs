@@ -20,8 +20,30 @@ struct ReviewModelContext<'a> {
     goal_text: &'a Option<String>,
     current_authority: ReviewAuthority,
     skipped_call_count: usize,
-    evidence: &'a [ApprovalEvidence],
+    evidence: Vec<ReviewEvidence<'a>>,
     omitted_evidence_count: usize,
+}
+
+/// Evidence as the reviewer sees it: event ids are call-local numbers
+/// (`ev1`, `ev2`, ...) assigned by position, restored by [`evidence_event_id`].
+#[derive(Serialize)]
+struct ReviewEvidence<'a> {
+    event_id: String,
+    trust: ApprovalEvidenceTrust,
+    text: &'a str,
+}
+
+const EVIDENCE_NUMBER_PREFIX: &str = "ev";
+
+/// Restores one reviewer-cited evidence number to its native event id. Values
+/// that are not a supplied number stay as given and fail reference validation.
+pub(super) fn evidence_event_id(candidate: &ApprovalReviewCandidate, cited: String) -> String {
+    cited
+        .strip_prefix(EVIDENCE_NUMBER_PREFIX)
+        .filter(|digits| !digits.starts_with('0'))
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .and_then(|number| candidate.context.evidence.get(number.checked_sub(1)?))
+        .map_or(cited, |evidence| evidence.event_id.clone())
 }
 
 #[derive(Serialize)]
@@ -175,7 +197,17 @@ impl<'a> ReviewModelView<'a> {
                     status: authority.status,
                 },
                 skipped_call_count: candidate.context.skipped_calls.len(),
-                evidence: &candidate.context.evidence,
+                evidence: candidate
+                    .context
+                    .evidence
+                    .iter()
+                    .enumerate()
+                    .map(|(index, evidence)| ReviewEvidence {
+                        event_id: format!("{EVIDENCE_NUMBER_PREFIX}{}", index + 1),
+                        trust: evidence.trust,
+                        text: &evidence.text,
+                    })
+                    .collect(),
                 omitted_evidence_count: candidate.context.omitted_evidence_count,
             },
         })

@@ -139,7 +139,11 @@ pub fn parse_decision_diagnosed(
         verdict: model.verdict,
         reason_code: model.reason_code,
         reason: model.reason,
-        evidence_event_ids: model.evidence_event_ids,
+        evidence_event_ids: model
+            .evidence_event_ids
+            .into_iter()
+            .map(|cited| super::model_view::evidence_event_id(candidate, cited))
+            .collect(),
     };
     decision
         .validate_for(candidate)

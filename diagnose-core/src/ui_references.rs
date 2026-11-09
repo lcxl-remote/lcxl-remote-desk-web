@@ -78,6 +78,28 @@ fn invalid(message: &str) -> AgentError {
     }
 }
 
+/// The single alias prefix for each UI and document object kind.
+pub(crate) fn object_kind_prefix(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::DesktopSession => "s",
+        ObjectKind::Application => "a",
+        ObjectKind::Window => "w",
+        ObjectKind::UiElement => "e",
+        ObjectKind::DesktopOutput => "o",
+        ObjectKind::OfficeDocument | ObjectKind::Document => "doc",
+        ObjectKind::Worksheet => "ws",
+        ObjectKind::Range => "r",
+        ObjectKind::Presentation => "pr",
+        ObjectKind::Slide => "sl",
+        ObjectKind::Shape => "sh",
+        ObjectKind::File => "f",
+        ObjectKind::Directory => "d",
+        ObjectKind::TerminalOutput => "term",
+        ObjectKind::BrowserSurface => "bs",
+        ObjectKind::ApplicationLaunchTarget => "al",
+    }
+}
+
 fn native_reference(value: &Value) -> Option<(&'static str, String)> {
     if value.get("token").is_some()
         && value.get("object_kind").is_some()
@@ -85,26 +107,7 @@ fn native_reference(value: &Value) -> Option<(&'static str, String)> {
         && value.get("expires_at").is_some()
         && let Ok(reference) = serde_json::from_value::<ObjectRef>(value.clone())
     {
-        let prefix = match reference.object_kind {
-            ObjectKind::DesktopSession => "s",
-            ObjectKind::Application => "a",
-            ObjectKind::Window => "w",
-            ObjectKind::UiElement => "e",
-            ObjectKind::DesktopOutput => "o",
-            ObjectKind::OfficeDocument => "doc",
-            ObjectKind::Document => "doc",
-            ObjectKind::Worksheet => "ws",
-            ObjectKind::Range => "r",
-            ObjectKind::Presentation => "pr",
-            ObjectKind::Slide => "sl",
-            ObjectKind::Shape => "sh",
-            ObjectKind::File => "f",
-            ObjectKind::Directory => "d",
-            ObjectKind::TerminalOutput => "term",
-            ObjectKind::BrowserSurface => "bs",
-            ObjectKind::ApplicationLaunchTarget => "al",
-        };
-        return Some((prefix, reference.token));
+        return Some((object_kind_prefix(reference.object_kind), reference.token));
     }
     if value.get("adapter").is_some()
         && value.get("page_incarnation").is_some()
@@ -625,7 +628,9 @@ impl UiReferenceState {
     {
         let mut request = request.clone();
         for id in &mut request.conversation_ids {
-            if id.starts_with("cv") {
+            if id.strip_prefix("cv").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            }) {
                 let mut value = Value::String(id.clone());
                 self.expand_id(&mut value, &["cv"], &mut Vec::new())?;
                 *id = value.as_str().expect("expanded conversation ID").into();
@@ -1096,25 +1101,10 @@ impl UiReferenceState {
         match value {
             Value::Object(object) => {
                 // Reference-only result fields, never arbitrary strings or IDs.
-                let prefix = match object.get("kind").and_then(Value::as_str) {
-                    Some("desktop_session") => Some("s"),
-                    Some("application") => Some("a"),
-                    Some("window") => Some("w"),
-                    Some("ui_element") => Some("e"),
-                    Some("desktop_output") => Some("o"),
-                    Some("office_document" | "document") => Some("doc"),
-                    Some("worksheet") => Some("ws"),
-                    Some("range") => Some("r"),
-                    Some("presentation") => Some("pr"),
-                    Some("slide") => Some("sl"),
-                    Some("shape") => Some("sh"),
-                    Some("file") => Some("f"),
-                    Some("directory") => Some("d"),
-                    Some("terminal_output") => Some("term"),
-                    Some("browser_surface") => Some("bs"),
-                    Some("application_launch_target") => Some("al"),
-                    _ => None,
-                };
+                let prefix = object
+                    .get("kind")
+                    .and_then(|kind| ObjectKind::deserialize(kind).ok())
+                    .map(object_kind_prefix);
                 if let Some(prefix) = prefix
                     && let Some(native) = object.get("id").and_then(Value::as_str)
                     && let Some(alias) = self.alias(prefix, native, source)
