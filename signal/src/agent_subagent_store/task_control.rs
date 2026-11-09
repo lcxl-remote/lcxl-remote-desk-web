@@ -177,6 +177,7 @@ pub(crate) async fn apply_task_control_from_turn_on(
                     reference.id == call.id
                         && reference.name == call.name
                         && desk_diagnose_core::subagent::tools::same_arguments(
+                            &parent.ui_references,
                             &call.name,
                             &reference.arguments_json,
                             &call.arguments_json,

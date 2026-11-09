@@ -47,7 +47,7 @@ pub fn receipt(
                 && message.turn_id == session.current_turn_id
                 && matches!(message.tool_calls.as_slice(), [reference] if
                     reference.id == call.id && reference.name == super::tools::WAIT_DEVICE
-                    && super::tools::same_arguments(&call.name, &reference.arguments_json, &call.arguments_json))
+                    && super::tools::same_arguments(&session.ui_references, &call.name, &reference.arguments_json, &call.arguments_json))
         })
         .and_then(|message| message.data_envelope.as_ref())
         .ok_or_else(invalid_receipt)?;

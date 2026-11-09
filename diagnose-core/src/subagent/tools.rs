@@ -34,8 +34,16 @@ pub const WAIT_REPORTS: &str = "wait_subagent_reports";
 pub const CANCEL: &str = "cancel_subagent_request";
 pub const ADJUST: &str = "adjust_subagent_request";
 
-/// Compare native selectors and server-owned defaults without alias lookup.
-pub fn same_arguments(tool: &str, original: &str, resolved: &str) -> bool {
+/// Compare a recorded call with its resolved form after expanding selector
+/// aliases on both sides with `references`, the issuing session's alias table,
+/// and filling server-owned defaults. Native ids pass through unchanged; an
+/// alias that no longer expands never matches.
+pub fn same_arguments(
+    references: &crate::ui_references::UiReferenceState,
+    tool: &str,
+    original: &str,
+    resolved: &str,
+) -> bool {
     if effect(tool).is_none() && tool != crate::schedule::management_tools::CANCEL {
         return false;
     }
@@ -44,6 +52,11 @@ pub fn same_arguments(tool: &str, original: &str, resolved: &str) -> bool {
         serde_json::from_str::<serde_json::Value>(resolved),
     ) {
         (Ok(mut original), Ok(mut resolved)) if original.is_object() && resolved.is_object() => {
+            if references.expand_selector_ids(&mut original).is_err()
+                || references.expand_selector_ids(&mut resolved).is_err()
+            {
+                return false;
+            }
             crate::model_input::fill_versions(tool, &mut original);
             crate::model_input::fill_versions(tool, &mut resolved);
             original == resolved
@@ -60,6 +73,7 @@ mod argument_tests {
     fn defaults_match_without_accepting_changed_or_unknown_arguments() {
         let original = r#"{"request_id":"task"}"#;
         assert!(same_arguments(
+            &Default::default(),
             REPORTS,
             original,
             r#"{"request_id":"task","after_seq":0}"#
@@ -69,19 +83,40 @@ mod argument_tests {
             r#"{"request_id":"other","after_seq":0}"#,
             r#"{"request_id":"task","extra":false}"#,
         ] {
-            assert!(!same_arguments(REPORTS, original, changed));
+            assert!(!same_arguments(
+                &Default::default(),
+                REPORTS,
+                original,
+                changed
+            ));
         }
-        assert!(same_arguments(LIST, "{}", "{}"));
-        assert!(!same_arguments(LIST, "{}", r#"{"limit":10}"#));
-        assert!(!same_arguments(LIST, "{}", r#"{"limit":11}"#));
+        assert!(same_arguments(&Default::default(), LIST, "{}", "{}"));
         assert!(!same_arguments(
+            &Default::default(),
+            LIST,
+            "{}",
+            r#"{"limit":10}"#
+        ));
+        assert!(!same_arguments(
+            &Default::default(),
+            LIST,
+            "{}",
+            r#"{"limit":11}"#
+        ));
+        assert!(!same_arguments(
+            &Default::default(),
             STATUS,
             r#"{"task_id":"task"}"#,
             r#"{"task_id":"task","limit":10}"#
         ));
-        assert!(!same_arguments("unknown", "{}", "{}"));
-        assert!(!same_arguments(LIST, "[]", "[]"));
-        assert!(!same_arguments(REPORTS, "invalid", original));
+        assert!(!same_arguments(&Default::default(), "unknown", "{}", "{}"));
+        assert!(!same_arguments(&Default::default(), LIST, "[]", "[]"));
+        assert!(!same_arguments(
+            &Default::default(),
+            REPORTS,
+            "invalid",
+            original
+        ));
     }
 }
 

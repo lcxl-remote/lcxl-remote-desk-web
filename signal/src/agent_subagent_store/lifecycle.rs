@@ -317,6 +317,7 @@ impl SubAgentStore {
                         reference.id == call.id
                             && reference.name == call.name
                             && tools::same_arguments(
+                                &current.ui_references,
                                 &call.name,
                                 &reference.arguments_json,
                                 &call.arguments_json,

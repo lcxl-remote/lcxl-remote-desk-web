@@ -280,7 +280,7 @@ pub(super) async fn committed_call(
         let mut binding =
             desk_diagnose_core::model_controls::FrozenModelControls::capture(parent, &[projection]);
         binding.retain_exported(Some(&output), Some(&policy.export_authorization_id));
-        binding.retain_called_targets(&turn.tool_calls);
+        binding.retain_called_targets(&parent.ui_references, &turn.tool_calls);
         message.model_controls = Some(Box::new(binding));
         message.data_envelope = Some(output.clone());
         super::observation::record_accepted_provider(
@@ -645,13 +645,16 @@ async fn projection_after_new_input_keeps_old_tasks_opaque_and_active_tasks_visi
 
 #[tokio::test]
 async fn short_task_ids_keep_query_wait_and_control_call_authority() {
-    for tool in [
+    for (tool, aliased) in [
         tools::STATUS,
         tools::REPORTS,
         tools::WAIT_REPORTS,
         tools::CANCEL,
         tools::ADJUST,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|tool| [(tool, false), (tool, true)])
+    {
         let db = database().await;
         let (mut parent, calls) = super::creation::runnable_parent_with_source(
             &db,
@@ -677,17 +680,40 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
         if matches!(tool, tools::REPORTS | tools::WAIT_REPORTS) {
             complete_child(&db, &native).await;
         }
+        // The model copies the alias shown in the projected spawn result.
+        let selected = if aliased {
+            let mut request = desk_diagnose_core::seam::ModelRequest::text_only(
+                parent.conversation.clone(),
+                desk_diagnose_core::prompt::ResponseFormatSpec::None,
+            );
+            request.ui_references = Some(parent.ui_references.clone());
+            let projected = desk_diagnose_core::ui_model_ids::project_request(&request);
+            let spawned = projected
+                .messages
+                .iter()
+                .find(|message| message.message_id == "spawn-result")
+                .unwrap();
+            let alias =
+                serde_json::from_str::<serde_json::Value>(&spawned.text).unwrap()["task_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            assert!(alias.starts_with("task") && alias != native, "{alias}");
+            alias
+        } else {
+            native.clone()
+        };
         let arguments = match tool {
             tools::WAIT_REPORTS => {
-                serde_json::json!({"requests":[{"request_id":native,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"})
+                serde_json::json!({"requests":[{"request_id":selected,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"})
             }
             tools::REPORTS | tools::CANCEL => {
-                serde_json::json!({"request_id":native})
+                serde_json::json!({"request_id":selected})
             }
             tools::ADJUST => {
-                serde_json::json!({"request_id":native,"message":"Check one additional symptom"})
+                serde_json::json!({"request_id":selected,"message":"Check one additional symptom"})
             }
-            _ => serde_json::json!({"task_id":native}),
+            _ => serde_json::json!({"task_id":selected}),
         };
         let original = committed_call(&db, &mut parent, "short-call", tool, arguments).await;
         let resolved = desk_diagnose_core::ui_model_ids::resolve_session_call_with_context(

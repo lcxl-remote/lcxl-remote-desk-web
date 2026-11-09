@@ -8,6 +8,8 @@ use desk_agent_protocol::AgentError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::ui_references::UiReferenceState;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObservation {
     pub id: String,
@@ -219,11 +221,12 @@ impl FrozenModelControls {
         });
     }
 
-    pub fn retain_called_targets(&mut self, calls: &[ToolCall]) {
+    /// `references` is the alias table of the session that issued `calls`.
+    pub fn retain_called_targets(&mut self, references: &UiReferenceState, calls: &[ToolCall]) {
         let targets = calls
             .iter()
             .filter(|call| is_control(&call.name))
-            .flat_map(control_targets)
+            .flat_map(|call| control_targets(references, call))
             .collect::<Vec<_>>();
         self.observations.retain(|observation| {
             targets
@@ -258,12 +261,14 @@ impl FrozenModelControls {
         Ok(first)
     }
 
+    /// `references` is the alias table of the session that issued `call`.
     pub fn validate_audit(
         &self,
+        references: &UiReferenceState,
         call: &ToolCall,
         inputs: &[ModelInputLineage],
     ) -> Result<(), AgentError> {
-        let targets = control_targets(call);
+        let targets = control_targets(references, call);
         if targets.is_empty() {
             return Err(unavailable());
         }
@@ -283,10 +288,18 @@ impl FrozenModelControls {
     }
 }
 
-fn control_targets(call: &ToolCall) -> Vec<(String, ObservationKind)> {
-    let Ok(value) = serde_json::from_str::<Value>(&call.arguments_json) else {
+/// Targets named by a recorded control call. Model calls are stored as sent, so
+/// selector aliases are expanded to the native ids that observations record.
+fn control_targets(
+    references: &UiReferenceState,
+    call: &ToolCall,
+) -> Vec<(String, ObservationKind)> {
+    let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) else {
         return Vec::new();
     };
+    if references.expand_selector_ids(&mut value).is_err() {
+        return Vec::new();
+    }
     if call.name == crate::subagent::tools::ACK_REPORTS {
         return value["report_ids"].as_array().map_or_else(Vec::new, |ids| {
             ids.iter()
@@ -327,6 +340,7 @@ pub fn caller<'a>(
                 raw.id == call.id
                     && raw.name == call.name
                     && crate::subagent::tools::same_arguments(
+                        &session.ui_references,
                         &call.name,
                         &raw.arguments_json,
                         &call.arguments_json,
@@ -473,6 +487,9 @@ mod tests {
         session
     }
     fn input(revision: u64) -> ChatMessage {
+        task_input("task", revision)
+    }
+    fn task_input(task_id: &str, revision: u64) -> ChatMessage {
         let owner = crate::model_message_labels::model_bound_user_message(
             "owner".into(),
             "Adjust this task".into(),
@@ -484,7 +501,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::subagent::projection::runtime_message(&format!("observation-{revision}"), &serde_json::json!({"tasks":[{"task":{"task_id":"task","input_revision":revision,"control_revision":2,"state_revision":9,"state":"running"}}]}), &[owner.data_envelope.unwrap()]).unwrap()
+        crate::subagent::projection::runtime_message(&format!("observation-{revision}"), &serde_json::json!({"tasks":[{"task":{"task_id":task_id,"input_revision":revision,"control_revision":2,"state_revision":9,"state":"running"}}]}), &[owner.data_envelope.unwrap()]).unwrap()
     }
     fn commit(session: &mut PersistedAgentSession, input: &[ChatMessage], call: &ToolCall) {
         let mut caller = ChatMessage::assistant_tool_calls("reply", "", vec![call.to_ref()])
@@ -492,6 +509,60 @@ mod tests {
         caller.model_controls = Some(Box::new(FrozenModelControls::capture(session, input)));
         session.conversation.push(caller);
     }
+    #[test]
+    fn aliased_delegation_controls_keep_their_observation_and_caller() {
+        let native = crate::native_ids::stable(crate::native_ids::Kind::Task, &"aliased-control");
+        let mut session = session();
+        let observed = vec![
+            ChatMessage::assistant_tool_calls(
+                "proposal",
+                "",
+                vec![crate::chat::ToolCallRef {
+                    id: "spawn".into(),
+                    name: tools::SPAWN.into(),
+                    arguments_json: "{}".into(),
+                }],
+            ),
+            ChatMessage::tool_result(
+                "spawned",
+                "spawn",
+                serde_json::json!({"task_id":native,"state":"running"}).to_string(),
+            ),
+        ];
+        session.ui_references.observe(&observed).unwrap();
+        session.conversation.extend(observed);
+        let input = task_input(&native, 3);
+        let raw = ToolCall {
+            id: "cancel".into(),
+            name: tools::CANCEL.into(),
+            arguments_json: r#"{"request_id":"task1"}"#.into(),
+        };
+        let (resolved, _) = session.ui_references.expand_call(&raw).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["request_id"],
+            native.as_str()
+        );
+        commit(&mut session, std::slice::from_ref(&input), &raw);
+
+        let mut controls = FrozenModelControls::capture(&session, std::slice::from_ref(&input));
+        controls.retain_called_targets(&session.ui_references, std::slice::from_ref(&raw));
+        assert!(controls.selected(&native, ObservationKind::Task).is_ok());
+        let label = input.data_envelope.clone().unwrap();
+        let lineage = ModelInputLineage {
+            envelope_id: label.envelope_id,
+            size_bytes: 1,
+            source_provider_id: label.provenance.source_provider_id,
+            source_tool_name: label.provenance.source_tool_name,
+            source_envelope_ids: vec![],
+            public_system_prompt: false,
+        };
+        controls
+            .validate_audit(&session.ui_references, &raw, std::slice::from_ref(&lineage))
+            .unwrap();
+        assert!(caller(&session, &resolved).is_ok());
+        assert!(caller(&session, &raw).is_ok());
+    }
+
     #[test]
     fn controls_restore_only_this_request_and_reject_model_versions_and_conflicts() {
         let mut session = session();
@@ -558,16 +629,24 @@ mod tests {
             public_system_prompt: false,
         };
         binding
-            .validate_audit(&call, std::slice::from_ref(&node))
+            .validate_audit(&session.ui_references, &call, std::slice::from_ref(&node))
             .unwrap();
-        assert!(binding.validate_audit(&call, &[]).is_err());
+        assert!(
+            binding
+                .validate_audit(&session.ui_references, &call, &[])
+                .is_err()
+        );
         node.envelope_id = "export".into();
         node.source_envelope_ids = vec![label.envelope_id];
         binding
-            .validate_audit(&call, std::slice::from_ref(&node))
+            .validate_audit(&session.ui_references, &call, std::slice::from_ref(&node))
             .unwrap();
         node.source_tool_name = "summary".into();
-        assert!(binding.validate_audit(&call, &[node]).is_err());
+        assert!(
+            binding
+                .validate_audit(&session.ui_references, &call, &[node])
+                .is_err()
+        );
         let spoof = ChatMessage::context_summary("summary", input.text);
         assert!(
             FrozenModelControls::capture(&session, &[spoof])

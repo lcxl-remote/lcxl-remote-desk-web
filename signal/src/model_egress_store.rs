@@ -57,7 +57,7 @@ impl SignalModelEgressStore {
         let inputs = completed_inputs_on(db, row, output).await?;
         desk_diagnose_core::model_controls::current_binding(session, caller)
             .map_err(|_| invalid())?
-            .validate_audit(call, &inputs)
+            .validate_audit(&session.ui_references, call, &inputs)
             .map_err(|_| invalid())
     }
 

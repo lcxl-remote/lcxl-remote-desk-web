@@ -102,6 +102,7 @@ fn native_caller_comparison_keeps_control_inputs_exact() {
     let id = native_ids::stable(Kind::Task, &"creation");
     let original = json!({"request_id":id}).to_string();
     assert!(tools::same_arguments(
+        &Default::default(),
         tools::REPORTS,
         &original,
         &json!({"request_id":id,"after_seq":0}).to_string()
@@ -112,6 +113,7 @@ fn native_caller_comparison_keeps_control_inputs_exact() {
         json!({"request_id":id,"after_seq":0,"unknown":1}),
     ] {
         assert!(!tools::same_arguments(
+            &Default::default(),
             tools::REPORTS,
             &original,
             &changed.to_string()

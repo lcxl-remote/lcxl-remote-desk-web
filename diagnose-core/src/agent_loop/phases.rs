@@ -2013,7 +2013,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         turn.provider_meta.data_envelope.as_ref(),
                         control_export_authorization.as_deref(),
                     );
-                    model_controls.retain_called_targets(&turn.tool_calls);
+                    model_controls.retain_called_targets(&session.ui_references, &turn.tool_calls);
                     let tool_batch = crate::model_observability::tool::ToolBatch::new(
                         observation.clone(),
                         &turn.tool_calls,
