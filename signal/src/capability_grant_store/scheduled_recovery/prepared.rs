@@ -22,10 +22,6 @@ pub(in crate::capability_grant_store) async fn close_on(
         )
         .one(txn)
         .await?;
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(payload.canonical_input_json.as_bytes())
-    );
     if stored != *work
         || outbox.is_some()
         || payload.generation == 0
@@ -47,9 +43,8 @@ pub(in crate::capability_grant_store) async fn close_on(
             )
         || reservation.run_id != session.conversation_id
         || reservation.generation != i64::try_from(payload.generation).map_err(|_| invalid())?
-        || reservation.canonical_input_digest_sha256 != digest
-        || payload.canonical_input_digest_sha256 != digest
-        || work.draft_hash != digest
+        || reservation.canonical_input_digest_sha256 != payload.canonical_input_digest_sha256
+        || work.draft_hash != payload.canonical_input_digest_sha256
         || work.payload_schema_version != 1
         || work.execution_id.as_deref()
             != Some(format!("capability:{}:{}", payload.call_id, payload.generation).as_str())
@@ -83,7 +78,7 @@ pub(in crate::capability_grant_store) async fn close_on(
         || grant
             .canonical_input_digest_sha256
             .as_ref()
-            .is_some_and(|expected| expected != &digest)
+            .is_some_and(|expected| *expected != payload.canonical_input_digest_sha256)
     {
         return Err(invalid());
     }

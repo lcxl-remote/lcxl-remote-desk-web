@@ -15,8 +15,6 @@ use sea_orm::QueryOrder;
 #[serde(deny_unknown_fields)]
 pub(super) struct Promotion {
     schema_version: u16,
-    binding_sha256: String,
-    acceptance_sha256: String,
     pub promoted_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel: Option<super::computer_cancel::CancelIntent>,
@@ -24,10 +22,6 @@ pub(super) struct Promotion {
 
 fn invalid() -> DbErr {
     DbErr::Custom("invalid original Computer Action background task".into())
-}
-
-fn digest(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 pub(super) fn bound(
@@ -89,13 +83,6 @@ fn acceptance(
     let accepted: ComputerAcceptance = serde_json::from_str(json).map_err(|_| invalid())?;
     if accepted.schema_version != 1
         || accepted.accepted_at_unix_ms == 0
-        || accepted.binding_sha256
-            != digest(
-                outbox
-                    .computer_binding_json
-                    .as_deref()
-                    .ok_or_else(invalid)?,
-            )
         || accepted.accepted_at_unix_ms >= deadlines(outbox, binding)?.1
     {
         return Err(invalid());
@@ -130,14 +117,6 @@ pub(crate) async fn task_on<C: sea_orm::ConnectionTrait + crate::config::ConfigC
     super::computer_cancel::validate_intent(&promotion.cancel, work, &promotion)?;
     let (foreground, hard) = deadlines(outbox, &binding)?;
     if promotion.schema_version != 1
-        || promotion.binding_sha256 != accepted.binding_sha256
-        || promotion.acceptance_sha256
-            != digest(
-                outbox
-                    .computer_acceptance_json
-                    .as_deref()
-                    .ok_or_else(invalid)?,
-            )
         || promotion.promoted_at_unix_ms < foreground.max(accepted.accepted_at_unix_ms)
         || promotion.promoted_at_unix_ms >= hard
     {
@@ -273,13 +252,6 @@ impl SignalCapabilityGrantStore {
             } else {
                 let promotion = Promotion {
                     schema_version: 1,
-                    binding_sha256: accepted.binding_sha256,
-                    acceptance_sha256: digest(
-                        outbox
-                            .computer_acceptance_json
-                            .as_deref()
-                            .ok_or_else(invalid)?,
-                    ),
                     promoted_at_unix_ms: now,
                     cancel: None,
                 };

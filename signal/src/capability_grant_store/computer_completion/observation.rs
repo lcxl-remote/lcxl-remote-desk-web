@@ -22,7 +22,6 @@ pub(crate) struct ObservedProviderAction {
     pub authority: ObservedCapabilityAuthority,
     pub issued_by: CapabilityGrantIssuer,
     pub completed_at: u64,
-    pub completion_sha256: String,
     pub output_sha256: String,
     pub receipt: ActionResultReceipt,
     pub canonical_input_json: String,
@@ -227,10 +226,6 @@ impl SignalCapabilityGrantStore {
             authority: payload.observed_authority.clone(),
             issued_by: issued.issued_by,
             completed_at: terminal.receipt.received_at_unix_ms,
-            completion_sha256: format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_vec(&terminal).map_err(json_error)?)
-            ),
             output_sha256: format!(
                 "{:x}",
                 Sha256::digest(

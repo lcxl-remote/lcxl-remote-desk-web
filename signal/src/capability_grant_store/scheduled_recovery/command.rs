@@ -90,8 +90,6 @@ async fn reconcile_inner_on(
                         CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
                         CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
                     }
-                || (completed.outcome == CapabilityDispatchOutcome::Succeeded
-                    && completed.result_digest_sha256 != receipt.result_sha256)
             {
                 return Err(invalid());
             }
@@ -401,10 +399,7 @@ async fn validate_command_origin_on(
         )
         .map_err(|_| invalid())?;
         let context = origin.command_completion.as_ref().ok_or_else(invalid)?;
-        if context.context_sha256
-            != desk_diagnose_core::command_completion::context_digest(session)
-                .map_err(|_| invalid())?
-        {
+        if context.context != desk_diagnose_core::command_completion::session_context(session) {
             return Err(invalid());
         }
         expected.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);

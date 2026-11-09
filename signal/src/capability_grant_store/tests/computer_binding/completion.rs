@@ -424,14 +424,10 @@ async fn concurrent_completions_commit_one_immutable_receipt_and_reject_storage_
         Ok(CompletionObservation::Stored | CompletionObservation::Duplicate)
     )));
     let original = work(&f).await;
-    for field in ["binding_sha256", "terminal"] {
+    for field in ["terminal"] {
         let mut value: serde_json::Value =
             serde_json::from_str(original.result_json.as_deref().unwrap()).unwrap();
-        if field == "binding_sha256" {
-            value[field] = serde_json::json!("a".repeat(64));
-        } else {
-            value[field]["projection"]["content"] = serde_json::json!("altered");
-        }
+        value[field]["projection"]["content"] = serde_json::json!("altered");
         let mut active: agent_action_item::ActiveModel = original.clone().into();
         active.result_json = Set(Some(value.to_string()));
         active.update(&f.store.db).await.unwrap();

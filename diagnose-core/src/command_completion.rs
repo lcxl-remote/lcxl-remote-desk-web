@@ -2,7 +2,6 @@
 
 use desk_agent_protocol::{AgentError, AgentErrorKind, data_lineage::DestinationIdentity};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{chat::ChatRole, seam::ModelRequest, session::PersistedAgentSession};
 
@@ -59,17 +58,29 @@ pub struct CommandCompletionContext {
     pub destination: DestinationIdentity,
     pub captured_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
-    pub context_sha256: String,
+    pub context: Box<CommandSessionContext>,
 }
 
-pub fn context_digest(session: &PersistedAgentSession) -> Result<String, AgentError> {
-    let bytes = serde_json::to_vec(&(
-        &session.context_attachments,
-        session.policy_revision,
-        &session.scope_snapshot,
-    ))
-    .map_err(|_| denied())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+/// Session context a command result was admitted under. Compared by value; an
+/// attachment turning stale, a policy change or a scope change prevents reuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSessionContext {
+    pub attachments: Vec<(String, crate::context_attachment::AttachmentState)>,
+    pub policy_revision: i64,
+    pub scope: desk_agent_protocol::AgentScope,
+}
+
+pub fn session_context(session: &PersistedAgentSession) -> Box<CommandSessionContext> {
+    Box::new(CommandSessionContext {
+        attachments: session
+            .context_attachments
+            .iter()
+            .map(|attachment| (attachment.attachment_id.clone(), attachment.state.clone()))
+            .collect(),
+        policy_revision: session.policy_revision,
+        scope: session.scope_snapshot.clone(),
+    })
 }
 
 impl CommandCompletionContext {
@@ -95,7 +106,7 @@ impl CommandCompletionContext {
             destination,
             captured_at_unix_ms: now,
             expires_at_unix_ms: expires,
-            context_sha256: context_digest(session)?,
+            context: session_context(session),
         };
         context.validate()?;
         Ok(context)
@@ -106,11 +117,6 @@ impl CommandCompletionContext {
         if !matches!(self.destination, DestinationIdentity::Model { .. })
             || self.captured_at_unix_ms == 0
             || self.expires_at_unix_ms <= self.captured_at_unix_ms
-            || self.context_sha256.len() != 64
-            || !self
-                .context_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(denied());
         }
@@ -127,7 +133,7 @@ impl CommandCompletionContext {
         if &self.destination != destination
             || now < self.captured_at_unix_ms
             || now >= self.expires_at_unix_ms
-            || self.context_sha256 != context_digest(session)?
+            || self.context != session_context(session)
         {
             return Err(denied());
         }
@@ -302,6 +308,27 @@ mod tests {
             serde_json::from_str::<CommandCompletionContext>(&encoded).unwrap(),
             frozen
         );
+        let mut changed = original.clone();
+        changed.scope_snapshot.policy_name = Some("another-policy".into());
+        assert!(
+            frozen
+                .check(&changed, &destination(), now + 320_000)
+                .is_err()
+        );
+        // An attachment that later turns stale invalidates the captured context.
+        let mut attached = original.clone();
+        attached
+            .context_attachments
+            .push(crate::context_attachment::tests::attachment(
+                "attachment",
+                "request",
+            ));
+        let pinned =
+            CommandCompletionContext::capture(&attached, destination(), now, 600_000).unwrap();
+        pinned.check(&attached, &destination(), now + 1).unwrap();
+        attached.context_attachments[0]
+            .mark_stale(crate::context_attachment::AttachmentStaleReason::Expired);
+        assert!(pinned.check(&attached, &destination(), now + 1).is_err());
         assert!(CommandCompletionContext::capture(&original, destination(), now, 0).is_err());
         assert!(CommandCompletionContext::capture(&original, destination(), u64::MAX, 1).is_err());
         let mut scoped = original;

@@ -679,18 +679,10 @@ async fn expired_and_terminal_actions_cannot_gain_first_acceptance() {
 
 #[tokio::test]
 async fn corrupted_provenance_or_uncommitted_reservation_is_not_an_acceptance_proof() {
-    for change in [
-        "reservation",
-        "model_call",
-        "dispatch_payload",
-        "acceptance_digest",
-    ] {
+    for change in ["reservation", "model_call", "dispatch_payload"] {
         let directory = tempfile::tempdir().unwrap();
         let fixture = Fixture::new(file_db(&directory.path().join("corrupt.db")).await).await;
         fixture.bind().await;
-        if change == "acceptance_digest" {
-            fixture.accept().await.unwrap();
-        }
         let row = fixture.outbox().await;
         let mut active: agent_capability_dispatch_outbox::ActiveModel = row.clone().into();
         match change {
@@ -716,14 +708,6 @@ async fn corrupted_provenance_or_uncommitted_reservation_is_not_an_acceptance_pr
                     serde_json::from_str(&row.payload_json).unwrap();
                 payload.tool_name = "another_tool".into();
                 active.payload_json = Set(serde_json::to_string(&payload).unwrap());
-                active.update(&fixture.store.db).await.unwrap();
-            }
-            "acceptance_digest" => {
-                let mut receipt: ComputerAcceptance =
-                    serde_json::from_str(row.computer_acceptance_json.as_ref().unwrap()).unwrap();
-                receipt.binding_sha256 = "f".repeat(64);
-                active.computer_acceptance_json =
-                    Set(Some(serde_json::to_string(&receipt).unwrap()));
                 active.update(&fixture.store.db).await.unwrap();
             }
             _ => unreachable!(),

@@ -14,27 +14,13 @@ pub(crate) struct ComputerExportContext {
     pub destination: DestinationIdentity,
     pub selected_source_tools: BTreeSet<String>,
     pub export_authorization_id: String,
-    attachments_sha256: String,
+    context: Box<desk_diagnose_core::command_completion::CommandSessionContext>,
     captured_at_unix_ms: u64,
     expires_at_unix_ms: u64,
 }
 
 fn invalid() -> DbErr {
     DbErr::Custom("original completion model authorization is unavailable".into())
-}
-
-fn attachments_digest(session: &PersistedAgentSession) -> Result<String, DbErr> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&(
-                &session.context_attachments,
-                session.policy_revision,
-                &session.scope_snapshot
-            ))
-            .map_err(|_| invalid())?
-        )
-    ))
 }
 
 impl ComputerExportContext {
@@ -53,7 +39,7 @@ impl ComputerExportContext {
                 .into_iter()
                 .collect(),
             export_authorization_id: policy.export_authorization_id.clone(),
-            attachments_sha256: attachments_digest(session)?,
+            context: desk_diagnose_core::command_completion::session_context(session),
             captured_at_unix_ms: completion.captured_at_unix_ms,
             expires_at_unix_ms: completion.expires_at_unix_ms,
         };
@@ -91,7 +77,7 @@ impl ComputerExportContext {
             destination: policy.destination.clone(),
             selected_source_tools: policy.selected_source_tools.clone(),
             export_authorization_id: policy.export_authorization_id.clone(),
-            attachments_sha256: attachments_digest(session)?,
+            context: desk_diagnose_core::command_completion::session_context(session),
             captured_at_unix_ms: now,
             expires_at_unix_ms: expires_at,
         };
@@ -110,11 +96,6 @@ impl ComputerExportContext {
             || self.export_authorization_id.is_empty()
             || self.export_authorization_id.len() > 256
             || self.export_authorization_id.chars().any(char::is_control)
-            || self.attachments_sha256.len() != 64
-            || !self
-                .attachments_sha256
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
             || self.selected_source_tools.len() > 128
             || self.selected_source_tools.iter().any(|name| {
                 name.is_empty() || name.len() > 128 || name.chars().any(char::is_control)
@@ -169,7 +150,7 @@ impl SignalCapabilityGrantStore {
                     .map_err(|_| invalid())?;
                 if export.captured_at_unix_ms != completion.captured_at_unix_ms
                     || export.expires_at_unix_ms != completion.expires_at_unix_ms
-                    || export.attachments_sha256 != completion.context_sha256
+                    || export.context != completion.context
                 {
                     return Err(invalid());
                 }
@@ -220,7 +201,8 @@ impl SignalCapabilityGrantStore {
                 || &export.destination != destination
                 || export.expires_at_unix_ms <= now
                 || now < export.captured_at_unix_ms
-                || export.attachments_sha256 != attachments_digest(session)?
+                || export.context
+                    != desk_diagnose_core::command_completion::session_context(session)
                 || !export.selected_source_tools.contains(&origin.tool_name)
                 || !session.conversation.iter().any(|message| {
                     message.message_id == event_id
@@ -282,7 +264,8 @@ impl SignalCapabilityGrantStore {
             if &export.destination != destination
                 || export.expires_at_unix_ms <= now
                 || now < export.captured_at_unix_ms
-                || export.attachments_sha256 != attachments_digest(session)?
+                || export.context
+                    != desk_diagnose_core::command_completion::session_context(session)
                 || !export
                     .selected_source_tools
                     .contains(&binding.origin.tool_name)

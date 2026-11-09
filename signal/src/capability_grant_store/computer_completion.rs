@@ -33,7 +33,6 @@ struct Terminal {
 #[serde(deny_unknown_fields)]
 struct Record {
     schema_version: u16,
-    binding_sha256: String,
     unknown: Option<Observation>,
     terminal: Option<Terminal>,
 }
@@ -207,19 +206,7 @@ fn decode(
         return Err(invalid());
     }
     let record: Record = serde_json::from_str(json).map_err(|_| invalid())?;
-    if record.schema_version != 2
-        || record.binding_sha256
-            != format!(
-                "{:x}",
-                Sha256::digest(
-                    outbox
-                        .computer_binding_json
-                        .as_deref()
-                        .ok_or_else(invalid)?
-                        .as_bytes()
-                )
-            )
-    {
+    if record.schema_version != 2 {
         return Err(invalid());
     }
     if let Some(unknown) = &record.unknown
@@ -469,16 +456,6 @@ impl SignalCapabilityGrantStore {
         } else {
             Record {
                 schema_version: 2,
-                binding_sha256: format!(
-                    "{:x}",
-                    Sha256::digest(
-                        outbox
-                            .computer_binding_json
-                            .as_deref()
-                            .ok_or_else(invalid)?
-                            .as_bytes()
-                    )
-                ),
                 unknown: None,
                 terminal: None,
             }

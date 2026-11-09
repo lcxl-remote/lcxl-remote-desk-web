@@ -20,7 +20,6 @@ pub(crate) struct ComputerExecutionContract {
 pub(crate) struct ComputerBinding {
     pub schema_version: u16,
     pub connection_id: String,
-    pub dispatch_sha256: String,
     pub plan: SealedComputerActionPlan,
     pub origin: ActionResultOrigin,
     /// Absent on older bindings; never inferred retrospectively for promotion.
@@ -35,7 +34,6 @@ pub(crate) struct ComputerBinding {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ComputerAcceptance {
     pub schema_version: u16,
-    pub binding_sha256: String,
     pub accepted_at_unix_ms: u64,
 }
 
@@ -105,10 +103,6 @@ pub(crate) async fn original_on<C: sea_orm::ConnectionTrait + crate::config::Con
         || prepared.provider_id != payload.provider_id
         || prepared.capability_id != payload.capability_id
         || prepared.tool_name != payload.tool_name
-        || format!(
-            "{:x}",
-            Sha256::digest(payload.canonical_input_json.as_bytes())
-        ) != payload.canonical_input_digest_sha256
     {
         return Err(invalid());
     }
@@ -162,8 +156,6 @@ pub(super) fn validate_binding(
     }
     if binding.schema_version != 1
         || binding.connection_id.trim().is_empty()
-        || binding.dispatch_sha256
-            != format!("{:x}", Sha256::digest(outbox.payload_json.as_bytes()))
         || plan.work_id != work.id.to_string()
         || plan.action_request_id != payload.call_id
         || plan.execution_generation != outbox.dispatch_id
@@ -279,7 +271,6 @@ impl SignalCapabilityGrantStore {
             let binding = ComputerBinding {
                 schema_version: 1,
                 connection_id: connection_id.into(),
-                dispatch_sha256: format!("{:x}", Sha256::digest(outbox.payload_json.as_bytes())),
                 plan: plan.clone(),
                 origin,
                 model_export: model_policy
@@ -455,12 +446,10 @@ impl SignalCapabilityGrantStore {
             {
                 return Err(invalid());
             }
-            let binding_sha256 = format!("{:x}", Sha256::digest(json.as_bytes()));
             if let Some(existing) = &outbox.computer_acceptance_json {
                 let receipt: ComputerAcceptance =
                     serde_json::from_str(existing).map_err(|_| invalid())?;
                 if receipt.schema_version != 1
-                    || receipt.binding_sha256 != binding_sha256
                     || receipt.accepted_at_unix_ms == 0
                     || i64::try_from(receipt.accepted_at_unix_ms).map_err(|_| invalid())?
                         >= chrono::DateTime::parse_from_rfc3339(&binding.plan.expires_at)
@@ -484,7 +473,6 @@ impl SignalCapabilityGrantStore {
             }
             let receipt = ComputerAcceptance {
                 schema_version: 1,
-                binding_sha256,
                 accepted_at_unix_ms: u64::try_from(now.timestamp_millis())
                     .map_err(|_| invalid())?,
             };

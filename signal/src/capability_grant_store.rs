@@ -2023,15 +2023,6 @@ fn validate_prepare(request: &PrepareCapabilityCall<'_>) -> Result<(), DbErr> {
             "invalid prepare revision or generation".into(),
         ));
     }
-    let canonical_digest = format!(
-        "{:x}",
-        Sha256::digest(request.canonical_input_json.as_bytes())
-    );
-    if canonical_digest != request.call.canonical_input_digest_sha256 {
-        return Err(DbErr::Custom(
-            "canonical input bytes do not match their digest".into(),
-        ));
-    }
     Ok(())
 }
 

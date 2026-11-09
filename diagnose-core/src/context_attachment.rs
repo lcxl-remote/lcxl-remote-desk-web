@@ -339,13 +339,13 @@ impl std::fmt::Display for ContextAttachmentError {
 impl std::error::Error for ContextAttachmentError {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use desk_agent_protocol::data_lineage::{
         ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary,
     };
 
-    fn attachment(id: &str, request: &str) -> ContextAttachment {
+    pub(crate) fn attachment(id: &str, request: &str) -> ContextAttachment {
         ContextAttachment {
             schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
             attachment_id: id.into(),
