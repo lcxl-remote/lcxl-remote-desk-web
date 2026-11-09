@@ -221,7 +221,7 @@ impl PersistentYuvBuffer {
         }
         match image_info.get_dirty_rects() {
             None => self.update_full(image_info),
-            Some(rects) if rects.is_empty() => Ok(()),
+            Some([]) => Ok(()),
             Some(rects) => self.update_partial(image_info, rects),
         }
     }

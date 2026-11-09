@@ -37,17 +37,30 @@ impl SignalAiAssistantTools {
         } else {
             self.timeout
         };
-        let completed = if sent {
-            desk_diagnose_core::future::boxed(|| async {
-                tokio::time::timeout(foreground_timeout, receiver).await
-            })
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(Result::ok)
+        let wait_started = std::time::Instant::now();
+        let wait = if sent {
+            Some(
+                desk_diagnose_core::future::boxed(|| async {
+                    tokio::time::timeout(foreground_timeout, receiver).await
+                })
+                .await,
+            )
         } else {
             None
         };
+        let waited = wait_started.elapsed();
+        // Diagnostic only: distinguishes a slow device or host from a lost reply.
+        let wait_note = match &wait {
+            None => "not_sent",
+            Some(Err(_)) => "foreground_timeout",
+            Some(Ok(Err(_))) => "receiver_closed",
+            Some(Ok(Ok(Err(_)))) => "device_error",
+            Some(Ok(Ok(Ok(_)))) => "completed",
+        };
+        let completed = wait
+            .and_then(Result::ok)
+            .and_then(Result::ok)
+            .and_then(Result::ok);
         global_computer_action_pending().cancel(&plan.execution_generation);
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| invalid())?;
         if durable {
@@ -157,6 +170,13 @@ impl SignalAiAssistantTools {
                 ),
             ));
         }
+        log::warn!(
+            "[computer-action] outcome unknown: generation={} durable={durable} sent={sent} \
+             wait={wait_note} waited_ms={} foreground_budget_ms={}",
+            plan.execution_generation,
+            waited.as_millis(),
+            foreground_timeout.as_millis(),
+        );
         desk_diagnose_core::future::boxed(|| async {
             store
                 .mark_dispatch_outcome_unknown(

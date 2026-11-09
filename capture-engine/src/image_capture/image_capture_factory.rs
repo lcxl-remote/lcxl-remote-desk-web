@@ -345,21 +345,27 @@ fn fallback_image_output_backend(
 pub fn list_effective_image_output(
     settings: &DeskSettings,
 ) -> Result<Vec<DisplayInfo>, CaptureError> {
-    let backend = settings.get_image_capture_type()?;
-    match list_image_output(backend) {
-        Ok(list) => Ok(list),
-        Err(e) => {
-            #[cfg(target_os = "windows")]
-            if let Some(fallback) = fallback_image_output_backend(backend, &e) {
-                log::warn!(
-                    "[capture-factory] {backend:?} enumeration unavailable ({e}); \
-                     enumerating {fallback:?} displays for effective target resolution"
-                );
-                return list_image_output(fallback);
-            }
-            Err(e)
+    list_with_fallback(settings.get_image_capture_type()?)
+}
+
+#[cfg(target_os = "windows")]
+fn list_with_fallback(backend: ImageCaptureType) -> Result<Vec<DisplayInfo>, CaptureError> {
+    list_image_output(backend).or_else(|e| match fallback_image_output_backend(backend, &e) {
+        Some(fallback) => {
+            log::warn!(
+                "[capture-factory] {backend:?} enumeration unavailable ({e}); \
+                 enumerating {fallback:?} displays for effective target resolution"
+            );
+            list_image_output(fallback)
         }
-    }
+        None => Err(e),
+    })
+}
+
+/// Only Windows has an alternative display enumeration backend.
+#[cfg(not(target_os = "windows"))]
+fn list_with_fallback(backend: ImageCaptureType) -> Result<Vec<DisplayInfo>, CaptureError> {
+    list_image_output(backend)
 }
 
 #[cfg(all(test, target_os = "windows"))]

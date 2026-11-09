@@ -23,15 +23,13 @@ impl AudioCaptureTypeHelper for DeskSettings {
     /// Returns the appropriate EncoderType based on the settings.
     fn get_audio_capture_type(&self) -> Result<AudioCaptureType, CaptureError> {
         if let Some(ref audio_capture) = self.audio_capture {
-            let result = AudioCaptureType::from_str(audio_capture);
-            if result.is_ok() {
-                return Ok(result.unwrap());
-            } else {
-                log::error!(
+            match AudioCaptureType::from_str(audio_capture) {
+                Ok(value) => return Ok(value),
+                Err(error) => log::error!(
                     "Failed to parse audio capture type: {}, use default setting, error: {}",
                     audio_capture,
-                    result.err().unwrap()
-                );
+                    error
+                ),
             }
         }
 

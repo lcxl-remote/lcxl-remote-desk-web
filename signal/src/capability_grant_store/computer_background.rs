@@ -230,21 +230,50 @@ impl SignalCapabilityGrantStore {
             }
             let binding = bound(outbox, work, payload)?;
             if binding.execution.is_none() {
+                log::warn!(
+                    "[computer-action] background promotion refused: generation={generation} \
+                     reason=no_execution_contract"
+                );
                 return Ok(false);
             }
             let Some(accepted) = acceptance(outbox, &binding)? else {
+                // A device acceptance that has not committed by the foreground
+                // deadline (for example under heavy host load) lands here.
+                log::warn!(
+                    "[computer-action] background promotion refused: generation={generation} \
+                     reason=not_accepted now_ms={} deadlines_ms={:?}",
+                    Utc::now().timestamp_millis(),
+                    deadlines(outbox, &binding).ok()
+                );
                 return Ok(false);
             };
             let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
             let (foreground, hard) = deadlines(outbox, &binding)?;
-            if outbox.state != DISPATCH_OUTBOX_SENDING
-                || work.status != CAPABILITY_WORK_DISPATCHING
-                || work.result_json.is_some()
-                || work.manual_resolved_at.is_some()
-                || work.cancel_requested_at.is_some()
-                || now < foreground.max(accepted.accepted_at_unix_ms)
-                || now >= hard
-            {
+            // Diagnostic only; the refusal conditions are unchanged.
+            let refused = if outbox.state != DISPATCH_OUTBOX_SENDING {
+                Some("outbox_not_sending")
+            } else if work.status != CAPABILITY_WORK_DISPATCHING {
+                Some("work_not_dispatching")
+            } else if work.result_json.is_some() {
+                Some("result_recorded")
+            } else if work.manual_resolved_at.is_some() {
+                Some("manually_resolved")
+            } else if work.cancel_requested_at.is_some() {
+                Some("cancel_requested")
+            } else if now < foreground.max(accepted.accepted_at_unix_ms) {
+                Some("before_foreground_deadline")
+            } else if now >= hard {
+                Some("past_hard_deadline")
+            } else {
+                None
+            };
+            if let Some(reason) = refused {
+                log::warn!(
+                    "[computer-action] background promotion refused: generation={generation} \
+                     reason={reason} now_ms={now} foreground_ms={foreground} \
+                     accepted_ms={} hard_ms={hard}",
+                    accepted.accepted_at_unix_ms
+                );
                 return Ok(false);
             }
             if outbox.computer_background_json.is_some() {
