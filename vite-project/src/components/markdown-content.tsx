@@ -101,7 +101,7 @@ export function MarkdownContent({
     children: string
     className?: string
     disableLinks?: boolean
-    assistantSources?: readonly { source_id: string; source_revision: number; alias?: string | null }[]
+    assistantSources?: readonly { source_id: string; source_revision: number }[]
 }) {
     const { t } = useTranslation()
     return (

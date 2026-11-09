@@ -3262,7 +3262,6 @@ mod source_window_tests {
                     source_id: root.source_id.clone(),
                     source_revision: 1,
                     source_device: None,
-                    alias: None,
                 },
             )
             .collect::<Vec<_>>();
@@ -3467,7 +3466,6 @@ mod configured_page_budget_tests {
             source_id: "source".repeat(500),
             source_revision: 1,
             source_device: None,
-            alias: None,
         };
         let page = page
             .with_citations(

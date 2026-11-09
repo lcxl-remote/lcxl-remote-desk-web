@@ -26,11 +26,3 @@ it('does not activate code, existing link labels, malformed markers or other Mar
     view.rerender(<MemoryRouter><MarkdownContent disableLinks>{`〔来源:${id}〕`}</MarkdownContent></MemoryRouter>);
     expect(screen.queryByRole('link')).toBeNull();
 });
-
-it('resolves conversation alias markers through the citation list to native source links', () => {
-    render(<MemoryRouter><MarkdownContent disableLinks assistantSources={[{source_id:id,source_revision:2,alias:'src3'}]}>{`Answer 〔来源:src3〕 and 〔来源:src4〕`}</MarkdownContent></MemoryRouter>);
-    const link = screen.getByRole('link');
-    expect(link).toHaveAttribute('href', `/ai-assistant/conversation?source=${id}&revision=2`);
-    expect(document.body.textContent).not.toContain('src3');
-    expect(document.body.textContent).not.toContain('src4');
-});
