@@ -1789,6 +1789,11 @@ export type AssistantSourceDevice = {
 
 export type AssistantCitation = {
     /**
+     * @description The answer\'s session alias for this source (`〔来源:src3〕`). Answer text\nkeeps the model\'s alias markers; clients resolve them through this field.
+     * @type string,null
+    */
+    alias?: string | null;
+    /**
      * @type string
     */
     answer_message_id: string;

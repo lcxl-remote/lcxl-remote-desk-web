@@ -136,6 +136,10 @@ pub struct AssistantCitation {
     pub source_id: String,
     pub source_revision: u64,
     pub source_device: Option<AssistantSourceDevice>,
+    /// The answer's session alias for this source (`〔来源:src3〕`). Answer text
+    /// keeps the model's alias markers; clients resolve them through this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 #[derive(
@@ -220,4 +224,27 @@ pub fn validate_optional_device_ref(value: &str) -> Result<(), &'static str> {
         validate_source_id(value)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::*;
+
+    #[test]
+    fn citations_without_an_alias_stay_readable_and_aliases_round_trip() {
+        let stored = r#"{"answer_message_id":"answer","answer_revision":1,"source_id":"src_AAECAwQFBgcICQoLDA0ODw","source_revision":2,"source_device":null}"#;
+        let legacy: AssistantCitation = serde_json::from_str(stored).unwrap();
+        assert_eq!(legacy.alias, None);
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), stored);
+        let aliased = AssistantCitation {
+            alias: Some("src3".into()),
+            ..legacy
+        };
+        let encoded = serde_json::to_string(&aliased).unwrap();
+        assert!(encoded.contains(r#""alias":"src3""#));
+        assert_eq!(
+            serde_json::from_str::<AssistantCitation>(&encoded).unwrap(),
+            aliased
+        );
+    }
 }

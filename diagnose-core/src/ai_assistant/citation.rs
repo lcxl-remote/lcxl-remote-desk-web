@@ -48,6 +48,7 @@ pub fn for_answer(
             source_id: source,
             source_revision: *revision,
             source_device: None,
+            alias: None,
         };
         result.citations.push(citation);
         if serde_json::to_vec(&result.citations)
