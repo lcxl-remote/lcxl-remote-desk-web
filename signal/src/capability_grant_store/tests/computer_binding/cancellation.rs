@@ -492,3 +492,11 @@ async fn stop_scan_advances_past_a_full_corrupt_page_to_original_pending_work() 
             .is_some()
     );
 }
+
+#[test]
+fn cancel_request_id_carries_the_generation_within_the_record_limit() {
+    let generation = format!("capability-dispatch-{}", "f".repeat(64));
+    let id = wire_request_id(i64::MAX, &generation);
+    assert_eq!(id, format!("provider-cancel-{}-{generation}", i64::MAX));
+    assert!(id.len() <= desk_diagnose_core::dynamic_run::MAX_RUN_EVENT_IDS);
+}

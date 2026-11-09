@@ -38,10 +38,7 @@ fn valid_request_id(value: &str) -> bool {
 }
 
 pub(crate) fn wire_request_id(work: i64, generation: &str) -> String {
-    format!(
-        "provider-cancel-{work}-{:x}",
-        Sha256::digest(generation.as_bytes())
-    )
+    format!("provider-cancel-{work}-{generation}")
 }
 
 pub(super) fn validate_intent(
