@@ -16,8 +16,8 @@ pub struct Model {
     pub contract_revision: i64,
     pub contract_sha256: String,
     pub authorization_revision: i64,
-    #[sea_orm(unique)]
-    pub publication_identity: String,
+    /// Client retry key; unique with `schedule_id`.
+    pub client_publish_key: String,
     pub publication_payload_sha256: String,
     pub rehearsal_run_id: String,
     #[sea_orm(column_type = "Text")]

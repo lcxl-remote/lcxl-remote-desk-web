@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 59;
+const SIGNAL_SCHEMA_VERSION: i32 = 60;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
@@ -860,6 +860,14 @@ async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnec
         .unique()
         .to_owned();
     db.execute(&authorization_revision).await?;
+    let publish_key = Index::create()
+        .name("uq_agent_task_authorization_publish_key")
+        .table(agent_task_authorization::Entity)
+        .col(agent_task_authorization::Column::ScheduleId)
+        .col(agent_task_authorization::Column::ClientPublishKey)
+        .unique()
+        .to_owned();
+    db.execute(&publish_key).await?;
     Ok(())
 }
 

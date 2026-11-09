@@ -719,3 +719,43 @@ async fn one_schedule_revision_has_one_contract_row() {
     row("contract-2", 2).insert(&db).await.unwrap();
     assert!(row("contract-3", 1).insert(&db).await.is_err());
 }
+
+#[tokio::test]
+async fn one_schedule_publish_key_has_one_authorization() {
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    let row = |id: &str, schedule: &str, revision: i64, key: &str| authorization::ActiveModel {
+        authorization_id: Set(id.into()),
+        schedule_id: Set(schedule.into()),
+        owner_user_id: Set(1),
+        task_revision: Set(1),
+        contract_revision: Set(1),
+        contract_sha256: Set("a".repeat(64)),
+        authorization_revision: Set(revision),
+        client_publish_key: Set(key.into()),
+        publication_payload_sha256: Set("b".repeat(64)),
+        rehearsal_run_id: Set("rehearsal".into()),
+        rehearsal_evidence_json: Set("{}".into()),
+        approved_at: Set(1),
+        version: Set(1),
+        ..Default::default()
+    };
+    row("authorization-1", "schedule", 1, "publish-key")
+        .insert(&db)
+        .await
+        .unwrap();
+    // A retry key is unique per schedule and reusable by another schedule.
+    assert!(
+        row("authorization-2", "schedule", 2, "publish-key")
+            .insert(&db)
+            .await
+            .is_err()
+    );
+    row("authorization-3", "other-schedule", 1, "publish-key")
+        .insert(&db)
+        .await
+        .unwrap();
+}

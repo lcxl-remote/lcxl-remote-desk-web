@@ -217,12 +217,12 @@ impl ScheduleStore {
         if !valid_digest(&input.contract_sha256) {
             return Err(ScheduleStoreError::Invalid);
         }
-        let identity = digest(&json(&(&input.schedule_id, &input.client_publish_key))?);
         let payload_digest = digest(&json(input)?);
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if let Some(existing) = authorization::Entity::find()
             .filter(authorization::Column::OwnerUserId.eq(owner))
-            .filter(authorization::Column::PublicationIdentity.eq(&identity))
+            .filter(authorization::Column::ScheduleId.eq(&input.schedule_id))
+            .filter(authorization::Column::ClientPublishKey.eq(&input.client_publish_key))
             .one(&txn)
             .await?
         {
@@ -360,7 +360,7 @@ impl ScheduleStore {
             contract_revision: Set(input.contract_revision),
             contract_sha256: Set(input.contract_sha256.clone()),
             authorization_revision: Set(revision),
-            publication_identity: Set(identity),
+            client_publish_key: Set(input.client_publish_key.clone()),
             publication_payload_sha256: Set(payload_digest),
             rehearsal_run_id: Set(input.rehearsal_run_id.clone()),
             rehearsal_evidence_json: Set(json(&proof)?),
