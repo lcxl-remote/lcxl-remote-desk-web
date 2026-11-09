@@ -377,8 +377,8 @@ async fn exercise_failed_unit(fixture: Fixture, failure: usize) {
         .unwrap()
         .unwrap();
     fixture.store.db.execute_unprepared(&format!(
-        "CREATE TRIGGER reject_staged_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.source_id='{}' BEGIN SELECT RAISE(ABORT, 'injected late history-index failure'); END",
-        bad.source_ids[0])).await.unwrap();
+        "CREATE TRIGGER reject_staged_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.origin_id='{}' BEGIN SELECT RAISE(ABORT, 'injected late history-index failure'); END",
+        bad.origin_id)).await.unwrap();
     let txn = fixture.begin().await;
     let outcomes = capture_store::staged::prepare_many_on(&txn, &refs, &fixture.policy)
         .await

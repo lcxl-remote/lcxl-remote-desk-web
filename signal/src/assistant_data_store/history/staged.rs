@@ -16,12 +16,16 @@ struct Inspection {
     existing_origin: Option<origin::Model>,
     existing_conversation: Option<conversation::Model>,
     new_parts: Vec<usize>,
+    /// History row key of each prepared fragment that already exists.
+    existing_ids: Vec<Option<i64>>,
     runtime: Option<runtime::Model>,
     existing_binding: Option<binding::Model>,
 }
 
 struct Written {
     runtime: runtime::Model,
+    /// History row key of every prepared fragment, in fragment order.
+    history_ids: Vec<i64>,
     conversation: conversation::Model,
     binding: Option<binding::Model>,
 }
@@ -219,7 +223,8 @@ impl PendingHistoryBatch<'_, '_> {
                 } => (capture, prepared, inspected),
             };
             if inspected.new_parts.is_empty() {
-                outcomes.push(admitted(*prepared));
+                let ids = inspected.existing_ids.iter().flatten().copied().collect();
+                outcomes.push(admitted(*prepared, ids));
                 continue;
             }
             let runtime = state
@@ -264,7 +269,7 @@ impl PendingHistoryBatch<'_, '_> {
                         .bindings
                         .insert(capture.device_ref.into(), written.binding);
 
-                    outcomes.push(admitted(*prepared));
+                    outcomes.push(admitted(*prepared, written.history_ids));
                 }
                 Err(error) => {
                     savepoint.rollback().await?;
@@ -282,14 +287,19 @@ impl PendingHistoryBatch<'_, '_> {
     }
 }
 
-fn admitted(prepared: PreparedHistoryCapture) -> CaptureOutcome {
+fn admitted(prepared: PreparedHistoryCapture, history_ids: Vec<i64>) -> CaptureOutcome {
     CaptureOutcome {
         admission: if prepared.redacted {
             HistoryAdmission::Redacted
         } else {
             HistoryAdmission::Indexed
         },
-        source_ids: prepared.source_ids,
+        source_ids: history_ids
+            .into_iter()
+            .map(|id| {
+                desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(id).to_string()
+            })
+            .collect(),
         partial: prepared.index.partial,
     }
 }

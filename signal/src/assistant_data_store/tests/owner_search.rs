@@ -177,7 +177,7 @@ async fn expanded_owner_candidates_and_large_cursors_page_every_result() {
     let store = setup().await;
     let device = device(&store, "many-owner-candidates").await;
     let mut expected = std::collections::BTreeSet::new();
-    for index in 0..150 {
+    for index in 0..260 {
         expected.insert(
             capture_at(
                 &store,
@@ -192,9 +192,9 @@ async fn expanded_owner_candidates_and_large_cursors_page_every_result() {
         );
     }
     let mut policy = AssistantDataPolicy::default();
-    policy.limits.retrieval.query_candidates = 200;
-    policy.limits.retrieval.relevance_roots = 200;
-    policy.limits.retrieval.owner_scan_documents = 300;
+    policy.limits.retrieval.query_candidates = 300;
+    policy.limits.retrieval.relevance_roots = 300;
+    policy.limits.retrieval.owner_scan_documents = 400;
     policy.limits.retrieval.owner_scan_ms = 30_000;
     let mut request = query();
     request.queries = vec!["email report".into()];

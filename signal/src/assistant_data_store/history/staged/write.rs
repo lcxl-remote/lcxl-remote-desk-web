@@ -1,5 +1,8 @@
 use super::*;
 use desk_diagnose_core::native_ids::{self, Kind};
+
+/// `sdoc_` plus 22 base64url characters.
+const SEARCH_DOCUMENT_ID_LEN: usize = 27;
 use sea_orm::sea_query::Expr;
 
 /// All original source SELECTs are complete. Only quota/coverage metadata can
@@ -42,7 +45,6 @@ pub(super) async fn write_on(
             let part = &prepared.index.fragments[*index];
             (
                 part,
-                &prepared.source_ids[*index],
                 &prepared.retained_content[part.byte_start as usize..part.byte_end as usize],
             )
         })
@@ -62,18 +64,17 @@ pub(super) async fn write_on(
     let records = 1_i64; // Count the native source once, independently of its fragments.
     let bytes = new_parts
         .iter()
-        .map(|(_, _, body)| body.len() as i64)
+        .map(|(_, body)| body.len() as i64)
         .sum::<i64>();
     let terms = new_parts
         .iter()
-        .map(|(part, _, _)| part.terms.len() as i64)
+        .map(|(part, _)| part.terms.len() as i64)
         .sum::<i64>();
     let mut metadata = 0_i64;
-    for (part, source_id, _) in &new_parts {
+    for (part, _) in &new_parts {
         // Account UTF-8 metadata plus fixed-width scalar slots. Payload fields
         // and indexed terms have their own counters and are not hidden here.
-        metadata += (source_id.len()
-            + prepared.origin_id.len()
+        metadata += (prepared.origin_id.len()
             + capture.actor_id.len()
             + capture.device_ref.len()
             + capture.conversation_id.len()
@@ -90,11 +91,11 @@ pub(super) async fn write_on(
         metadata += part
             .terms
             .keys()
-            .map(|text| {
-                text.len() as i64 + source_id.len() as i64 + capture.actor_id.len() as i64 + 24
-            })
+            .map(|text| text.len() as i64 + capture.actor_id.len() as i64 + 24)
             .sum::<i64>();
-        metadata += (source_id.len() * 2
+        // The document row stores the formatted source id and its document id.
+        metadata += (desk_agent_protocol::ai_assistant::source_ref::SourceRef::MAX_LEN
+            + SEARCH_DOCUMENT_ID_LEN
             + prepared.origin_id.len()
             + capture.root_conversation_id.len()
             + capture.conversation_id.len()
@@ -247,51 +248,54 @@ pub(super) async fn write_on(
         write_conversation_on(txn, capture, existing_conversation, recorded)
     })
     .await?;
-    for (part, source_id, body) in new_parts {
-        require_one(
-            history::Entity::insert(history::ActiveModel {
-                source_id: Set(source_id.clone()),
-                origin_id: Set(prepared.origin_id.clone()),
-                actor_id: Set(capture.actor_id.into()),
-                device_ref: Set(capture.device_ref.into()),
-                conversation_id: Set(capture.conversation_id.into()),
-                root_conversation_id: Set(capture.root_conversation_id.into()),
-                native_id: Set(capture.native_id.into()),
-                fragment_index: Set(
-                    i32::try_from(part.fragment_index).map_err(|_| AdmissionFailure::Capacity)?
-                ),
-                kind: Set(kind.clone()),
-                role: Set(capture.role.into()),
-                content: Set(body.into()),
-                revision: Set(signed(capture.revision)?),
-                admitted_generation: Set(admitted_generation),
-                recorded_at_ms: Set(recorded),
-                statement_timezone: Set(capture.statement_timezone.into()),
-                native_action_at_ms: Set(native_action_at),
-                native_action_from_ms: Set(native_action_from),
-                native_action_until_ms: Set(native_action_until),
-                time_basis: Set(native_time.basis.clone()),
-                state_json: Set(state_json.clone()),
-                dependencies_json: Set(dependencies.clone()),
-                retention_proof_json: Set(retention_proof.clone()),
-                expires_at_ms: Set(expires),
-                admission: Set(if prepared.redacted {
-                    "redacted"
-                } else {
-                    "indexed"
-                }
-                .into()),
-                deleted_at_ms: Set(None),
-                created_at_ms: Set(recorded),
-                updated_at_ms: Set(recorded),
-                ..Default::default()
-            })
-            .exec_without_returning(txn)
-            .await?,
-        )?;
+    let mut history_ids = Vec::with_capacity(new_parts.len());
+    for (part, body) in new_parts {
+        let history_id = history::Entity::insert(history::ActiveModel {
+            origin_id: Set(prepared.origin_id.clone()),
+            actor_id: Set(capture.actor_id.into()),
+            device_ref: Set(capture.device_ref.into()),
+            conversation_id: Set(capture.conversation_id.into()),
+            root_conversation_id: Set(capture.root_conversation_id.into()),
+            native_id: Set(capture.native_id.into()),
+            fragment_index: Set(
+                i32::try_from(part.fragment_index).map_err(|_| AdmissionFailure::Capacity)?
+            ),
+            kind: Set(kind.clone()),
+            role: Set(capture.role.into()),
+            content: Set(body.into()),
+            revision: Set(signed(capture.revision)?),
+            admitted_generation: Set(admitted_generation),
+            recorded_at_ms: Set(recorded),
+            statement_timezone: Set(capture.statement_timezone.into()),
+            native_action_at_ms: Set(native_action_at),
+            native_action_from_ms: Set(native_action_from),
+            native_action_until_ms: Set(native_action_until),
+            time_basis: Set(native_time.basis.clone()),
+            state_json: Set(state_json.clone()),
+            dependencies_json: Set(dependencies.clone()),
+            retention_proof_json: Set(retention_proof.clone()),
+            expires_at_ms: Set(expires),
+            admission: Set(if prepared.redacted {
+                "redacted"
+            } else {
+                "indexed"
+            }
+            .into()),
+            deleted_at_ms: Set(None),
+            created_at_ms: Set(recorded),
+            updated_at_ms: Set(recorded),
+            ..Default::default()
+        })
+        .exec(txn)
+        .await?
+        .last_insert_id;
+        history_ids.push((part.fragment_index, history_id));
+        let source_id =
+            desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(history_id)
+                .to_string();
         let document_id = native_ids::stable(
-            Kind::AssistantSource,
-            &("search-document", source_id, capture.revision),
+            Kind::AssistantSearchDocument,
+            &("search-document", &source_id, capture.revision),
         );
         require_one(
             document::Entity::insert(document::ActiveModel {
@@ -299,7 +303,8 @@ pub(super) async fn write_on(
                 actor_id: Set(capture.actor_id.into()),
                 device_ref: Set(capture.device_ref.into()),
                 source_kind: Set("history".into()),
-                source_id: Set(source_id.clone()),
+                source_id: Set(source_id),
+                history_id: Set(Some(history_id)),
                 source_revision: Set(signed(capture.revision)?),
                 corpus_generation: Set(admitted_generation),
                 origin_id: Set(prepared.origin_id.clone()),
@@ -348,7 +353,24 @@ pub(super) async fn write_on(
         records,
     )
     .await?;
+    let history_ids = prepared
+        .index
+        .fragments
+        .iter()
+        .zip(&inspected.existing_ids)
+        .map(|(part, existing)| {
+            existing
+                .or_else(|| {
+                    history_ids
+                        .iter()
+                        .find(|(fragment, _)| *fragment == part.fragment_index)
+                        .map(|(_, id)| *id)
+                })
+                .ok_or(AssistantStoreError::Inaccessible)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Written {
+        history_ids,
         runtime: next_runtime,
         conversation: next_conversation,
         binding: next_binding,

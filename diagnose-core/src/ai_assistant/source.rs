@@ -33,10 +33,6 @@ pub fn history_origin_id(
     )
 }
 
-pub fn history_source_id(origin: &str, fragment_index: u32) -> String {
-    native_ids::stable(Kind::AssistantSource, &(origin, fragment_index))
-}
-
 pub fn valid_statement_timezone(value: &str) -> bool {
     value.len() <= 128 && value.parse::<chrono_tz::Tz>().is_ok()
 }
@@ -235,7 +231,6 @@ pub struct HistorySourceDirectory<'a> {
 
 pub struct PreparedHistoryCapture {
     pub origin_id: String,
-    pub source_ids: Vec<String>,
     pub retained_content: String,
     pub index: IndexProjection,
     pub proof: HistoryRetentionProof,
@@ -254,7 +249,8 @@ pub fn validate_history_dependencies(
         .sort_by(|a, b| (&a.source_id, a.source_revision).cmp(&(&b.source_id, b.source_revision)));
     let mut seen = BTreeSet::new();
     for dependency in &ordered {
-        if !native_ids::is(Kind::AssistantSource, &dependency.source_id)
+        if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&dependency.source_id)
+            .is_none()
             || !native_ids::is(Kind::AssistantOrigin, &dependency.origin_id)
             || dependency.source_revision == 0
             || dependency.origin_deletion_generation == 0
@@ -417,11 +413,6 @@ pub fn prepare_capture(
         capture.native_id,
         capture.kind,
     );
-    let source_ids = index
-        .fragments
-        .iter()
-        .map(|part| history_source_id(&origin_id, part.fragment_index))
-        .collect();
     Ok(Some(PreparedHistoryCapture {
         proof: HistoryRetentionProof {
             actor_id: capture.actor_id.into(),
@@ -435,7 +426,6 @@ pub fn prepare_capture(
             expires_at_unix_ms: expires_at,
         },
         origin_id,
-        source_ids,
         retained_content,
         index,
         redacted: !redacted.kinds.is_empty(),
@@ -574,7 +564,7 @@ mod tests {
     fn history_producer_fingerprint_is_order_independent_but_rejects_trimming_or_conflicting_versions()
      {
         let source = |name: &str| HistoryDependency {
-            source_id: native_ids::stable(Kind::AssistantSource, &name),
+            source_id: native_ids::fixture_source_id(&name),
             source_revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &name),
             origin_deletion_generation: 1,

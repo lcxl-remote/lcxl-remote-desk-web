@@ -121,10 +121,7 @@ impl MemorySeam for Store {
                     context: Some("Owner preference".into()),
                     status,
                     recorded_at_unix_ms: revision,
-                    source_ids: vec![crate::native_ids::stable(
-                        crate::native_ids::Kind::AssistantSource,
-                        &revision,
-                    )],
+                    source_ids: vec![crate::native_ids::fixture_source_id(&revision)],
                 })
                 .collect(),
                 has_more: false,
@@ -379,10 +376,15 @@ async fn a_skipped_write_uses_original_scope_without_rewriting_generations_or_re
     session.turn_state = crate::session::TurnState::Running;
     session.current_turn_id = Some("turn".into());
     session.input_revision = 1;
-    let call = ToolCall { id: "write-call".into(), name: data_tools::MANAGE_MEMORIES.into(),
-        arguments_json: serde_json::json!({"operation":"remember", "content":"a stable fact", "source_refs":[{
-            "kind":"input", "id":crate::native_ids::stable(crate::native_ids::Kind::AssistantSource, &"owner-input"),
-            "role":"evidence", "revision":1}]}).to_string() };
+    let call = ToolCall {
+        id: "write-call".into(),
+        name: data_tools::MANAGE_MEMORIES.into(),
+        arguments_json:
+            serde_json::json!({"operation":"remember", "content":"a stable fact", "source_refs":[{
+            "kind":"input", "id":crate::native_ids::fixture_source_id(&"owner-input"),
+            "role":"evidence", "revision":1}]})
+            .to_string(),
+    };
     let policy = Model.model_egress_policy().unwrap().unwrap();
     let input = crate::model_message_labels::model_bound_user_message(
         "owner-input".into(),
@@ -528,7 +530,7 @@ impl ModelSeam for FollowupModel {
                 tool_calls: vec![ToolCall {
                     id: "source-read".into(),
                     name: data_tools::READ_MEMORY_SOURCE.into(),
-                    arguments_json: serde_json::json!({"source_id": crate::native_ids::stable(crate::native_ids::Kind::AssistantSource, &"history-source")}).to_string(),
+                    arguments_json: serde_json::json!({"source_id": crate::native_ids::fixture_source_id(&"history-source")}).to_string(),
                 }],
                 ..Default::default()
             }

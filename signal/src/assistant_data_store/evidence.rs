@@ -213,7 +213,6 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         memory_id: &row.memory_id,
         memory_revision: unsigned(row.memory_revision)?,
         memory_accepted_input_seq: unsigned(memory_revision.accepted_input_seq)?,
-        evidence_source_id: &row.source_id,
         role,
         body: &row.body,
         origin_id: &primary.origin_id,
@@ -305,7 +304,11 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         };
         let dependency_policy_revision = if let Some(source) = evidence::Entity::find()
             .filter(evidence::Column::ActorId.eq(actor))
-            .filter(evidence::Column::SourceId.eq(&dependency.source_id))
+            .filter(
+                evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                    &dependency.source_id,
+                )),
+            )
             .one(db)
             .await?
         {

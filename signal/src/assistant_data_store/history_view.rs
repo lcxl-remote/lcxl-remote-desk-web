@@ -107,7 +107,7 @@ impl AuthorizedHistoryView {
             end -= 1;
         }
         Ok(ConversationSearchHit {
-            source_id: row.source_id.clone(),
+            source_id: row.source_id().clone(),
             revision: unsigned(row.revision)?,
             kind: self.kind,
             locator: self.locator.clone(),
@@ -139,7 +139,7 @@ impl AuthorizedHistoryView {
     pub(crate) fn message(&self) -> Result<HistoryMessage, AssistantStoreError> {
         let row = &self.source.row;
         Ok(HistoryMessage {
-            source_id: row.source_id.clone(),
+            source_id: row.source_id().clone(),
             message_id: row.native_id.clone(),
             revision: unsigned(row.revision)?,
             role: row.role.clone(),

@@ -230,12 +230,12 @@ async fn search_on(
         .collect::<Vec<_>>();
     let mut delivered_sources = batch.views[..reply.selected_count]
         .iter()
-        .map(|view| view.source.row.source_id.clone())
+        .map(|view| view.source.row.source_id().clone())
         .collect::<BTreeSet<_>>();
     for view in &batch.views[..reply.selected_count] {
         if let Some(native) = &view.native_summary {
             for source in native.sources() {
-                if delivered_sources.insert(source.row.source_id.clone()) {
+                if delivered_sources.insert(source.row.source_id().clone()) {
                     versions.push(source.version()?);
                     selected.push(source.usage.clone());
                 }
@@ -566,7 +566,7 @@ async fn scan_on(
                         item.source.clone(),
                         PageAnchor::Time {
                             time_unix_ms: item.time_key_unix_ms,
-                            source_id: item.source.source_id,
+                            history_id: item.position.history_id,
                         },
                     )
                 })

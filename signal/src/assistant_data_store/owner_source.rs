@@ -16,10 +16,7 @@ use desk_agent_protocol::ai_assistant::{
     },
     user_instructions::AssistantDataPolicy,
 };
-use desk_diagnose_core::{
-    ai_assistant::source::{HistoryRetentionProof, validate_policy},
-    native_ids::{self, Kind},
-};
+use desk_diagnose_core::ai_assistant::source::{HistoryRetentionProof, validate_policy};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, TransactionTrait,
 };
@@ -29,7 +26,7 @@ pub(crate) async fn owner_source(
     source_id: &str,
     now: u64,
 ) -> Result<AssistantSourceResolution, AssistantStoreError> {
-    if !native_ids::is(Kind::AssistantSource, source_id) {
+    if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(source_id).is_none() {
         return Err(AssistantStoreError::Invalid(
             "invalid assistant source identity",
         ));
@@ -67,7 +64,7 @@ pub(crate) async fn owner_source_with_original_on<C: ConnectionTrait + ConfigCon
 ) -> Result<(AssistantSourceResolution, Option<history::Model>), AssistantStoreError> {
     if let Some(row) = history::Entity::find()
         .filter(history::Column::ActorId.eq(actor))
-        .filter(history::Column::SourceId.eq(source_id))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source_id)))
         .one(db)
         .await?
     {
@@ -88,7 +85,7 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
 ) -> Result<(AssistantSourceResolution, Option<history::Model>), AssistantStoreError> {
     if let Some(source) = evidence::Entity::find()
         .filter(evidence::Column::ActorId.eq(actor))
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(db)
         .await?
         && super::evidence::owner_history_identity_allowed_on(db, actor, &source, now).await?
@@ -101,12 +98,15 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
             .filter(|key| key.origin_id == source.origin_id)
             .collect::<Vec<_>>();
         if let [key] = primary.as_slice()
-            && let Some(original) = history::Entity::find()
-                .filter(history::Column::ActorId.eq(actor))
-                .filter(history::Column::SourceId.eq(&key.source_id))
-                .filter(history::Column::OriginId.eq(&key.origin_id))
-                .one(db)
-                .await?
+            && let Some(original) =
+                history::Entity::find()
+                    .filter(history::Column::ActorId.eq(actor))
+                    .filter(history::Column::Id.eq(
+                        desk_assistant_data_store::source_rows::history(&key.source_id),
+                    ))
+                    .filter(history::Column::OriginId.eq(&key.origin_id))
+                    .one(db)
+                    .await?
             && unsigned(original.revision)? == key.revision
         {
             let mut resolved = history_source_on(db, actor, &original, policy, now).await?;
@@ -122,7 +122,7 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
                     .filter(revision::Column::Revision.eq(source.memory_revision))
                     .one(db)
                     .await?;
-                resolved.source_id = source.source_id;
+                resolved.source_id = source.source_id();
                 resolved.revision = unsigned(source.memory_revision)?;
                 resolved.notice = Some(
                     if prior.is_some_and(|value| value.status == "forgotten") {
@@ -154,7 +154,7 @@ pub(super) async fn memory_source_on<C: ConnectionTrait + ConfigConnection>(
 ) -> Result<AssistantSourceResolution, AssistantStoreError> {
     let Some(source) = evidence::Entity::find()
         .filter(evidence::Column::ActorId.eq(actor))
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(db)
         .await?
     else {
@@ -235,7 +235,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         || row.revision <= 0
         || row.content.len() > 4096
     {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     let Some(original) = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
@@ -243,7 +243,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         .one(db)
         .await?
     else {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     };
     let device = super::memory::source_device_on(db, actor, &row.device_ref).await?;
     if !super::source_lifecycle::origin_readable_on(db, actor, &original).await?
@@ -255,17 +255,17 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         || original.native_id != row.native_id
         || original.kind != row.kind
     {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     let Ok(policy) = serde_json::from_str::<SourceUsePolicy>(&original.policy_json) else {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     };
     let Ok(proof) = serde_json::from_str::<HistoryRetentionProof>(&row.retention_proof_json) else {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     };
     let native_without_owner_input = match super::history_native::read(row) {
         Ok(native) => super::history_native::zero_input_allowed(row, native.as_ref()),
-        Err(_) => return Ok(unavailable(&row.source_id)),
+        Err(_) => return Ok(unavailable(&row.source_id())),
     };
     if !history_policy_allowed(&policy, now)
         || proof.actor_id != actor
@@ -282,23 +282,23 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         )
         || proof.expires_at_unix_ms != unsigned(row.expires_at_ms)?
     {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     let Ok(dependencies) = serde_json::from_str::<Vec<HistoryDependency>>(&row.dependencies_json)
     else {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     };
     if desk_diagnose_core::ai_assistant::source::validate_history_dependencies(&dependencies)
         .is_err()
     {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     for dependency in dependencies {
         if dependency
             .expires_at_unix_ms
             .is_some_and(|until| until <= now)
         {
-            return Ok(unavailable(&row.source_id));
+            return Ok(unavailable(&row.source_id()));
         }
         let Some(origin) = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(actor))
@@ -306,20 +306,24 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
             .one(db)
             .await?
         else {
-            return Ok(unavailable(&row.source_id));
+            return Ok(unavailable(&row.source_id()));
         };
         let Ok(policy) = serde_json::from_str::<SourceUsePolicy>(&origin.policy_json) else {
-            return Ok(unavailable(&row.source_id));
+            return Ok(unavailable(&row.source_id()));
         };
         let source_policy_revision = if let Some(source) = evidence::Entity::find()
             .filter(evidence::Column::ActorId.eq(actor))
-            .filter(evidence::Column::SourceId.eq(&dependency.source_id))
+            .filter(
+                evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                    &dependency.source_id,
+                )),
+            )
             .one(db)
             .await?
         {
             let Ok(source_policy) = serde_json::from_str::<SourceUsePolicy>(&source.policy_json)
             else {
-                return Ok(unavailable(&row.source_id));
+                return Ok(unavailable(&row.source_id()));
             };
             if source.origin_id != dependency.origin_id
                 || unsigned(source.memory_revision)? != dependency.source_revision
@@ -327,7 +331,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
                 || !super::evidence::owner_history_identity_allowed_on(db, actor, &source, now)
                     .await?
             {
-                return Ok(unavailable(&row.source_id));
+                return Ok(unavailable(&row.source_id()));
             }
             source_policy.policy_revision
         } else {
@@ -342,19 +346,19 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
                     .await?
                     .is_none())
         {
-            return Ok(unavailable(&row.source_id));
+            return Ok(unavailable(&row.source_id()));
         }
     }
     let docs = document::Entity::find()
         .filter(document::Column::ActorId.eq(actor))
         .filter(document::Column::SourceKind.eq("history"))
-        .filter(document::Column::SourceId.eq(&row.source_id))
+        .filter(document::Column::SourceId.eq(row.source_id()))
         .filter(document::Column::SourceRevision.eq(row.revision))
         .limit(2)
         .all(db)
         .await?;
     if docs.len() != 1 {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     let doc = &docs[0];
     if doc.byte_start < 0
@@ -368,7 +372,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         || doc.expires_at_ms != Some(row.expires_at_ms)
         || unsigned(doc.policy_revision)? != policy.policy_revision
     {
-        return Ok(unavailable(&row.source_id));
+        return Ok(unavailable(&row.source_id()));
     }
     let kind = row.kind.as_str();
     let message_id = if matches!(kind, "input" | "assistant_message") {
@@ -379,7 +383,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         None
     };
     Ok(AssistantSourceResolution {
-        source_id: row.source_id.clone(),
+        source_id: row.source_id().clone(),
         revision: unsigned(row.revision)?,
         availability: if doc.partial {
             SourceAvailability::Partial

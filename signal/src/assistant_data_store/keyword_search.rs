@@ -69,7 +69,7 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     validate_context_on(db, context).await?;
     let row = history::Entity::find()
         .filter(history::Column::ActorId.eq(context.actor_id))
-        .filter(history::Column::SourceId.eq(source_id))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source_id)))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -91,7 +91,7 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     let policy: SourceUsePolicy = serde_json::from_str(&original.policy_json)
         .map_err(|_| AssistantStoreError::Inaccessible)?;
     let own = HistoryDependency {
-        source_id: row.source_id.clone(),
+        source_id: row.source_id().clone(),
         source_revision: revision,
         origin_id: row.origin_id.clone(),
         origin_deletion_generation: unsigned(original.deletion_generation)?,

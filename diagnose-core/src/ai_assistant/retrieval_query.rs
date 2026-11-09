@@ -24,9 +24,10 @@ pub enum PageAnchor {
     Relevance {
         next_offset: u32,
     },
+    /// `history_id` is the history row key that breaks ties at one time.
     Time {
         time_unix_ms: u64,
-        source_id: String,
+        history_id: i64,
     },
     MemoryRevision {
         before_revision: u64,
@@ -34,7 +35,7 @@ pub enum PageAnchor {
     Window {
         admitted_generation: u64,
         fragment_index: u32,
-        source_id: String,
+        history_id: i64,
         forward: bool,
     },
 }
@@ -132,12 +133,11 @@ impl RetrievalQuerySnapshot {
                 }
                 PageAnchor::Time {
                     time_unix_ms,
-                    source_id,
+                    history_id,
                 } => {
-                    if *time_unix_ms == 0 || *time_unix_ms > i64::MAX as u64 {
+                    if *time_unix_ms == 0 || *time_unix_ms > i64::MAX as u64 || *history_id <= 0 {
                         return Err("invalid retrieval time position");
                     }
-                    desk_agent_protocol::ai_assistant::source::validate_source_id(source_id)?;
                 }
                 PageAnchor::MemoryRevision { before_revision }
                     if *before_revision == 0 || *before_revision > i64::MAX as u64 =>
@@ -146,13 +146,15 @@ impl RetrievalQuerySnapshot {
                 }
                 PageAnchor::Window {
                     admitted_generation,
-                    source_id,
+                    history_id,
                     ..
                 } => {
-                    if *admitted_generation == 0 || *admitted_generation > self.corpus_generation {
+                    if *admitted_generation == 0
+                        || *admitted_generation > self.corpus_generation
+                        || *history_id <= 0
+                    {
                         return Err("invalid retrieval window position");
                     }
-                    desk_agent_protocol::ai_assistant::source::validate_source_id(source_id)?;
                 }
                 _ => {}
             }

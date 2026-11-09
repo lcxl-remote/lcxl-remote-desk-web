@@ -11,13 +11,13 @@ use sea_orm::sea_query::Expr;
 
 async fn version(store: &TestStore, source: &str) -> QuerySourceVersion {
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     QuerySourceVersion {
-        source_id: row.source_id,
+        source_id: row.source_id(),
         revision: row.revision as u64,
     }
 }
@@ -88,7 +88,7 @@ async fn owner_view_access_cannot_substitute_for_the_separate_model_source_gate(
     let expected = version(&store, &source).await;
     let frame = Frame::new(&store, &device).await;
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -201,7 +201,7 @@ async fn late_sources_wrong_versions_and_chat_timestamps_cannot_be_presented_as_
             history::Column::TimeBasis,
             Expr::value(Some("chat_recording_time".to_string())),
         )
-        .filter(history::Column::SourceId.eq(&source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&source)))
         .exec(&store.db)
         .await
         .unwrap();

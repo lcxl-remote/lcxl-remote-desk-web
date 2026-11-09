@@ -99,7 +99,9 @@ async fn natural_execution_reclamation_and_file_cleanup_do_not_expire_independen
         SourceAvailability::Unavailable
     );
     let evidence = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(evidence_id))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(evidence_id)),
+        )
         .one(&store.db)
         .await
         .unwrap()
@@ -252,7 +254,10 @@ async fn manual_root_deletion_denies_completed_child_evidence_and_derived_text_w
     );
     assert!(
         !evidence::Entity::find()
-            .filter(evidence::Column::SourceId.eq(evidence_id))
+            .filter(
+                evidence::Column::Id
+                    .eq(desk_assistant_data_store::source_rows::memory(evidence_id))
+            )
             .one(&store.db)
             .await
             .unwrap()
@@ -436,13 +441,19 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
     let (_, newer_source, newer_origin) =
         super::owner_memory::seed(&store, 1, "new-evidence").await;
     let old = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&old_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&old_source)),
+        )
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     let current = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&newer_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                &newer_source,
+            )),
+        )
         .one(&store.db)
         .await
         .unwrap()
@@ -481,13 +492,21 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
             evidence::Column::DependenciesJson,
             Expr::value(serde_json::to_string(&dependencies).unwrap()),
         )
-        .filter(evidence::Column::SourceId.eq(&newer_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                &newer_source,
+            )),
+        )
         .exec(&store.db)
         .await
         .unwrap();
     super::owner_memory::rebuild_evidence_proof(&store, &newer_source).await;
     let current = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&newer_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                &newer_source,
+            )),
+        )
         .one(&store.db)
         .await
         .unwrap()

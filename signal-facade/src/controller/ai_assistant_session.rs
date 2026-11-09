@@ -3237,7 +3237,7 @@ mod source_window_tests {
     fn one_original_answer_keeps_every_citation_when_it_exceeds_the_page_target() {
         use desk_diagnose_core::{
             ai_assistant::{citation::AnswerCitations, seam::AssistantReadRoot},
-            native_ids::{self, Kind},
+            native_ids,
         };
         let text = "x".repeat(PAGE_BYTES - 300);
         let page = project_snapshot_message_page(
@@ -3249,7 +3249,7 @@ mod source_window_tests {
         .unwrap();
         let roots = (0..20)
             .map(|value| AssistantReadRoot {
-                source_id: native_ids::stable(Kind::AssistantSource, &value),
+                source_id: native_ids::fixture_source_id(&value),
                 source_revision: 1,
             })
             .collect::<Vec<_>>();

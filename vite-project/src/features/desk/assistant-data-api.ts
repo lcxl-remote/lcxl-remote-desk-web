@@ -3,6 +3,7 @@ import type { AssistantHistoryWindow, AiAssistantSessionSnapshotDto, AssistantDa
     AssistantDataSettingsUpdate, UserInstructions, UserInstructionsUpdate } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
 import { deskErrorKeyOr, type ErrorCodeKeyMap } from '@/lib/desk-error-i18n';
+import { assistantSourceIdPattern } from '@/components/markdown-source-links';
 
 const errors: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.REVISION_CONFLICT]: 'pages.aiAssistant.memory.changed',
@@ -116,7 +117,7 @@ function fact(value: MemoryRecord): boolean {
         && ['personal', 'device'].includes(value.scope)
         && ['active', 'pending_conflict', 'superseded'].includes(value.status)
         && Array.isArray(value.source_ids)
-        && value.source_ids.every(id => typeof id === 'string' && /^src_[\w-]{22}$/.test(id));
+        && value.source_ids.every(id => typeof id === 'string' && assistantSourceIdPattern.test(id));
 }
 
 export async function listAssistantMemories(options: { cursor?: string; generation?: number;
@@ -197,7 +198,7 @@ export function assistantCitations(answer: { id: string; citations?: { answer_me
     source_id: string; source_revision: number }[] }): { source_id: string; source_revision: number }[] {
     const values = answer.citations ?? [];
     if (!Array.isArray(values) || values.some(value => !value || value.answer_message_id !== answer.id || value.answer_revision !== 1
-        || !positive(value.source_revision) || !/^src_[A-Za-z0-9_-]{22}$/.test(value.source_id))
+        || !positive(value.source_revision) || !assistantSourceIdPattern.test(value.source_id))
         || new Set(values.map(value => value.source_id)).size !== values.length) return [];
     return values.map(value => ({ source_id: value.source_id, source_revision: value.source_revision }));
 }
@@ -227,11 +228,11 @@ export async function readAssistantRetainedHistory(source: AssistantSourceResolu
     const query = new URLSearchParams({ source_id: source.source_id, revision: String(source.revision), view });
     if (cursor) query.set('cursor', cursor);
     const window = await request<AssistantRetainedHistory>(`/api/my/ai-assistant-history/window?${query}`);
-    if (window.conversation_id !== source.locator?.conversation_id || !/^src_[A-Za-z0-9_-]{22}$/.test(window.anchor_source_id)
+    if (window.conversation_id !== source.locator?.conversation_id || !assistantSourceIdPattern.test(window.anchor_source_id)
         || !positive(window.anchor_revision) || !positive(window.observed_through_generation) || typeof window.partial !== 'boolean'
         || !Array.isArray(window.fragments) || !window.fragments.length
         || new Set(window.fragments.map(value => value.source?.source_id)).size !== window.fragments.length
-        || window.fragments.some(value => !value.source || !/^src_[A-Za-z0-9_-]{22}$/.test(value.source.source_id)
+        || window.fragments.some(value => !value.source || !assistantSourceIdPattern.test(value.source.source_id)
             || !positive(value.source.revision) || !['available', 'partial', 'redacted'].includes(value.source.availability)
             || value.source.locator?.conversation_id !== window.conversation_id || typeof value.source.content !== 'string'
             || !positive(value.source.recorded_at_unix_ms) || typeof value.source.statement_timezone !== 'string'

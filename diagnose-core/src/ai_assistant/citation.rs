@@ -1,6 +1,5 @@
 //! Display references select exact consumed read roots, never new read authority.
 use super::seam::AssistantReadRoot;
-use crate::native_ids::{self, Kind};
 use desk_agent_protocol::ai_assistant::source::AssistantCitation;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +19,10 @@ pub fn for_answer(
 ) -> AnswerCitations {
     let mut versions = BTreeMap::new();
     for root in roots {
-        if !native_ids::is(Kind::AssistantSource, &root.source_id) || root.source_revision == 0 {
+        if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&root.source_id)
+            .is_none()
+            || root.source_revision == 0
+        {
             continue;
         }
         versions
@@ -121,7 +123,9 @@ fn source_markers(text: &str, maximum: usize) -> (Vec<String>, bool) {
                     break;
                 };
                 let id = &value[..end];
-                if native_ids::is(Kind::AssistantSource, id) && seen.insert(id.to_string()) {
+                if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(id).is_some()
+                    && seen.insert(id.to_string())
+                {
                     if sources.len() == maximum {
                         return (sources, true);
                     }
@@ -141,10 +145,25 @@ mod tests {
     use super::*;
     fn root(seed: usize, revision: u64) -> AssistantReadRoot {
         AssistantReadRoot {
-            source_id: native_ids::stable(Kind::AssistantSource, &("citation-test", seed)),
+            source_id: crate::native_ids::fixture_source_id(&("citation-test", seed)),
             source_revision: revision,
         }
     }
+    #[test]
+    fn a_mistyped_neighbouring_id_is_dropped_instead_of_citing_another_root() {
+        use desk_agent_protocol::ai_assistant::source_ref::SourceRef;
+        let roots = [42, 43].map(|id| AssistantReadRoot {
+            source_id: SourceRef::history(id).to_string(),
+            source_revision: 1,
+        });
+        // 42 formats as src_h42i; copying the digit 3 for 2 keeps the check
+        // letter of 42, which does not match 43.
+        let result = for_answer("answer", "〔来源:src_h43i〕", &roots, &Default::default());
+        assert!(result.citations.is_empty());
+        let result = for_answer("answer", "〔来源:src_h42i〕", &roots, &Default::default());
+        assert_eq!(result.citations[0].source_id, "src_h42i");
+    }
+
     #[test]
     fn ordinary_markers_require_exact_consumed_roots_and_unambiguous_versions() {
         let a = root(1, 2);
@@ -239,7 +258,7 @@ mod tests {
 fn configured_citation_capacity_accepts_large_answer_projections() {
     let roots = (0..80)
         .map(|index| AssistantReadRoot {
-            source_id: native_ids::stable(Kind::AssistantSource, &index),
+            source_id: crate::native_ids::fixture_source_id(&index),
             source_revision: 1,
         })
         .collect::<Vec<_>>();

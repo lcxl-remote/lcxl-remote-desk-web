@@ -205,7 +205,7 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
         for row in rows {
             if usage.purpose == SourceReadPurpose::MemoryEvidence
                 && !usage.roots.iter().chain(&usage.decision_roots).any(|root| {
-                    root.source_id == row.source_id
+                    root.source_id == row.source_id()
                         && root.source_revision == row.memory_revision as u64
                 })
             {
@@ -315,7 +315,11 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
         }
         let retained_fact = evidence::Entity::find()
             .filter(evidence::Column::ActorId.eq(actor))
-            .filter(evidence::Column::SourceId.eq(&dependency.source_id))
+            .filter(
+                evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                    &dependency.source_id,
+                )),
+            )
             .one(db)
             .await?;
         let evidence_policy = retained_fact.is_some();
@@ -358,11 +362,14 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
                 queue.push_back((source, true));
             }
         } else {
-            let row = history::Entity::find()
-                .filter(history::Column::ActorId.eq(actor))
-                .filter(history::Column::SourceId.eq(&dependency.source_id))
-                .one(db)
-                .await?;
+            let row =
+                history::Entity::find()
+                    .filter(history::Column::ActorId.eq(actor))
+                    .filter(history::Column::Id.eq(
+                        desk_assistant_data_store::source_rows::history(&dependency.source_id),
+                    ))
+                    .one(db)
+                    .await?;
             if let Some(row) = row {
                 if unsigned(row.revision)? != dependency.source_revision
                     || row.origin_id != dependency.origin_id
@@ -623,7 +630,7 @@ async fn evidence_with_control_on<C: ConnectionTrait + crate::config::ConfigConn
         ),
     );
     let own = HistoryDependency {
-        source_id: row.source_id.clone(),
+        source_id: row.source_id().clone(),
         source_revision: unsigned(row.memory_revision)?,
         origin_id: row.origin_id.clone(),
         origin_deletion_generation: unsigned(original.deletion_generation)?,
@@ -783,7 +790,7 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
     let docs = document::Entity::find()
         .filter(document::Column::ActorId.eq(actor))
         .filter(document::Column::SourceKind.eq("history"))
-        .filter(document::Column::SourceId.eq(&row.source_id))
+        .filter(document::Column::SourceId.eq(row.source_id()))
         .filter(document::Column::SourceRevision.eq(row.revision))
         .limit(2)
         .all(db)

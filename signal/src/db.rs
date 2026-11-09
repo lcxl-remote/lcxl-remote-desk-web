@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 60;
+const SIGNAL_SCHEMA_VERSION: i32 = 61;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
@@ -1298,16 +1298,17 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
 async fn create_assistant_data_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     for ddl in [
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_history_native ON agent_assistant_history (actor_id, conversation_id, native_id, kind, fragment_index)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_history_scope_time ON agent_assistant_history (actor_id, device_ref, recorded_at_ms, source_id)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_history_actor_time ON agent_assistant_history (actor_id, recorded_at_ms, source_id)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_history_native_time ON agent_assistant_history (actor_id, (COALESCE(native_action_at_ms, native_action_from_ms)), source_id)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_history_window ON agent_assistant_history (actor_id, conversation_id, admitted_generation, fragment_index, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_scope_time ON agent_assistant_history (actor_id, device_ref, recorded_at_ms, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_actor_time ON agent_assistant_history (actor_id, recorded_at_ms, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_native_time ON agent_assistant_history (actor_id, (COALESCE(native_action_at_ms, native_action_from_ms)), id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_window ON agent_assistant_history (actor_id, conversation_id, admitted_generation, fragment_index, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_origin_fragment ON agent_assistant_history (actor_id, origin_id, fragment_index)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_origin_native ON agent_assistant_origin (actor_id, conversation_id, native_id, kind)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_origin_input ON agent_assistant_origin (actor_id, accepted_input_seq, id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_coverage_slot ON agent_assistant_history_coverage (actor_id, conversation_id, day_bucket, reason)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_revision ON agent_memory_revision (memory_id, revision)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_write ON agent_memory_revision (actor_id, producer_call_id, tool_call_id)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_sources ON agent_memory_source (actor_id, memory_id, memory_revision, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_sources ON agent_memory_source (actor_id, memory_id, memory_revision, id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_use ON agent_memory_use (actor_id, authorization_id, memory_id, memory_revision, purpose)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_memory_commit_gc ON agent_memory_commit (actor_id, expires_at_ms, id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_forget ON agent_memory_tombstone (actor_id, operation_id, memory_id)",

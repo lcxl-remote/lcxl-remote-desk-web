@@ -528,7 +528,7 @@ async fn native_inventory_search_corpus_binds_twenty_roots_and_five_statuses_to_
                             device_name: None,
                         });
                 let txn = frame.store.db.begin().await.unwrap();
-                crate::assistant_data_store::history::capture_on(
+                let outcome = crate::assistant_data_store::history::capture_on(
                     &txn,
                     &projection.capture(data.current_actor_input_seq, directory),
                     &AssistantDataPolicy::default(),
@@ -536,7 +536,7 @@ async fn native_inventory_search_corpus_binds_twenty_roots_and_five_statuses_to_
                 .await
                 .unwrap();
                 txn.commit().await.unwrap();
-                status_sources.insert(root, projection.source_id());
+                status_sources.insert(root, outcome.source_ids[0].clone());
             }
         }
         let page = search::search(&frame.store.db, frame.context(), &request(&frame, 0))
@@ -667,7 +667,7 @@ async fn native_inventory_retained_completion_survives_an_empty_live_inventory_w
                     device_name: None,
                 });
         let txn = frame.store.db.begin().await.unwrap();
-        crate::assistant_data_store::history::capture_on(
+        let outcome = crate::assistant_data_store::history::capture_on(
             &txn,
             &projection.capture(data.current_actor_input_seq, directory),
             &AssistantDataPolicy::default(),
@@ -675,7 +675,7 @@ async fn native_inventory_retained_completion_survives_an_empty_live_inventory_w
         .await
         .unwrap();
         txn.commit().await.unwrap();
-        ids.push(projection.source_id());
+        ids.push(outcome.source_ids[0].clone());
     }
     let result = search::search(&frame.store.db, frame.context(), &request(&frame, 0))
         .await

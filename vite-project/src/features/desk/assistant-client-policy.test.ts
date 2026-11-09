@@ -1,3 +1,4 @@
+import { assistantSourceId } from '@/test/assistant-source-id';
 import { afterEach, expect, it, vi } from 'vitest';
 import { assistantCitations, getAssistantProcessing, listAssistantMemories, listRetainedAssistantConversations,
     readAssistantRetainedHistory, readAssistantSourceHistory, searchAssistantHistory } from './assistant-data-api';
@@ -7,7 +8,7 @@ function nativeId(prefix: string, index: number) {
     return `${prefix}_${btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
 }
 const content = '引用🙂'.repeat(7000);
-const source = (index = 0) => ({ source_id: nativeId('src', index), revision: 1, availability: 'available' as const,
+const source = (index = 0) => ({ source_id: assistantSourceId(index + 1), revision: 1, availability: 'available' as const,
     content, recorded_at_unix_ms: 100, statement_timezone: 'UTC', source_device: null, notice: null,
     locator: { conversation_id: 'original', root_conversation_id: 'original', message_id: 'answer',
         input_event_id: null, action_id: null, result_id: null, fragment_index: 0,
@@ -20,7 +21,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 it('accepts server memory pages above the former client count and still rejects duplicate identities', async () => {
     const memories = Array.from({ length: 51 }, (_, index) => ({ memory_id: nativeId('mem', index), revision: 1,
-        scope: 'personal', content: 'Saved fact', context: null, status: 'active', source_ids: [nativeId('src', index)] }));
+        scope: 'personal', content: 'Saved fact', context: null, status: 'active', source_ids: [assistantSourceId(index + 1)] }));
     const page = { memories, next_cursor: null, memory_state_generation: 1, control_generation: 1 };
     respond(page);
     expect((await listAssistantMemories()).memories).toHaveLength(51);
@@ -68,10 +69,10 @@ it('accepts a larger server conversation list and preserves root-source matching
 });
 
 it('keeps large citation collections bound to the exact answer and source revisions', () => {
-    const citations = Array.from({ length: 80 }, (_, index) => ({ answer_message_id: 'answer', answer_revision: 1,
-        source_id: nativeId('src', index), source_revision: 1 }));
+    const citations = Array.from({ length: 100 }, (_, index) => ({ answer_message_id: 'answer', answer_revision: 1,
+        source_id: assistantSourceId(index + 1), source_revision: 1 }));
     expect(new TextEncoder().encode(JSON.stringify(citations)).length).toBeGreaterThan(8192);
-    expect(assistantCitations({ id: 'answer', citations })).toHaveLength(80);
+    expect(assistantCitations({ id: 'answer', citations })).toHaveLength(100);
     expect(assistantCitations({ id: 'other', citations })).toEqual([]);
     expect(assistantCitations({ id: 'answer', citations: [...citations, citations[0]] })).toEqual([]);
 });

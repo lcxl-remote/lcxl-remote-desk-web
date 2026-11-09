@@ -17,6 +17,9 @@ pub struct Model {
     pub source_kind: String,
     #[sea_orm(indexed)]
     pub source_id: String,
+    /// The conversation fragment row of a history document; `None` for memory.
+    #[sea_orm(indexed)]
+    pub history_id: Option<i64>,
     pub source_revision: i64,
     pub corpus_generation: i64,
     pub origin_id: String,

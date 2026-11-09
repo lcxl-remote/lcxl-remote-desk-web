@@ -150,7 +150,7 @@ pub(crate) async fn list_on<C: ConnectionTrait + ConfigConnection>(
             .filter(history::Column::AdmittedGeneration.lte(signed(observed)?))
             .order_by_desc(history::Column::AdmittedGeneration)
             .order_by_asc(history::Column::FragmentIndex)
-            .order_by_asc(history::Column::SourceId);
+            .order_by_asc(history::Column::Id);
         let mut selected = None;
         let mut offset = 0;
         while remaining > 0 && began.elapsed() < duration {

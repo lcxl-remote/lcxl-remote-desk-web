@@ -401,7 +401,11 @@ async fn a_source_policy_change_blocks_current_cache_replay_and_does_not_create_
     .await
     .unwrap();
     let source = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&block.records[0].source_ids[0]))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                &block.records[0].source_ids[0],
+            )),
+        )
         .one(&fixture.store.db)
         .await
         .unwrap()

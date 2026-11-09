@@ -13,7 +13,7 @@ use sea_orm::PaginatorTrait;
 
 fn known(label: &str) -> KnownMemorySource {
     KnownMemorySource {
-        source_id: native_ids::stable(Kind::AssistantSource, &label),
+        source_id: native_ids::fixture_source_id(&label),
         revision: 1,
         origin_id: native_ids::stable(Kind::AssistantOrigin, &"shared-origin"),
     }

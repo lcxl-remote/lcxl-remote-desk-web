@@ -49,13 +49,13 @@ fn available(value: &desk_agent_protocol::ai_assistant::source::AssistantSourceR
     ) && value.content.is_some()
         && value.locator.is_some()
 }
-fn position(row: &history::Model) -> (i64, i32, &str) {
-    (row.admitted_generation, row.fragment_index, &row.source_id)
+fn position(row: &history::Model) -> (i64, i32, i64) {
+    (row.admitted_generation, row.fragment_index, row.id)
 }
 fn bound(row: &history::Model, forward: bool, inclusive: bool) -> Condition {
     let generation = Expr::col(history::Column::AdmittedGeneration);
     let fragment = Expr::col(history::Column::FragmentIndex);
-    let source = Expr::col(history::Column::SourceId);
+    let source = Expr::col(history::Column::Id);
     let mut result = Condition::any()
         .add(if forward {
             generation.clone().gt(row.admitted_generation)
@@ -76,9 +76,9 @@ fn bound(row: &history::Model, forward: bool, inclusive: bool) -> Condition {
                 .add(generation.clone().eq(row.admitted_generation))
                 .add(fragment.clone().eq(row.fragment_index))
                 .add(if forward {
-                    source.clone().gt(&row.source_id)
+                    source.clone().gt(row.id)
                 } else {
-                    source.clone().lt(&row.source_id)
+                    source.clone().lt(row.id)
                 }),
         );
     if inclusive {
@@ -86,7 +86,7 @@ fn bound(row: &history::Model, forward: bool, inclusive: bool) -> Condition {
             Condition::all()
                 .add(generation.eq(row.admitted_generation))
                 .add(fragment.eq(row.fragment_index))
-                .add(source.eq(&row.source_id)),
+                .add(source.eq(row.id)),
         );
     }
     result
@@ -108,7 +108,7 @@ async fn exact_on<C: ConnectionTrait + ConfigConnection>(
     now: u64,
 ) -> Result<history::Model, AssistantStoreError> {
     let row = base(actor, anchor)
-        .filter(history::Column::SourceId.eq(id))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(id)))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -178,7 +178,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         if cursor.source_id != request.source_id
             || cursor.revision != request.revision
             || cursor.view != request.view
-            || cursor.anchor != anchor.source_id
+            || cursor.anchor != anchor.source_id()
         {
             return Err(AssistantStoreError::Inaccessible);
         }
@@ -207,7 +207,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             let rows = base(actor, anchor)
                 .order_by_desc(history::Column::AdmittedGeneration)
                 .order_by_desc(history::Column::FragmentIndex)
-                .order_by_desc(history::Column::SourceId)
+                .order_by_desc(history::Column::Id)
                 .offset(scanned)
                 .limit(page)
                 .all(db)
@@ -260,7 +260,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             query
                 .order_by_asc(history::Column::AdmittedGeneration)
                 .order_by_asc(history::Column::FragmentIndex)
-                .order_by_asc(history::Column::SourceId)
+                .order_by_asc(history::Column::Id)
                 .limit(LIMIT + 1)
                 .all(db)
                 .await?
@@ -268,7 +268,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             query
                 .order_by_desc(history::Column::AdmittedGeneration)
                 .order_by_desc(history::Column::FragmentIndex)
-                .order_by_desc(history::Column::SourceId)
+                .order_by_desc(history::Column::Id)
                 .limit(LIMIT + 1)
                 .all(db)
                 .await?
@@ -278,7 +278,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             .filter(bound(&tail, false, true))
             .order_by_desc(history::Column::AdmittedGeneration)
             .order_by_desc(history::Column::FragmentIndex)
-            .order_by_desc(history::Column::SourceId)
+            .order_by_desc(history::Column::Id)
             .limit(LIMIT + 1)
             .all(db)
             .await?;
@@ -289,7 +289,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
                 .filter(bound(anchor, false, false))
                 .order_by_desc(history::Column::AdmittedGeneration)
                 .order_by_desc(history::Column::FragmentIndex)
-                .order_by_desc(history::Column::SourceId)
+                .order_by_desc(history::Column::Id)
                 .limit(9)
                 .all(db)
                 .await?,
@@ -300,7 +300,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
                 .filter(bound(anchor, true, false))
                 .order_by_asc(history::Column::AdmittedGeneration)
                 .order_by_asc(history::Column::FragmentIndex)
-                .order_by_asc(history::Column::SourceId)
+                .order_by_asc(history::Column::Id)
                 .limit(10)
                 .all(db)
                 .await?,
@@ -308,7 +308,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     }
     let mut result = AssistantHistoryWindow {
         conversation_id: anchor.conversation_id.clone(),
-        anchor_source_id: anchor.source_id.clone(),
+        anchor_source_id: anchor.source_id().clone(),
         anchor_revision: unsigned(anchor.revision)?,
         observed_through_generation: unsigned(tail.admitted_generation)?,
         fragments: Vec::new(),
@@ -346,11 +346,11 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     if emitted.is_empty() {
         return Err(AssistantStoreError::Capacity);
     }
-    emitted.sort_by(|a, b| position(a).cmp(&position(b)));
+    emitted.sort_by_key(position);
     result.fragments.sort_by_key(|fragment| {
         emitted
             .iter()
-            .position(|row| row.source_id == fragment.source.source_id)
+            .position(|row| row.source_id() == fragment.source.source_id)
     });
     while result.fragments.len() > 1
         && serde_json::to_vec(&result)
@@ -361,7 +361,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         let trim_back = cursor.as_ref().is_some_and(|cursor| cursor.forward)
             || (cursor.is_none()
                 && request.view == AssistantHistoryWindowView::Context
-                && emitted[0].source_id == anchor.source_id);
+                && emitted[0].source_id() == anchor.source_id());
         if trim_back {
             result.fragments.pop();
             emitted.pop();
@@ -377,10 +377,10 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             source_id: request.source_id.clone(),
             revision: request.revision,
             view: request.view,
-            anchor: anchor.source_id.clone(),
-            tail: tail.source_id.clone(),
+            anchor: anchor.source_id().clone(),
+            tail: tail.source_id().clone(),
             tail_revision: tail.revision,
-            boundary: boundary.source_id.clone(),
+            boundary: boundary.source_id().clone(),
             forward,
         }
         .encode()
@@ -400,8 +400,9 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     // Full row equality and the original owner locator are re-read after page
     // construction. Sharing a transaction is not a snapshot guarantee.
     for row in &emitted {
+        let source_id = row.source_id();
         if desk_diagnose_core::future::send_phase(|| {
-            exact_on(db, actor, anchor, &row.source_id, policy, now)
+            exact_on(db, actor, anchor, &source_id, policy, now)
         })
         .await?
             != *row
@@ -409,13 +410,14 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             return Err(AssistantStoreError::Inaccessible);
         }
     }
+    let tail_source_id = tail.source_id();
     if desk_diagnose_core::future::send_phase(|| {
         super::owner_source::owner_source_on(db, actor, &request.source_id, policy, now)
     })
     .await?
         != original
         || desk_diagnose_core::future::send_phase(|| {
-            exact_on(db, actor, anchor, &tail.source_id, policy, now)
+            exact_on(db, actor, anchor, &tail_source_id, policy, now)
         })
         .await?
             != tail

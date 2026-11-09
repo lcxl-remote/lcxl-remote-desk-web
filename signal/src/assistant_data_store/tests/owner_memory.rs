@@ -76,9 +76,9 @@ pub(super) async fn seed_with_body(
     .await
     .unwrap();
     let memory_id = native_ids::stable(Kind::Memory, &(actor.as_str(), label));
-    let source_id = native_ids::stable(Kind::AssistantSource, &(label, "evidence"));
+    let source_id = native_ids::fixture_memory_source_id(&(label, "evidence"));
     let known = KnownMemorySource {
-        source_id: native_ids::stable(Kind::AssistantSource, &(label, "original")),
+        source_id: native_ids::fixture_source_id(&(label, "original")),
         revision: 1,
         origin_id: origin_id.clone(),
     };
@@ -105,7 +105,7 @@ pub(super) async fn seed_with_body(
     .await
     .unwrap();
     evidence::ActiveModel {
-        source_id: Set(source_id.clone()),
+        id: Set(desk_assistant_data_store::source_rows::memory(&source_id)),
         memory_id: Set(memory_id.clone()),
         memory_revision: Set(1),
         actor_id: Set(actor.clone()),
@@ -124,7 +124,6 @@ pub(super) async fn seed_with_body(
         statement_timezone: Set("UTC".into()),
         revoked_at_ms: Set(None),
         expires_at_ms: Set(None),
-        ..Default::default()
     }
     .insert(&store.db)
     .await
@@ -179,7 +178,7 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
         MemoryEvidenceRetentionProof, MemoryEvidenceSnapshot,
     };
     let source = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(&store.db)
         .await
         .unwrap()
@@ -209,7 +208,6 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
         memory_id: &source.memory_id,
         memory_revision: unsigned(source.memory_revision).unwrap(),
         memory_accepted_input_seq: unsigned(version.accepted_input_seq).unwrap(),
-        evidence_source_id: &source.source_id,
         role: SourceRefRole::Evidence,
         body: &source.body,
         origin_id: &original.origin_id,
@@ -230,7 +228,7 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
             evidence::Column::RetentionProofJson,
             sea_orm::sea_query::Expr::value(serde_json::to_string(&proof).unwrap()),
         )
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -316,7 +314,7 @@ async fn delete_revokes_evidence_and_replay_preserves_generations_and_original_h
             .is_empty()
     );
     let source = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(&store.db)
         .await
         .unwrap()
@@ -412,7 +410,7 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
     let (_, _, other_origin) = seed(&store, 1, "B").await;
     let (memory_id, source_id, origin_id) = seed(&store, 1, "A").await;
     let dependency = HistoryDependency {
-        source_id: native_ids::stable(Kind::AssistantSource, &"producer"),
+        source_id: native_ids::fixture_source_id(&"producer"),
         source_revision: 1,
         origin_id: other_origin.clone(),
         origin_deletion_generation: 1,
@@ -424,7 +422,7 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
             evidence::Column::DependenciesJson,
             sea_orm::sea_query::Expr::value(serde_json::to_string(&vec![dependency]).unwrap()),
         )
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -541,7 +539,7 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
     };
     use desk_diagnose_core::ai_assistant::source::HistoryRetentionProof;
     let evidence = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(&store.db)
         .await
         .unwrap()
@@ -578,7 +576,9 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         expires_at_unix_ms: expires as u64,
     };
     history::ActiveModel {
-        source_id: Set(known[0].source_id.clone()),
+        id: Set(desk_assistant_data_store::source_rows::history(
+            &known[0].source_id,
+        )),
         origin_id: Set(original.origin_id.clone()),
         actor_id: Set(original.actor_id.clone()),
         device_ref: Set(original.device_ref.clone()),
@@ -605,20 +605,19 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         deleted_at_ms: Set(None),
         created_at_ms: Set(1),
         updated_at_ms: Set(1),
-        ..Default::default()
     }
     .insert(&store.db)
     .await
     .unwrap();
     document::ActiveModel {
-        document_id: Set(native_ids::stable(
-            Kind::AssistantSource,
-            &(source_id, "index"),
-        )),
+        document_id: Set(native_ids::fixture_source_id(&(source_id, "index"))),
         actor_id: Set(original.actor_id),
         device_ref: Set(original.device_ref),
         source_kind: Set("history".into()),
         source_id: Set(known[0].source_id.clone()),
+        history_id: Set(Some(desk_assistant_data_store::source_rows::history(
+            &known[0].source_id,
+        ))),
         source_revision: Set(1),
         corpus_generation: Set(1),
         origin_id: Set(original.origin_id),
@@ -712,12 +711,12 @@ async fn forgetting_a_fact_restricts_its_evidence_but_owner_can_still_view_the_o
             evidence::Column::BodyClearedAtMs,
             sea_orm::sea_query::Expr::value(Some(1002_i64)),
         )
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .exec(&store.db)
         .await
         .unwrap();
     let removed = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .one(&store.db)
         .await
         .unwrap()
@@ -731,7 +730,9 @@ async fn forgetting_a_fact_restricts_its_evidence_but_owner_can_still_view_the_o
     assert_eq!(original.content, before.content);
     assert_eq!(
         evidence::Entity::find()
-            .filter(evidence::Column::SourceId.eq(&source_id))
+            .filter(
+                evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id))
+            )
             .one(&store.db)
             .await
             .unwrap()
@@ -808,7 +809,11 @@ async fn source_statement_timezone_does_not_follow_later_file_settings() {
             evidence::Column::StatementTimezone,
             sea_orm::sea_query::Expr::value("Asia/Shanghai"),
         )
-        .filter(evidence::Column::SourceId.eq(source_id.as_str()))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                source_id.as_str(),
+            )),
+        )
         .exec(&store.db)
         .await
         .unwrap();
@@ -840,7 +845,11 @@ async fn source_statement_timezone_does_not_follow_later_file_settings() {
             evidence::Column::StatementTimezone,
             sea_orm::sea_query::Expr::value("Unknown/Timezone"),
         )
-        .filter(evidence::Column::SourceId.eq(source_id.as_str()))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                source_id.as_str(),
+            )),
+        )
         .exec(&store.db)
         .await
         .unwrap();
@@ -873,7 +882,7 @@ async fn invalid_retention_proof_hides_the_fact_without_blocking_owner_deletion(
             evidence::Column::RetentionProofJson,
             sea_orm::sea_query::Expr::value("{}"),
         )
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -922,7 +931,7 @@ async fn rewritten_evidence_cannot_rebind_the_original_input() {
             evidence::Column::Body,
             sea_orm::sea_query::Expr::value("Invented source"),
         )
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -939,7 +948,7 @@ async fn rewritten_evidence_cannot_rebind_the_original_input() {
             evidence::Column::Body,
             sea_orm::sea_query::Expr::value("I prefer Chinese"),
         )
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -988,7 +997,10 @@ async fn owner_original_navigation_requires_the_exact_declared_version_and_live_
                         history::Column::Revision,
                         sea_orm::sea_query::Expr::value(2_i64),
                     )
-                    .filter(history::Column::SourceId.eq(&original))
+                    .filter(
+                        history::Column::Id
+                            .eq(desk_assistant_data_store::source_rows::history(&original)),
+                    )
                     .exec(&store.db)
                     .await
                     .unwrap();
@@ -1010,7 +1022,10 @@ async fn owner_original_navigation_requires_the_exact_declared_version_and_live_
                         evidence::Column::ForgetSourcesJson,
                         sea_orm::sea_query::Expr::value("[]"),
                     )
-                    .filter(evidence::Column::SourceId.eq(&source_id))
+                    .filter(
+                        evidence::Column::Id
+                            .eq(desk_assistant_data_store::source_rows::memory(&source_id)),
+                    )
                     .exec(&store.db)
                     .await
                     .unwrap();
@@ -1040,16 +1055,15 @@ async fn retained_memory_with_more_than_eight_sources_remains_readable_and_forge
     let store = setup().await;
     let (memory_id, source_id, _) = seed(&store, 1, "many-sources").await;
     let original = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     for index in 1..12 {
-        let id = native_ids::stable(Kind::AssistantSource, &("many-sources", index));
+        let id = native_ids::fixture_memory_source_id(&("many-sources", index));
         let mut active: evidence::ActiveModel = original.clone().into();
-        active.id = sea_orm::ActiveValue::NotSet;
-        active.source_id = Set(id.clone());
+        active.id = Set(desk_assistant_data_store::source_rows::memory(&id));
         active.insert(&store.db).await.unwrap();
         rebuild_evidence_proof(&store, &id).await;
     }
@@ -1125,7 +1139,11 @@ async fn memory_window_opens_its_exact_original_even_with_an_identical_sibling()
     let (_, source_id, _) = seed(&store, 1, "window-original").await;
     let original_id = seed_original_history(&store, &source_id).await;
     let original = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&original_id))
+        .filter(
+            history::Column::Id.eq(desk_assistant_data_store::source_rows::history(
+                &original_id,
+            )),
+        )
         .one(&store.db)
         .await
         .unwrap()
@@ -1133,10 +1151,6 @@ async fn memory_window_opens_its_exact_original_even_with_an_identical_sibling()
     // Same conversation, body, fragment and time: only the source id differs.
     let mut sibling: history::ActiveModel = original.clone().into();
     sibling.id = sea_orm::ActiveValue::NotSet;
-    sibling.source_id = Set(native_ids::stable(
-        Kind::AssistantSource,
-        &"identical-sibling",
-    ));
     sibling.native_id = Set("sibling-message".into());
     sibling.insert(&store.db).await.unwrap();
     let window = super::super::owner_window::read_on(

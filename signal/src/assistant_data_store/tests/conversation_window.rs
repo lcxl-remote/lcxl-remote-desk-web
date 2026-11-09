@@ -265,7 +265,9 @@ async fn deleting_or_disallowing_the_original_anchor_blocks_cached_and_continued
             private_source(&frame.store, &expected[0].0).await;
         } else {
             history_row::Entity::delete_many()
-                .filter(history_row::Column::SourceId.eq(&expected[0].0))
+                .filter(history_row::Column::Id.eq(
+                    desk_assistant_data_store::source_rows::history(&expected[0].0),
+                ))
                 .exec(&frame.store.db)
                 .await
                 .unwrap();
@@ -348,7 +350,7 @@ async fn window_query_metadata_failure_rolls_back_the_prepared_response_and_full
 async fn a_read_request_cannot_replace_the_source_arguments_of_its_accepted_native_call() {
     let (frame, _) = fixture("window-wrong-arguments", 1).await;
     let mut changed = request(&frame, 0);
-    changed.source_id = native_ids::stable(Kind::AssistantSource, &"another-source");
+    changed.source_id = native_ids::fixture_source_id(&"another-source");
     let before = quota::Entity::find()
         .one(&frame.store.db)
         .await
@@ -399,7 +401,11 @@ async fn guessing_an_existing_source_id_in_an_output_does_not_make_it_an_observe
     let request = request(&frame, 0);
     assert!(
         history_row::Entity::find()
-            .filter(history_row::Column::SourceId.eq(&request.source_id))
+            .filter(
+                history_row::Column::Id.eq(desk_assistant_data_store::source_rows::history(
+                    &request.source_id
+                ))
+            )
             .one(&frame.store.db)
             .await
             .unwrap()

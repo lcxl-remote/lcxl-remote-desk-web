@@ -87,7 +87,7 @@ impl ReadableHistorySource {
     > {
         Ok(
             desk_diagnose_core::ai_assistant::retrieval_query::QuerySourceVersion {
-                source_id: self.row.source_id.clone(),
+                source_id: self.row.source_id(),
                 revision: unsigned(self.row.revision)?,
             },
         )
@@ -232,7 +232,7 @@ pub async fn scan_on<C: ConnectionTrait, R: HistorySourceReader<C>>(
                             posting.document_id.clone(),
                             ReadableSearchDocument {
                                 document_id: posting.document_id.clone(),
-                                source_id: source.row.source_id,
+                                source_id: source.row.source_id(),
                                 revision: unsigned(source.row.revision)?,
                                 root_conversation_id: source.row.root_conversation_id,
                                 token_count: posting.token_count as u32,
@@ -312,8 +312,8 @@ fn posting_query(
             history::Entity,
             Condition::all()
                 .add(
-                    Expr::col((document::Entity, document::Column::SourceId))
-                        .equals((history::Entity, history::Column::SourceId)),
+                    Expr::col((document::Entity, document::Column::HistoryId))
+                        .equals((history::Entity, history::Column::Id)),
                 )
                 .add(
                     Expr::col((document::Entity, document::Column::SourceRevision))

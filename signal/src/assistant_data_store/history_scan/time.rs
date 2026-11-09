@@ -63,8 +63,8 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
         None | Some(PageAnchor::Start) => None,
         Some(PageAnchor::Time {
             time_unix_ms,
-            source_id,
-        }) => Some((*time_unix_ms, source_id.clone())),
+            history_id,
+        }) => Some((*time_unix_ms, *history_id)),
         _ => return Err(AssistantStoreError::Inaccessible),
     };
     if changed {
@@ -98,10 +98,7 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
                 Condition::any().add(relation).add(
                     Condition::all()
                         .add(time.clone().eq(signed(*last_time)?))
-                        .add(
-                            Expr::col((history::Entity, history::Column::SourceId))
-                                .gt(last_source.clone()),
-                        ),
+                        .add(Expr::col((history::Entity, history::Column::Id)).gt(*last_source)),
                 ),
             );
         }
@@ -118,7 +115,7 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
                     Order::Desc
                 },
             )
-            .order_by((history::Entity, history::Column::SourceId), Order::Asc)
+            .order_by((history::Entity, history::Column::Id), Order::Asc)
             .limit(limit);
         let rows = ThinHistory::find_by_statement(db.get_database_backend().build(&select))
             .all(db)
@@ -131,11 +128,11 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
             }
             work.visited += 1;
             if row.already_seen(query, &items) {
-                position = Some((unsigned(row.time_key)?, row.source_id));
+                position = Some((unsigned(row.time_key)?, row.id));
                 continue;
             }
             let source = readable_on(db, context, &row, &mut work).await?;
-            let raw_position = (unsigned(row.time_key)?, row.source_id.clone());
+            let raw_position = (unsigned(row.time_key)?, row.id);
             if let Some(item) = source
                 && !query.was_seen(&item.source)
             {
@@ -158,10 +155,10 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
     }
     keyword_search::validate_context_on(db, context).await?;
     let continuation = more.then(|| {
-        position.map_or(PageAnchor::Start, |(time_unix_ms, source_id)| {
+        position.map_or(PageAnchor::Start, |(time_unix_ms, history_id)| {
             PageAnchor::Time {
                 time_unix_ms,
-                source_id,
+                history_id,
             }
         })
     });

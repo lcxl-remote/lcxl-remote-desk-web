@@ -195,7 +195,7 @@ async fn time_scans_exclude_owner_viewable_no_export_text_and_derived_sources_wi
     private_source(&store, &hidden).await;
     let frame = Frame::new(&store, &device).await;
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&allowed))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&allowed)))
         .one(&store.db)
         .await
         .unwrap()

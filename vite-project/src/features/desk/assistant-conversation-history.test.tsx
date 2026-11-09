@@ -7,7 +7,7 @@ import { assistantCitations, assistantSourceAnchor, readAssistantRetainedHistory
 
 vi.mock('@/services/clients', () => ({ listAssistantImages: vi.fn().mockResolvedValue({ data: [] }), getAssistantImage: vi.fn(), deleteAssistantImage: vi.fn() }));
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(module => module.reactI18nextMock()));
-const id = 'src_AAECAwQFBgcICQoLDA0ODw';
+const id = 'src_h42i';
 const source = { source_id:id,revision:1,availability:'available',content:'原始引用',recorded_at_unix_ms:100,statement_timezone:'UTC',source_device:null,
     locator:{conversation_id:'original-run',root_conversation_id:'original-run',message_id:'original-answer',input_event_id:null,action_id:null,result_id:null,
         fragment_index:0,byte_start:0,byte_end:12},notice:null };
@@ -256,7 +256,7 @@ it('prepends older messages, deduplicates overlap and retains the original ancho
 it('ignores a late history response after selecting a different source', async () => {
     let finishOld!: (value: unknown) => void;
     const oldPage = new Promise(resolve => { finishOld = resolve; });
-    const secondId = 'src_AQECAwQFBgcICQoLDA0ODw';
+    const secondId = 'src_h43b';
     const second = { ...source, source_id: secondId, locator: { ...source.locator,
         conversation_id: 'second-run', root_conversation_id: 'second-run', message_id: 'second-answer' } };
     const secondPage = { ...snapshot(), sessionId: 'second-run', messages: [{ id: 'second-answer', role: 'assistant', text: '另一段会话' }] };

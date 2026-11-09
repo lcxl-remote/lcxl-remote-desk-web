@@ -3,7 +3,7 @@ use super::*;
 use crate::entity::agent_assistant_citation as citation;
 use desk_diagnose_core::{
     ai_assistant::{citation::for_answer, seam::AssistantReadRoot},
-    native_ids::{self, Kind},
+    native_ids,
 };
 
 #[tokio::test]
@@ -13,7 +13,7 @@ async fn citations_owner_projection_pins_body_and_scope_and_expired_gc_refunds_o
     store.settings(1, &policy).await.unwrap();
     ensure_quota_on(&store.db, "1").await.unwrap();
     let root = AssistantReadRoot {
-        source_id: native_ids::stable(Kind::AssistantSource, &"citation-source"),
+        source_id: native_ids::fixture_source_id(&"citation-source"),
         source_revision: 2,
     };
     let text = format!("result 〔来源:{}〕", root.source_id);
@@ -121,7 +121,7 @@ async fn citations_quota_failure_and_outer_rollback_do_not_publish_partial_metad
     store.settings(1, &policy).await.unwrap();
     ensure_quota_on(&store.db, "1").await.unwrap();
     let root = AssistantReadRoot {
-        source_id: native_ids::stable(Kind::AssistantSource, &"bounded-citation"),
+        source_id: native_ids::fixture_source_id(&"bounded-citation"),
         source_revision: 1,
     };
     let text = format!("〔来源:{}〕", root.source_id);
@@ -172,7 +172,7 @@ async fn citations_corrupt_optional_metadata_stays_inert_without_refunds_or_imme
     store.settings(1, &policy).await.unwrap();
     ensure_quota_on(&store.db, "1").await.unwrap();
     let root = AssistantReadRoot {
-        source_id: native_ids::stable(Kind::AssistantSource, &"corrupt-citation"),
+        source_id: native_ids::fixture_source_id(&"corrupt-citation"),
         source_revision: 1,
     };
     let text = format!("〔来源:{}〕", root.source_id);
@@ -240,7 +240,7 @@ async fn larger_citations_survive_lower_projection_limits_and_configured_load_ba
     ensure_quota_on(&store.db, "1").await.unwrap();
     let roots = (0..80)
         .map(|index| AssistantReadRoot {
-            source_id: native_ids::stable(Kind::AssistantSource, &index),
+            source_id: native_ids::fixture_source_id(&index),
             source_revision: 1,
         })
         .collect::<Vec<_>>();

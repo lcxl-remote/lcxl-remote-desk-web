@@ -24,6 +24,7 @@ pub mod output_store;
 pub mod projection;
 pub mod retrieval_cache;
 pub mod source_lifecycle;
+pub mod source_rows;
 pub mod suppression;
 pub mod workbench;
 pub mod worker_report;

@@ -71,9 +71,17 @@ pub async fn load_on<C: ConnectionTrait>(
         .assistant_data
         .as_ref()
         .ok_or(AssistantStoreError::Inaccessible)?;
+    let Some(source) = desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(
+        &reference.id,
+    )
+    .filter(|source| {
+        source.table == desk_agent_protocol::ai_assistant::source_ref::SourceTable::History
+    }) else {
+        return Ok(None);
+    };
     let Some(row) = history::Entity::find()
         .filter(history::Column::ActorId.eq(actor))
-        .filter(history::Column::SourceId.eq(&reference.id))
+        .filter(history::Column::Id.eq(source.id))
         .one(db)
         .await?
     else {
@@ -150,7 +158,7 @@ pub async fn load_on<C: ConnectionTrait>(
         .map_err(AssistantStoreError::Invalid)?;
     crate::history_native::read(&row)?;
     let dependency = HistoryDependency {
-        source_id: row.source_id.clone(),
+        source_id: row.source_id(),
         source_revision: row.revision as u64,
         origin_id: row.origin_id.clone(),
         origin_deletion_generation: input.deletion_generation as u64,
@@ -161,7 +169,7 @@ pub async fn load_on<C: ConnectionTrait>(
         return Err(AssistantStoreError::SourceUnavailable);
     }
     let mut known = vec![KnownMemorySource {
-        source_id: row.source_id.clone(),
+        source_id: row.source_id(),
         revision: row.revision as u64,
         origin_id: input.origin_id.clone(),
     }];

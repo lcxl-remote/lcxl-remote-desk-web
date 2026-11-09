@@ -733,7 +733,7 @@ fn attachment_pages_share_inline_projection_and_keep_original_proof_on_small_sta
 #[test]
 fn memory_history_model_view_keeps_native_ids_versions_and_recording_times() {
     let memory = crate::native_ids::stable(crate::native_ids::Kind::Memory, &"history-memory");
-    let source = crate::native_ids::stable(crate::native_ids::Kind::AssistantSource, &"old-source");
+    let source = crate::native_ids::fixture_source_id(&"old-source");
     let raw = json!({"memory_id":memory,"current_revision":2,"versions":[{
         "revision":1,"content":"Call me sss","context":null,"status":"superseded",
         "recorded_at_unix_ms":1234,"source_ids":[source]}],"has_more":false,"next_cursor":null,"partial":false,"reasons":[]});

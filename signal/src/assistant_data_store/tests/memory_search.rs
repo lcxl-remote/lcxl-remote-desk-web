@@ -82,10 +82,11 @@ pub(super) async fn index_fact(store: &TestStore, row: &fact::Model) {
     ))
     .unwrap();
     for part in projected.fragments {
-        let id = native_ids::stable(
-            Kind::AssistantSource,
-            &("fixture-memory-index", &row.memory_id, part.fragment_index),
-        );
+        let id = native_ids::fixture_source_id(&(
+            "fixture-memory-index",
+            &row.memory_id,
+            part.fragment_index,
+        ));
         document::ActiveModel {
             document_id: Set(id.clone()),
             actor_id: Set(row.actor_id.clone()),
@@ -266,8 +267,9 @@ async fn matching_foreign_account_facts_and_postings_never_enter_the_actual_mode
         .unwrap()
         .unwrap();
     let mut source: evidence::ActiveModel = source.into();
-    source.id = sea_orm::ActiveValue::NotSet;
-    source.source_id = Set(native_ids::stable(Kind::AssistantSource, &foreign_id));
+    source.id = Set(desk_assistant_data_store::source_rows::memory(
+        native_ids::fixture_memory_source_id(&foreign_id),
+    ));
     source.memory_id = Set(foreign_id);
     source.actor_id = Set("2".into());
     source.insert(&frame.store.db).await.unwrap();

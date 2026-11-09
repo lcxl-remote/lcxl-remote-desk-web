@@ -95,7 +95,7 @@ async fn window_query(
     logical: &str,
 ) -> FrozenRetrievalQuery {
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
         .one(&store.db)
         .await
         .unwrap()

@@ -21,7 +21,7 @@ const DAY: u64 = 86_400_000;
 
 async fn evidence_dependency(store: &TestStore, source: &str) -> HistoryDependency {
     let row = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -47,7 +47,7 @@ async fn evidence_dependency(store: &TestStore, source: &str) -> HistoryDependen
 // It tests storage/provenance only, without simulating provider dispatch authority.
 async fn archive_copy(store: &TestStore, source: &str, dependency: &HistoryDependency) -> String {
     let retained = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -147,7 +147,7 @@ async fn natural_body_cleanup(store: &TestStore, memory_id: &str, source: &str) 
             evidence::Column::BodyClearedAtMs,
             sea_orm::sea_query::Expr::value(Some((31 * DAY) as i64)),
         )
-        .filter(evidence::Column::SourceId.eq(source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -279,7 +279,9 @@ async fn a_new_fact_keeps_its_full_producer_constraints_after_the_old_fact_body_
     let store = setup().await;
     let (old_memory, old_source, _) = super::owner_memory::seed(&store, 1, "older-fact").await;
     let row = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&old_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&old_source)),
+        )
         .one(&store.db)
         .await
         .unwrap()
@@ -291,7 +293,9 @@ async fn a_new_fact_keeps_its_full_producer_constraints_after_the_old_fact_body_
             evidence::Column::PolicyJson,
             sea_orm::sea_query::Expr::value(serde_json::to_string(&policy).unwrap()),
         )
-        .filter(evidence::Column::SourceId.eq(&old_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&old_source)),
+        )
         .exec(&store.db)
         .await
         .unwrap();
@@ -304,7 +308,9 @@ async fn a_new_fact_keeps_its_full_producer_constraints_after_the_old_fact_body_
             evidence::Column::DependenciesJson,
             sea_orm::sea_query::Expr::value(dependencies.clone()),
         )
-        .filter(evidence::Column::SourceId.eq(&new_source))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&new_source)),
+        )
         .exec(&store.db)
         .await
         .unwrap();
@@ -378,7 +384,7 @@ async fn identity_cleanup_is_valid_only_after_the_original_body_retention_bounda
     let (memory, source, origin_id) = super::owner_memory::seed(&store, 1, "cleanup-proof").await;
     natural_body_cleanup(&store, &memory, &source).await;
     let row = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -432,7 +438,7 @@ async fn retained_evidence_policy_has_its_own_revision_and_real_hard_deadline() 
     let store = setup().await;
     let (memory, source, origin_id) = super::owner_memory::seed(&store, 1, "hard-copy").await;
     let row = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -449,7 +455,7 @@ async fn retained_evidence_policy_has_its_own_revision_and_real_hard_deadline() 
             evidence::Column::ExpiresAtMs,
             sea_orm::sea_query::Expr::value(Some((50 * DAY) as i64)),
         )
-        .filter(evidence::Column::SourceId.eq(&source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source)))
         .exec(&store.db)
         .await
         .unwrap();

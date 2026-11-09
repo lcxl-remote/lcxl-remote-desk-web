@@ -10,7 +10,7 @@ use desk_agent_protocol::ai_assistant::{memory::MemoryDeleteRequest, source::Sou
 use desk_diagnose_core::{
     ai_assistant::{data_tools, history::serialized_tool_response_bytes},
     chat::ToolCall,
-    native_ids::{self, Kind},
+    native_ids,
 };
 use sea_orm::PaginatorTrait;
 
@@ -24,9 +24,9 @@ async fn frame(label: &str, accepted: bool, maximum: u32, unknown: bool) -> Fram
             .unwrap()
             .unwrap();
         let source_id = if unknown {
-            native_ids::stable(Kind::AssistantSource, &"unobserved-evidence")
+            native_ids::fixture_source_id(&"unobserved-evidence")
         } else {
-            source.source_id
+            source.source_id()
         };
         vec![ToolCall {
             id: "memory-source-call".into(),
@@ -96,7 +96,7 @@ async fn an_actual_native_producer_can_expand_its_exact_retained_evidence_handle
         );
     let port = desk_diagnose_core::seam::SessionSeam::memory(&host).unwrap();
     let source = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source_id)))
         .one(&frame.store.db)
         .await
         .unwrap()
@@ -109,7 +109,7 @@ async fn an_actual_native_producer_can_expand_its_exact_retained_evidence_handle
         .read_memory_source(frame.context(), &source_id)
         .await
         .unwrap();
-    assert_eq!(first.result.source_id, source.source_id);
+    assert_eq!(first.result.source_id, source.source_id());
     assert_eq!(first.result.revision, source.memory_revision as u64);
     assert_eq!(first.result.content.as_deref(), Some(source.body.as_str()));
     let proof = first.projection.as_ref().unwrap();

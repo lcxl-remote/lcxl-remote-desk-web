@@ -319,7 +319,7 @@ async fn invalid_or_deleted_original_anchors_do_not_silently_fall_back_to_other_
     )
     .await;
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&one))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&one)))
         .one(&store.db)
         .await
         .unwrap()
@@ -373,7 +373,7 @@ async fn window_boundaries_reject_unissued_pages_and_stale_source_or_recipient_b
     let unissued = PageAnchor::Window {
         admitted_generation: frame.generation,
         fragment_index: 0,
-        source_id: source.clone(),
+        history_id: desk_assistant_data_store::source_rows::history(&source),
         forward: true,
     };
     assert!(

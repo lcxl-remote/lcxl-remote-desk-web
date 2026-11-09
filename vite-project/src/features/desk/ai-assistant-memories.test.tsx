@@ -1,3 +1,4 @@
+import { assistantSourceId } from '@/test/assistant-source-id';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -8,7 +9,7 @@ import { selectOption } from '@/test-utils/select-option';
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(module => module.reactI18nextMock()));
 
 const memoryId = 'mem_AAECAwQFBgcICQoLDA0ODw';
-const sourceId = 'src_AAECAwQFBgcICQoLDA0ODw';
+const sourceId = 'src_h42i';
 const otherId = 'mem_AAAAAAAAAAAAAAAAAAAAAA';
 const memory = { memory_id: memoryId, revision: 7, scope: 'personal', source_device: null,
     content: 'Prefer Chinese',
@@ -185,7 +186,7 @@ it('keeps a clear request unconfirmed if the receipt has the wrong control reaso
 });
 
 it('shows saved content and sources beyond the previous fixed capacities', async () => {
-    const large = { ...memory, content: '中'.repeat(3000), source_ids: Array.from({ length: 9 }, (_, i) => `src_${String.fromCharCode(65 + i)}${'A'.repeat(21)}`) };
+    const large = { ...memory, content: '中'.repeat(3000), source_ids: Array.from({ length: 9 }, (_, i) => assistantSourceId(i + 1)) };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(page([large]))));
     render(<MemoryRouter><AiAssistantMemories /></MemoryRouter>);
     expect(await screen.findByText(large.content)).toBeVisible();

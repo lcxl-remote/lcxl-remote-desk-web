@@ -59,7 +59,7 @@ fn reservation(kind: RetrievalCallKind) -> RetrievalReservation {
 }
 fn source(label: &str, revision: u64) -> QuerySourceVersion {
     QuerySourceVersion {
-        source_id: native_ids::stable(Kind::AssistantSource, &label),
+        source_id: native_ids::fixture_source_id(&label),
         revision,
     }
 }
@@ -427,7 +427,7 @@ fn window_and_memory_queries_preserve_purpose_and_original_memory_upper_scope() 
             PageAnchor::Window {
                 admitted_generation: 10,
                 fragment_index: 0,
-                source_id: source("last", 1).source_id,
+                history_id: 3,
                 forward: true,
             },
         )
@@ -620,7 +620,7 @@ fn time_queries_keep_the_original_range_and_reject_invalid_keyset_times() {
                     token("bad-time"),
                     PageAnchor::Time {
                         time_unix_ms: time,
-                        source_id: source("one", 1).source_id
+                        history_id: 1
                     }
                 )
                 .is_err()
@@ -633,7 +633,7 @@ fn time_queries_keep_the_original_range_and_reject_invalid_keyset_times() {
                 token("time"),
                 PageAnchor::Time {
                     time_unix_ms: 900,
-                    source_id: source("one", 1).source_id
+                    history_id: 1
                 }
             )
             .is_ok()
@@ -643,7 +643,7 @@ fn time_queries_keep_the_original_range_and_reject_invalid_keyset_times() {
             token("next-time"),
             PageAnchor::Time {
                 time_unix_ms: 800,
-                source_id: source("two", 1).source_id,
+                history_id: 2,
             },
         )
         .unwrap();

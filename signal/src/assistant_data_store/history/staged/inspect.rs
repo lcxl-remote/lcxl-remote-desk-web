@@ -67,17 +67,16 @@ pub(super) async fn inspect_on(
         existing
     };
     let mut new_parts = Vec::new();
-    for (index, (fragment, source_id)) in prepared
-        .index
-        .fragments
-        .iter()
-        .zip(&prepared.source_ids)
-        .enumerate()
-    {
+    let mut existing_ids = Vec::with_capacity(prepared.index.fragments.len());
+    for (index, fragment) in prepared.index.fragments.iter().enumerate() {
         let body =
             &prepared.retained_content[fragment.byte_start as usize..fragment.byte_end as usize];
         if let Some(row) = history::Entity::find()
-            .filter(history::Column::SourceId.eq(source_id))
+            .filter(history::Column::ActorId.eq(capture.actor_id))
+            .filter(history::Column::OriginId.eq(&prepared.origin_id))
+            .filter(history::Column::FragmentIndex.eq(
+                i32::try_from(fragment.fragment_index).map_err(|_| AdmissionFailure::Capacity)?,
+            ))
             .one(txn)
             .await?
         {
@@ -104,7 +103,9 @@ pub(super) async fn inspect_on(
             {
                 return Err(AdmissionFailure::Policy);
             }
+            existing_ids.push(Some(row.id));
         } else {
+            existing_ids.push(None);
             new_parts.push(index);
         }
     }
@@ -113,6 +114,7 @@ pub(super) async fn inspect_on(
             existing_origin,
             existing_conversation,
             new_parts,
+            existing_ids: existing_ids.clone(),
             runtime: None,
             existing_binding,
         });
@@ -138,6 +140,7 @@ pub(super) async fn inspect_on(
         existing_origin,
         existing_conversation,
         new_parts,
+        existing_ids: existing_ids.clone(),
         runtime: Some(runtime_row),
         existing_binding,
     })

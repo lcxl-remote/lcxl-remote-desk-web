@@ -49,7 +49,7 @@ pub(super) async fn memory_usage(
 ) -> AssistantDataReadUse {
     let data = access(store).await;
     let evidence = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -97,7 +97,7 @@ pub(super) async fn history_usage(
 ) -> (String, AssistantDataReadUse) {
     let state = access(store).await;
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -122,11 +122,11 @@ pub(super) async fn history_usage(
             memory_state_generation: state.memory_state_generation,
             memories: Vec::new(),
             roots: vec![AssistantReadRoot {
-                source_id: row.source_id.clone(),
+                source_id: source.into(),
                 source_revision: 1,
             }],
             history_dependencies: vec![HistoryDependency {
-                source_id: row.source_id,
+                source_id: source.into(),
                 source_revision: 1,
                 origin_id: row.origin_id,
                 origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
@@ -316,7 +316,7 @@ async fn owner_view_and_no_export_retention_never_become_model_read_permission()
             evidence::Column::PolicyJson,
             sea_orm::sea_query::Expr::value(encoded),
         )
-        .filter(evidence::Column::SourceId.eq(&source))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(&source)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -587,7 +587,7 @@ async fn a_window_decision_anchor_is_validated_without_pretending_its_text_is_re
     assert!(usage.roots.is_empty());
     let mut padded = usage.clone();
     let mut unrelated = padded.history_dependencies[0].clone();
-    unrelated.source_id = native_ids::stable(Kind::AssistantSource, &"unrelated-decision-padding");
+    unrelated.source_id = native_ids::fixture_source_id(&"unrelated-decision-padding");
     padded.history_dependencies.push(unrelated);
     padded.validate().unwrap();
     assert!(

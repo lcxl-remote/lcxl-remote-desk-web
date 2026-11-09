@@ -19,7 +19,6 @@ pub fn forgetting_sources(
     if proof.actor_id != row.actor_id
         || proof.memory_id != row.memory_id
         || proof.memory_revision != unsigned(row.memory_revision)?
-        || proof.evidence_source_id != row.source_id
         || proof.origin_id != row.origin_id
         || row.retained_bytes <= 0
         || proof.recorded_at_unix_ms != unsigned(row.observed_at_ms)?

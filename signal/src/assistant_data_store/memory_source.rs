@@ -93,7 +93,7 @@ async fn read_on(
         now,
     )
     .await?;
-    if result.source_id != selected.source.source_id
+    if result.source_id != selected.source.source_id()
         || result.revision != unsigned(selected.source.memory_revision)?
         || result.content.as_deref() != Some(selected.source.body.as_str())
         || result.availability == SourceAvailability::Unavailable
@@ -111,7 +111,7 @@ async fn read_on(
     .map_err(AssistantStoreError::Invalid)?;
     let source = evidence::Entity::find()
         .filter(evidence::Column::ActorId.eq(&context.session.actor_id))
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -163,7 +163,7 @@ async fn source_on(
     let actor = &fence.context.session.actor_id;
     let source = evidence::Entity::find()
         .filter(evidence::Column::ActorId.eq(actor))
-        .filter(evidence::Column::SourceId.eq(source_id))
+        .filter(evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(source_id)))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::SourceUnavailable)?;

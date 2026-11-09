@@ -207,7 +207,7 @@ pub(super) async fn capture_many_native_at(
 }
 pub(super) async fn private_source(store: &TestStore, source: &str) {
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
         .one(&store.db)
         .await
         .unwrap()
@@ -236,7 +236,7 @@ pub(super) async fn private_source(store: &TestStore, source: &str) {
             history::Column::RetentionProofJson,
             Expr::value(serde_json::to_string(&proof).unwrap()),
         )
-        .filter(history::Column::SourceId.eq(source))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -374,7 +374,7 @@ async fn original_dependency_deletion_blocks_a_matching_derived_source() {
     let original = capture(&store, &a, "original", "original", "source background", &[]).await;
     let frame = Frame::new(&store, &a).await;
     let row = history::Entity::find()
-        .filter(history::Column::SourceId.eq(&original))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&original)))
         .one(&store.db)
         .await
         .unwrap()
@@ -597,8 +597,9 @@ async fn indexed_native_columns_and_state_cannot_be_changed_without_the_original
                 .await
                 .is_ok()
         );
-        let mut change =
-            history::Entity::update_many().filter(history::Column::SourceId.eq(&source));
+        let mut change = history::Entity::update_many().filter(
+            history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&source)),
+        );
         change = match case {
             0 => change.col_expr(
                 history::Column::NativeActionAtMs,
@@ -726,4 +727,47 @@ async fn fixed_owner_question_corpus_retrieves_original_discussions_at_the_histo
         elapsed[56],
         elapsed[59]
     );
+}
+
+#[tokio::test]
+async fn history_source_ids_are_row_keys_that_replay_and_are_never_reused() {
+    use sea_orm::{ConnectionTrait, Statement};
+    let store = setup().await;
+    let device = device(&store, "key-reuse").await;
+    let first = capture(&store, &device, "reuse-root", "first", "first body", &[]).await;
+    // An identical capture replays the existing row and its id.
+    assert_eq!(
+        capture(&store, &device, "reuse-root", "first", "first body", &[]).await,
+        first
+    );
+    let key = desk_assistant_data_store::source_rows::history(&first);
+    assert!(key > 0);
+    for table in ["agent_assistant_history", "agent_memory_source"] {
+        let ddl = store
+            .db
+            .query_one_raw(Statement::from_string(
+                store.db.get_database_backend(),
+                format!("SELECT sql FROM sqlite_master WHERE type='table' AND name='{table}'"),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "sql")
+            .unwrap();
+        assert!(ddl.to_ascii_uppercase().contains("AUTOINCREMENT"), "{ddl}");
+    }
+    history::Entity::delete_by_id(key)
+        .exec(&store.db)
+        .await
+        .unwrap();
+    let second = capture(
+        &store,
+        &device,
+        "reuse-root-2",
+        "second",
+        "second body",
+        &[],
+    )
+    .await;
+    assert!(desk_assistant_data_store::source_rows::history(&second) > key);
 }

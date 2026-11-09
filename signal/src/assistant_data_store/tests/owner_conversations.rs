@@ -290,7 +290,7 @@ async fn owner_list_scans_past_twenty_unreadable_fragments_with_the_configured_b
             history::Column::Content,
             sea_orm::sea_query::Expr::value("x"),
         )
-        .filter(history::Column::SourceId.ne(&good))
+        .filter(history::Column::Id.ne(desk_assistant_data_store::source_rows::history(&good)))
         .exec(&store.db)
         .await
         .unwrap();

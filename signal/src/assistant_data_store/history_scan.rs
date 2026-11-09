@@ -31,14 +31,14 @@ pub(crate) mod window;
 pub(crate) struct WindowPosition {
     pub admitted_generation: u64,
     pub fragment_index: u32,
-    pub source_id: String,
+    pub history_id: i64,
 }
 impl WindowPosition {
     pub(crate) fn anchor(&self, forward: bool) -> PageAnchor {
         PageAnchor::Window {
             admitted_generation: self.admitted_generation,
             fragment_index: self.fragment_index,
-            source_id: self.source_id.clone(),
+            history_id: self.history_id,
             forward,
         }
     }
@@ -53,7 +53,7 @@ pub(crate) struct HistoryScanItem {
 
 #[derive(FromQueryResult)]
 struct ThinHistory {
-    source_id: String,
+    id: i64,
     revision: i64,
     conversation_id: String,
     admitted_generation: i64,
@@ -76,19 +76,22 @@ impl ThinHistory {
         }
         Ok(HistoryScanItem {
             source: QuerySourceVersion {
-                source_id: self.source_id.clone(),
+                source_id: desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(
+                    self.id,
+                )
+                .to_string(),
                 revision,
             },
             position: WindowPosition {
                 admitted_generation: generation,
                 fragment_index,
-                source_id: self.source_id.clone(),
+                history_id: self.id,
             },
             time_key_unix_ms: time,
         })
     }
     fn same_row(&self, row: &history::Model) -> bool {
-        self.source_id == row.source_id
+        self.id == row.id
             && self.revision == row.revision
             && self.conversation_id == row.conversation_id
             && self.admitted_generation == row.admitted_generation
@@ -189,7 +192,7 @@ fn columns(query: &mut SelectStatement, field: HistoryTimeField) {
     query
         .columns(
             [
-                history::Column::SourceId,
+                history::Column::Id,
                 history::Column::Revision,
                 history::Column::ConversationId,
                 history::Column::AdmittedGeneration,

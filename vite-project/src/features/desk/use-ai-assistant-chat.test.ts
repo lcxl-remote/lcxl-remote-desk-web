@@ -272,7 +272,7 @@ describe('useAiAssistantChat', () => {
 
     it('restores native bound citations from the owner snapshot without sending another turn', async () => {
         localStorage.setItem('ai-assistant-conversation:citations-native', 'conversation');
-        const citation = {answer_message_id:'answer',answer_revision:1,source_id:'src_AAECAwQFBgcICQoLDA0ODw',source_revision:2};
+        const citation = {answer_message_id:'answer',answer_revision:1,source_id:'src_h42i',source_revision:2};
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok:true,json:async()=>({success:true,data:{
             ...snapshotFields,sessionId:'session',seq:1,active:false,messages:[{id:'answer',role:'assistant',text:`Answer 〔来源:${citation.source_id}〕`,
                 citations:[citation],citationsIncomplete:true}],

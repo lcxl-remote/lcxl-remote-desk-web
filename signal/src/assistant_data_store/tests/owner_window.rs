@@ -161,7 +161,7 @@ async fn retained_pages_reject_wrong_owner_version_cross_conversation_and_revoke
     );
     history::Entity::update_many()
         .col_expr(history::Column::DeletedAtMs, Expr::value(5000_i64))
-        .filter(history::Column::SourceId.eq(&second))
+        .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&second)))
         .exec(&store.db)
         .await
         .unwrap();
@@ -294,7 +294,7 @@ async fn tail_discovery_scans_past_thirty_two_rows_and_keeps_a_valid_anchor_on_b
     }
     history::Entity::update_many()
         .col_expr(history::Column::Content, Expr::value("x"))
-        .filter(history::Column::SourceId.ne(&good))
+        .filter(history::Column::Id.ne(desk_assistant_data_store::source_rows::history(&good)))
         .exec(&store.db)
         .await
         .unwrap();

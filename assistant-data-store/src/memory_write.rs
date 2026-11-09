@@ -265,16 +265,12 @@ pub async fn apply_on<C: ConnectionTrait>(
         expires_at_ms: None,
     };
     let mut sources = Vec::new();
-    for (index, input) in write.sources.iter().enumerate() {
+    for input in &write.sources {
         let policy = desk_diagnose_core::ai_assistant::source::derive_visible_text_policy(
             &[input.policy.clone(), write.production_policy.clone()],
             input.policy.policy_revision,
         )
         .map_err(AssistantStoreError::Invalid)?;
-        let source_id = native_ids::stable(
-            Kind::AssistantSource,
-            &("memory-snapshot", &id, number, index),
-        );
         let kind = match input.origin.kind.as_str() {
             "input" => AssistantSourceKind::Input,
             "receipt" => AssistantSourceKind::Receipt,
@@ -293,7 +289,6 @@ pub async fn apply_on<C: ConnectionTrait>(
             memory_id: &id,
             memory_revision: unsigned(number)?,
             memory_accepted_input_seq: unsigned(next.accepted_input_seq)?,
-            evidence_source_id: &source_id,
             role: input.role,
             body: &input.body,
             origin_id: &input.origin.origin_id,
@@ -312,7 +307,6 @@ pub async fn apply_on<C: ConnectionTrait>(
         .map_err(AssistantStoreError::Invalid)?;
         sources.push(source::Model {
             id: 0,
-            source_id,
             memory_id: id.clone(),
             memory_revision: number,
             actor_id: write.actor.into(),

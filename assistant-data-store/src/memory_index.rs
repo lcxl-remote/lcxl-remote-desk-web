@@ -137,7 +137,7 @@ pub async fn prepare_on<C: ConnectionTrait>(
     let mut terms = Vec::new();
     for part in projected.fragments {
         let document_id = native_ids::stable(
-            Kind::AssistantSource,
+            Kind::AssistantSearchDocument,
             &(
                 "memory-index-v1",
                 &next.memory_id,
@@ -152,6 +152,7 @@ pub async fn prepare_on<C: ConnectionTrait>(
             device_ref: next.device_ref.clone(),
             source_kind: "memory".into(),
             source_id: next.memory_id.clone(),
+            history_id: None,
             source_revision: next.revision,
             corpus_generation: next.state_generation,
             origin_id: source_origin_id.clone(),

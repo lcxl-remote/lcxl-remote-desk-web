@@ -191,8 +191,8 @@ pub fn apply_terms(
                 .lte(signed(context.corpus_generation)?),
         )
         .and_where(
-            Expr::col((document::Entity, document::Column::SourceId))
-                .equals((history::Entity, history::Column::SourceId)),
+            Expr::col((document::Entity, document::Column::HistoryId))
+                .equals((history::Entity, history::Column::Id)),
         )
         .and_where(
             Expr::col((document::Entity, document::Column::SourceRevision))

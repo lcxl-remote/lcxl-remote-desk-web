@@ -20,7 +20,7 @@ async fn write_frame_with_memory(
             .one(&store.db).await.unwrap().unwrap();
         let mut arguments = serde_json::json!({"operation": if update {"update"} else {"remember"},
             "content":"用户偏好中文且简明的回复", "context":"用于日常回答的风格偏好",
-            "source_refs":[{"kind":"input","id":source.source_id,"revision":source.revision,"role":"evidence"}]});
+            "source_refs":[{"kind":"input","id":source.source_id(),"revision":source.revision,"role":"evidence"}]});
         if update {
             let seen = &session.assistant_data.as_ref().unwrap().current_memories[0];
             arguments["memory_id"] = seen.memory_id.clone().into();

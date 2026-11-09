@@ -1,7 +1,8 @@
 // Only these opaque markers become internal history links. Markdown URLs,
 // code samples and existing links keep their existing rendering policy.
 type Node = { type: string; value?: string; children?: Node[]; url?: string; data?: unknown };
-export const assistantSourceIdPattern = /^src_[A-Za-z0-9_-]{22}$/;
+// Database-backed source ids: table letter, row key and check letter.
+export const assistantSourceIdPattern = /^src_[hm][1-9][0-9]{0,18}[a-j]$/;
 
 export function assistantSourceHref(sourceId: string, revision?: number) {
     const query = new URLSearchParams({ source: sourceId });

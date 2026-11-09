@@ -722,7 +722,7 @@ mod tests {
     fn returned_roots_are_closed_and_source_hard_deadlines_cannot_be_broadened() {
         use super::super::seam::AssistantReadRoot;
         let mut proof = proof();
-        let source_id = native_ids::stable(Kind::AssistantSource, &"read-root");
+        let source_id = native_ids::fixture_source_id(&"read-root");
         proof.usage.history_dependencies.push(
             desk_agent_protocol::ai_assistant::source::HistoryDependency {
                 source_id: source_id.clone(),

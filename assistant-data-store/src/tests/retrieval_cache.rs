@@ -26,7 +26,7 @@ use sea_orm::{PaginatorTrait, sea_query::Expr};
 // These rows store query metadata only. They do not authorize any source read.
 fn source(label: &str) -> QuerySourceVersion {
     QuerySourceVersion {
-        source_id: native_ids::stable(Kind::AssistantSource, &label),
+        source_id: native_ids::fixture_source_id(&label),
         revision: 1,
     }
 }
@@ -556,7 +556,7 @@ async fn window_lookup_uses_its_frozen_anchor_and_rejects_changed_bounds_purpose
             PageAnchor::Window {
                 admitted_generation: 5,
                 fragment_index: 0,
-                source_id: anchor.source_id.clone(),
+                history_id: crate::source_rows::history(&anchor.source_id),
                 forward: true,
             },
         )

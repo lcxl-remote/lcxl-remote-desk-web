@@ -18,6 +18,7 @@ use desk_agent_protocol::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::chat::ChatMessage;
 use crate::ui_references::UiReferenceState;
 
 pub const SEARCH_MEMORIES: &str = "search_memories";
@@ -233,9 +234,29 @@ fn owner_input_sources(session: &PersistedAgentSession) -> Option<Vec<Value>> {
     if scope.authorized_input_seq != data.current_actor_input_seq {
         return None;
     }
-    // Runtime bridges may also have the user role. Locators only identify native
-    // owner inputs; the host verifies actual producer visibility and authority.
-    let sources: Vec<_> = session.conversation.iter().rev().filter(|message| {
+    let sources: Vec<_> = owner_inputs(&session.conversation)
+        .take(data.limits.memory.source_refs as usize)
+        .enumerate()
+        .map(|(index, _)| {
+            json!({"owner_inputs_ago": index,
+                "source_ref": {"kind":"input","id":owner_input_ref(index),"role": if index == 0 {"evidence"} else {"background"}}})
+        })
+        .collect();
+    (!sources.is_empty()).then_some(sources)
+}
+
+/// Prefix of the reserved owner input source reference `input:<owner_inputs_ago>`.
+pub const OWNER_INPUT_REF_PREFIX: &str = "input:";
+
+fn owner_input_ref(ago: usize) -> String {
+    format!("{OWNER_INPUT_REF_PREFIX}{ago}")
+}
+
+/// Native owner inputs, newest first. Runtime bridges may also have the user
+/// role; locators only identify native owner inputs and the host verifies
+/// actual producer visibility and authority.
+fn owner_inputs(conversation: &[ChatMessage]) -> impl Iterator<Item = &ChatMessage> {
+    conversation.iter().rev().filter(|message| {
         message.role == crate::chat::ChatRole::User
             && message.data_envelope.as_ref().is_some_and(|envelope| {
                 envelope.provenance.source_provider_id == "ai-assistant-user"
@@ -243,18 +264,28 @@ fn owner_input_sources(session: &PersistedAgentSession) -> Option<Vec<Value>> {
                     && envelope.provenance.source_object_id.as_deref()
                         == Some(message.message_id.as_str())
             })
-    }).take(data.limits.memory.source_refs as usize).enumerate().map(|(index, message)| {
-        let origin = super::source::history_origin_id(
-            &session.actor_id,
-            &data.source_device_ref,
-            &session.conversation_id,
-            &message.message_id,
-            desk_agent_protocol::ai_assistant::source::AssistantSourceKind::Input,
-        );
-        json!({"owner_inputs_ago": index,
-            "source_ref": {"kind":"input","id":super::source::history_source_id(&origin, 0),"role": if index == 0 {"evidence"} else {"background"}}})
-    }).collect();
-    (!sources.is_empty()).then_some(sources)
+    })
+}
+
+/// Resolves a reserved `input:<n>` source reference made by the model that
+/// produced `producer_message_id`. Counting starts at the inputs before that
+/// message, so inputs queued after the request was projected do not shift it.
+/// Returns `None` for any other reference or an unknown input.
+pub fn owner_input_message<'a>(
+    session: &'a PersistedAgentSession,
+    producer_message_id: &str,
+    reference: &str,
+) -> Option<&'a ChatMessage> {
+    let ago = reference
+        .strip_prefix(OWNER_INPUT_REF_PREFIX)
+        .filter(|digits| digits == &"0" || !digits.starts_with('0'))?
+        .parse::<usize>()
+        .ok()?;
+    let producer = session
+        .conversation
+        .iter()
+        .position(|message| message.message_id == producer_message_id)?;
+    owner_inputs(&session.conversation[..producer]).nth(ago)
 }
 
 pub fn is_data_effect(effect: ToolEffect) -> bool {
@@ -759,20 +790,9 @@ mod tests {
             "runtime context",
         ));
         let source = owner_input_sources(&session).unwrap()[0]["source_ref"].clone();
-        let origin = crate::native_ids::stable(
-            crate::native_ids::Kind::AssistantOrigin,
-            &(
-                "actor",
-                "device",
-                "root",
-                "owner-input",
-                desk_agent_protocol::ai_assistant::source::AssistantSourceKind::Input,
-            ),
-        );
         assert_eq!(
             source,
-            json!({"kind":"input","id":crate::native_ids::stable(
-            crate::native_ids::Kind::AssistantSource, &(&origin, 0_u32)),"role":"evidence"})
+            json!({"kind":"input","id":"input:0","role":"evidence"})
         );
         let tools = for_session(
             &session,
@@ -809,6 +829,44 @@ mod tests {
     }
 
     #[test]
+    fn owner_input_references_count_back_from_the_producing_model_call() {
+        let mut session = personal_session("actor", "root", "device");
+        let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "account".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let input = |id: &str| {
+            model_bound_user_message(id.into(), format!("input {id}"), destination.clone()).unwrap()
+        };
+        session.conversation.push(input("older"));
+        session.conversation.push(input("latest"));
+        session
+            .conversation
+            .push(ChatMessage::text("bridge", ChatRole::User, "runtime input"));
+        session.conversation.push(ChatMessage::assistant_tool_calls(
+            "producer",
+            "",
+            Vec::new(),
+        ));
+        // Queued after the request was projected; it must not shift the count.
+        session.conversation.push(input("queued"));
+        let resolve = |reference: &str| {
+            owner_input_message(&session, "producer", reference)
+                .map(|message| message.message_id.clone())
+        };
+        assert_eq!(resolve("input:0").as_deref(), Some("latest"));
+        assert_eq!(resolve("input:1").as_deref(), Some("older"));
+        for unresolved in [
+            "input:2", "input:01", "input:-1", "input:", "src_h42i", "latest",
+        ] {
+            assert_eq!(resolve(unresolved), None, "{unresolved}");
+        }
+        assert_eq!(owner_input_message(&session, "missing", "input:0"), None);
+    }
+
+    #[test]
     fn owner_input_locators_are_bounded_and_exclude_runtime_bridges() {
         let mut session = personal_session("actor", "root", "device");
         let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
@@ -841,17 +899,8 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0]["owner_inputs_ago"], 0);
         assert_eq!(sources[1]["owner_inputs_ago"], 1);
-        let expected_origin = super::super::source::history_origin_id(
-            "actor",
-            "device",
-            "root",
-            "fact",
-            desk_agent_protocol::ai_assistant::source::AssistantSourceKind::Input,
-        );
-        assert_eq!(
-            sources[1]["source_ref"]["id"],
-            super::super::source::history_source_id(&expected_origin, 0)
-        );
+        assert_eq!(sources[0]["source_ref"]["id"], "input:0");
+        assert_eq!(sources[1]["source_ref"]["id"], "input:1");
         assert_eq!(sources[0]["source_ref"]["role"], "evidence");
         assert_eq!(sources[1]["source_ref"]["role"], "background");
         assert_ne!(

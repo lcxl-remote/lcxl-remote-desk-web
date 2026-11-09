@@ -160,7 +160,7 @@ pub(crate) async fn owner_record_on<C: ConnectionTrait + ConfigConnection>(
         .filter(source::Column::ActorId.eq(actor))
         .filter(source::Column::MemoryId.eq(&row.memory_id))
         .filter(source::Column::MemoryRevision.eq(row.revision))
-        .order_by_asc(source::Column::SourceId)
+        .order_by_asc(source::Column::Id)
         .all(db)
         .await?;
     if rows.is_empty() {
@@ -173,7 +173,7 @@ pub(crate) async fn owner_record_on<C: ConnectionTrait + ConfigConnection>(
             return Ok(None);
         }
         has_assertion |= evidence.role == "evidence";
-        source_ids.push(evidence.source_id);
+        source_ids.push(evidence.source_id());
     }
     if !has_assertion {
         return Ok(None);

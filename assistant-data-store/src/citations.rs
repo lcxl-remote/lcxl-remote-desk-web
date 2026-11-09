@@ -5,10 +5,7 @@ use desk_agent_protocol::ai_assistant::{
     source::{AssistantCitation, validate_source_id},
     user_instructions::AssistantDataPolicy,
 };
-use desk_diagnose_core::{
-    ai_assistant::citation::AnswerCitations,
-    native_ids::{self, Kind},
-};
+use desk_diagnose_core::ai_assistant::citation::AnswerCitations;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect,
@@ -64,7 +61,8 @@ fn validate(row: &citation::Model) -> Result<Vec<AssistantCitation>, AssistantSt
             || value.source_revision == 0
             || value.source_revision > i64::MAX as u64
             || value.source_device.is_some()
-            || !native_ids::is(Kind::AssistantSource, &value.source_id)
+            || desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&value.source_id)
+                .is_none()
             || !ids.insert(value.source_id.as_str())
     }) {
         return Err(AssistantStoreError::Inaccessible);

@@ -22,8 +22,8 @@ pub enum Kind {
     Goal,
     StatusStep,
     Lineage,
-    AssistantSource,
     AssistantOrigin,
+    AssistantSearchDocument,
     Memory,
     MemoryJob,
     RetrievalEpisode,
@@ -66,7 +66,7 @@ impl Kind {
             Self::Goal => "g",
             Self::StatusStep => "step",
             Self::Lineage => "id",
-            Self::AssistantSource => "src",
+            Self::AssistantSearchDocument => "sdoc",
             Self::AssistantOrigin => "origin",
             Self::Memory => "mem",
             Self::MemoryJob => "mjob",
@@ -106,6 +106,25 @@ pub fn stable(kind: Kind, identity: &impl Serialize) -> String {
     let digest = Sha256::digest(input);
     let bytes: [u8; 16] = digest[..16].try_into().expect("128-bit business identity");
     from_bytes(kind, &bytes)
+}
+
+/// Deterministic history source id for tests and fixtures. Production source
+/// ids are database primary keys formatted by `SourceRef`.
+#[doc(hidden)]
+pub fn fixture_source_id(seed: &impl Serialize) -> String {
+    let input = serde_json::to_vec(&("fixture-source", seed)).expect("fixture seed serialization");
+    let digest = Sha256::digest(input);
+    let key = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) % 1_000_000_000;
+    desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(key as i64 + 1).to_string()
+}
+
+/// Deterministic memory evidence source id for tests and fixtures.
+#[doc(hidden)]
+pub fn fixture_memory_source_id(seed: &impl Serialize) -> String {
+    let history = fixture_source_id(seed);
+    let parsed = desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&history)
+        .expect("fixture history source id");
+    desk_agent_protocol::ai_assistant::source_ref::SourceRef::memory(parsed.id).to_string()
 }
 
 pub fn is(kind: Kind, id: &str) -> bool {

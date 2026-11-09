@@ -101,7 +101,10 @@ impl AssistantDataReadUse {
         }
         let mut sources = std::collections::BTreeSet::new();
         for dependency in &self.history_dependencies {
-            if !native_ids::is(Kind::AssistantSource, &dependency.source_id)
+            if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(
+                &dependency.source_id,
+            )
+            .is_none()
                 || !native_ids::is(Kind::AssistantOrigin, &dependency.origin_id)
                 || dependency.source_revision == 0
                 || dependency.origin_deletion_generation == 0
@@ -118,7 +121,8 @@ impl AssistantDataReadUse {
         }
         let mut roots = std::collections::BTreeSet::new();
         for root in &self.roots {
-            if !native_ids::is(Kind::AssistantSource, &root.source_id)
+            if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&root.source_id)
+                .is_none()
                 || root.source_revision == 0
                 || !roots.insert((&root.source_id, root.source_revision))
                 || !sources.contains(&(&root.source_id, root.source_revision))
@@ -127,7 +131,8 @@ impl AssistantDataReadUse {
             }
         }
         for root in &self.decision_roots {
-            if !native_ids::is(Kind::AssistantSource, &root.source_id)
+            if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&root.source_id)
+                .is_none()
                 || root.source_revision == 0
                 || !sources.contains(&(&root.source_id, root.source_revision))
             {

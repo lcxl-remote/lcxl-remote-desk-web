@@ -3,8 +3,7 @@
 use super::*;
 use crate::{
     ai_assistant::source::{
-        HistoryCapture, HistorySourceDirectory, history_origin_id, history_source_id,
-        owner_text_policy,
+        HistoryCapture, HistorySourceDirectory, history_origin_id, owner_text_policy,
     },
     native_ids::{self, Kind},
 };
@@ -121,9 +120,6 @@ impl NativeStatusHistoryProjection {
             &self.native_id,
             AssistantSourceKind::NativeStatus,
         )
-    }
-    pub fn source_id(&self) -> String {
-        history_source_id(&self.origin_id(), 0)
     }
     pub fn capture<'a>(
         &'a self,

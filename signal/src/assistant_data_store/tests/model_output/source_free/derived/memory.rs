@@ -119,7 +119,11 @@ async fn later_source_policy_changes_do_not_rewrite_accepted_snapshot_policy() {
     let (store, mut session, parent, proof) = parent("derived-memory-no-export").await;
     let (_, output) = admit_followup(&store, &mut session, &parent, PARENT_TEXT).await;
     let source = evidence::Entity::find()
-        .filter(evidence::Column::SourceId.eq(&proof.usage.roots[0].source_id))
+        .filter(
+            evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                &proof.usage.roots[0].source_id,
+            )),
+        )
         .one(&store.db)
         .await
         .unwrap()

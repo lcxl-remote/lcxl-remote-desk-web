@@ -2,6 +2,7 @@
 
 use super::{AssistantStoreError, signed};
 use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
+use crate::entity::agent_assistant_history as history;
 use crate::entity::agent_assistant_origin as origin;
 use desk_agent_protocol::ai_assistant::{memory::*, source::*};
 use desk_assistant_data_store::memory_write::{self as shared, MemoryWrite, MemoryWriteSource};
@@ -159,6 +160,32 @@ async fn write_on(
         .has_admitted_personal_input()
         .then_some(context.session.conversation_id.as_str());
     let mut refs = draft.source_refs.clone();
+    // Earlier owner inputs are named `input:<n>` relative to the model call;
+    // resolve them before binding the current input so duplicates collapse.
+    for reference in &mut refs {
+        if !reference
+            .id
+            .starts_with(desk_diagnose_core::ai_assistant::data_tools::OWNER_INPUT_REF_PREFIX)
+        {
+            continue;
+        }
+        let message = desk_diagnose_core::ai_assistant::data_tools::owner_input_message(
+            context.session,
+            &context.producer_message.message_id,
+            &reference.id,
+        )
+        .ok_or(AssistantStoreError::SourceUnavailable)?;
+        let origin_id = desk_diagnose_core::ai_assistant::source::history_origin_id(
+            &context.session.actor_id,
+            &data.source_device_ref,
+            &context.session.conversation_id,
+            &message.message_id,
+            AssistantSourceKind::Input,
+        );
+        reference.id = input_source_id_on(db, &context.session.actor_id, &origin_id)
+            .await?
+            .ok_or(AssistantStoreError::SourceUnavailable)?;
+    }
     if data.current_actor_input_seq > 0 {
         let input = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(&context.session.actor_id))
@@ -167,17 +194,21 @@ async fn write_on(
             .filter(origin::Column::Kind.eq("input"))
             .one(db)
             .await?;
-        if let Some(input) = input {
-            let id =
-                desk_diagnose_core::ai_assistant::source::history_source_id(&input.origin_id, 0);
-            if !refs.iter().any(|r| r.id == id) {
-                refs.push(AssistantSourceRef {
-                    kind: AssistantSourceKind::Input,
-                    id,
-                    revision: None,
-                    role: SourceRefRole::Evidence,
-                });
+        let id = match input {
+            Some(input) => {
+                input_source_id_on(db, &context.session.actor_id, &input.origin_id).await?
             }
+            None => None,
+        };
+        if let Some(id) = id
+            && !refs.iter().any(|r| r.id == id)
+        {
+            refs.push(AssistantSourceRef {
+                kind: AssistantSourceKind::Input,
+                id,
+                revision: None,
+                role: SourceRefRole::Evidence,
+            });
         }
     }
     if refs.len() > data.limits.memory.source_refs as usize {
@@ -190,7 +221,7 @@ async fn write_on(
     for reference in refs {
         if originals
             .iter()
-            .any(|row| row.history.source_id == reference.id)
+            .any(|row| row.history.source_id() == reference.id)
         {
             continue;
         }
@@ -211,7 +242,9 @@ async fn write_on(
                         crate::entity::agent_memory_source::Column::ActorId
                             .eq(&context.session.actor_id),
                     )
-                    .filter(crate::entity::agent_memory_source::Column::SourceId.eq(&reference.id))
+                    .filter(crate::entity::agent_memory_source::Column::Id.eq(
+                        desk_assistant_data_store::source_rows::memory(&reference.id),
+                    ))
                     .one(db)
                     .await?
                 else {
@@ -452,4 +485,19 @@ fn skipped(reason: &str) -> MemoryWriteResult {
         _ => MemoryWriteOutcome::Skipped,
     };
     shared::result(outcome, reason, None)
+}
+
+/// The source id of an owner input: its first history fragment.
+async fn input_source_id_on(
+    db: &DatabaseTransaction,
+    actor: &str,
+    origin_id: &str,
+) -> Result<Option<String>, AssistantStoreError> {
+    Ok(history::Entity::find()
+        .filter(history::Column::ActorId.eq(actor))
+        .filter(history::Column::OriginId.eq(origin_id))
+        .filter(history::Column::FragmentIndex.eq(0))
+        .one(db)
+        .await?
+        .map(|row| row.source_id()))
 }

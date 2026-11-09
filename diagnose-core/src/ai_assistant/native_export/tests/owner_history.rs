@@ -49,7 +49,7 @@ fn original_with_turn(
         control_generation: 1,
         memory_state_generation: 1,
     };
-    let source_id = native_ids::stable(Kind::AssistantSource, &"owner-copy-evidence");
+    let source_id = native_ids::fixture_source_id(&"owner-copy-evidence");
     let memory_id = native_ids::stable(Kind::Memory, &"owner-copy-memory");
     selected.usage.history_dependencies = vec![
         desk_agent_protocol::ai_assistant::source::HistoryDependency {

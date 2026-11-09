@@ -57,7 +57,7 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         let mut selected = false;
         for row in rows {
             let root = usage.roots.iter().any(|source| {
-                source.source_id == row.source_id
+                source.source_id == row.source_id()
                     && source.source_revision == row.memory_revision as u64
             });
             if usage.purpose == SourceReadPurpose::MemoryEvidence && !root {
@@ -67,10 +67,10 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
                 return Ok(None);
             }
             selected = true;
-            evidence_roots.insert((row.source_id.clone(), unsigned(row.memory_revision)?));
+            evidence_roots.insert((row.source_id().clone(), unsigned(row.memory_revision)?));
             let expiry = row.expires_at_ms.map(unsigned).transpose()?;
             if !usage.history_dependencies.iter().any(|source| {
-                source.source_id == row.source_id
+                source.source_id == row.source_id()
                     && source.source_revision == row.memory_revision as u64
                     && source.origin_id == row.origin_id
                     && source.expires_at_unix_ms == expiry
@@ -124,7 +124,11 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         };
         let retained = evidence::Entity::find()
             .filter(evidence::Column::ActorId.eq(view.actor_id()))
-            .filter(evidence::Column::SourceId.eq(&source.source_id))
+            .filter(
+                evidence::Column::Id.eq(desk_assistant_data_store::source_rows::memory(
+                    &source.source_id,
+                )),
+            )
             .one(db)
             .await?;
         let policy_revision = if let Some(row) = retained {
@@ -161,11 +165,14 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
             // A naturally reclaimed history body is not required again: its
             // exact consumed identity is sealed in the accepted native proof.
             // A live contradictory row or manual source deletion still denies.
-            if let Some(row) = history::Entity::find()
-                .filter(history::Column::ActorId.eq(view.actor_id()))
-                .filter(history::Column::SourceId.eq(&source.source_id))
-                .one(db)
-                .await?
+            if let Some(row) =
+                history::Entity::find()
+                    .filter(history::Column::ActorId.eq(view.actor_id()))
+                    .filter(history::Column::Id.eq(
+                        desk_assistant_data_store::source_rows::history(&source.source_id),
+                    ))
+                    .one(db)
+                    .await?
             {
                 if row.origin_id != source.origin_id
                     || row.revision != signed(source.source_revision)?

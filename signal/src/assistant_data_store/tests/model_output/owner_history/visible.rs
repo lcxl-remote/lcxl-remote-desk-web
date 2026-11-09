@@ -71,7 +71,7 @@ async fn an_accepted_memory_answer_is_saved_after_forgetting_and_remains_visible
     let source = store
         .owner_source(
             1,
-            &row.source_id,
+            &row.source_id(),
             &AssistantDataPolicy::default(),
             chrono::Utc::now().timestamp_millis() as u64,
         )
@@ -212,10 +212,7 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
             .roots
             .first()
             .expect("actual consumed memory source");
-        let unknown = desk_diagnose_core::native_ids::stable(
-            desk_diagnose_core::native_ids::Kind::AssistantSource,
-            &"unprovided-citation",
-        );
+        let unknown = desk_diagnose_core::native_ids::fixture_source_id(&"unprovided-citation");
         let text = format!(
             "Known 〔来源:{}〕; unknown 〔来源:{unknown}〕; code `〔来源:{}〕`",
             root.source_id, root.source_id

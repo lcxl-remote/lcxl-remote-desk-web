@@ -7,12 +7,7 @@ use desk_agent_protocol::ai_assistant::{
     memory::{MemoryDeleteRequest, MemoryHistoryRequest, MemoryStatus},
     source::SourceReadPurpose,
 };
-use desk_diagnose_core::{
-    ai_assistant::data_tools,
-    chat::ToolCall,
-    native_ids::{self, Kind},
-    seam::SessionSeam,
-};
+use desk_diagnose_core::{ai_assistant::data_tools, chat::ToolCall, native_ids, seam::SessionSeam};
 use sea_orm::{PaginatorTrait, sea_query::Expr};
 
 async fn seed_versions(
@@ -77,15 +72,14 @@ async fn seed_versions(
             version.insert(&store.db).await.unwrap();
         }
         let source_id = if index == 1 {
-            source.source_id.clone()
+            source.source_id().clone()
         } else {
-            native_ids::stable(Kind::AssistantSource, &(&memory_id, index))
+            native_ids::fixture_memory_source_id(&(&memory_id, index))
         };
         let mut retained: evidence::ActiveModel = source.clone().into();
         if index > 1 {
-            retained.id = sea_orm::ActiveValue::NotSet;
+            retained.id = Set(desk_assistant_data_store::source_rows::memory(&source_id));
         }
-        retained.source_id = Set(source_id.clone());
         retained.memory_revision = Set(index as i64);
         if index == 1 {
             retained.update(&store.db).await.unwrap();

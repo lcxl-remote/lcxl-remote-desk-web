@@ -12,7 +12,7 @@ use desk_agent_protocol::ai_assistant::source::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 3;
+pub const MEMORY_EVIDENCE_PROOF_VERSION: u16 = 4;
 
 /// An authenticated independent copy keeps the origin's hard constraints,
 /// rather than the original chat fragment's temporary read availability.
@@ -33,7 +33,6 @@ pub struct MemoryEvidenceSnapshot<'a> {
     pub memory_id: &'a str,
     pub memory_revision: u64,
     pub memory_accepted_input_seq: u64,
-    pub evidence_source_id: &'a str,
     pub role: SourceRefRole,
     pub body: &'a str,
     pub origin_id: &'a str,
@@ -58,7 +57,6 @@ pub struct MemoryEvidenceRetentionProof {
     pub memory_id: String,
     pub memory_revision: u64,
     pub memory_accepted_input_seq: u64,
-    pub evidence_source_id: String,
     pub role: SourceRefRole,
     pub origin_id: String,
     pub origin_kind: AssistantSourceKind,
@@ -91,7 +89,6 @@ impl MemoryEvidenceRetentionProof {
             source.origin_id,
         )?;
         if !native_ids::is(Kind::Memory, source.memory_id)
-            || !native_ids::is(Kind::AssistantSource, source.evidence_source_id)
             || !native_ids::is(Kind::AssistantOrigin, source.origin_id)
             || source.memory_revision == 0
             || source.memory_accepted_input_seq == 0
@@ -177,7 +174,6 @@ impl MemoryEvidenceRetentionProof {
             memory_id: source.memory_id.into(),
             memory_revision: source.memory_revision,
             memory_accepted_input_seq: source.memory_accepted_input_seq,
-            evidence_source_id: source.evidence_source_id.into(),
             role: source.role,
             origin_id: source.origin_id.into(),
             origin_kind: source.origin_kind,
@@ -317,7 +313,8 @@ fn canonical_dependencies(
         .sort_by(|a, b| (&a.source_id, a.source_revision).cmp(&(&b.source_id, b.source_revision)));
     let mut seen = BTreeSet::new();
     for value in &values {
-        if !native_ids::is(Kind::AssistantSource, &value.source_id)
+        if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&value.source_id)
+            .is_none()
             || !native_ids::is(Kind::AssistantOrigin, &value.origin_id)
             || value.source_revision == 0
             || value.origin_deletion_generation == 0
@@ -340,7 +337,6 @@ mod tests {
 
     struct Fixture {
         memory: String,
-        evidence: String,
         origin: String,
         role: SourceRefRole,
         kind: AssistantSourceKind,
@@ -356,9 +352,8 @@ mod tests {
             let origin = native_ids::stable(Kind::AssistantOrigin, &"assertion");
             Self {
                 memory: native_ids::stable(Kind::Memory, &"language"),
-                evidence: native_ids::stable(Kind::AssistantSource, &"evidence"),
                 known: vec![KnownMemorySource {
-                    source_id: native_ids::stable(Kind::AssistantSource, &"original-fragment"),
+                    source_id: native_ids::fixture_source_id(&"original-fragment"),
                     revision: 1,
                     origin_id: origin.clone(),
                 }],
@@ -378,7 +373,6 @@ mod tests {
                 memory_id: &self.memory,
                 memory_revision: 1,
                 memory_accepted_input_seq: 4,
-                evidence_source_id: &self.evidence,
                 role: self.role,
                 body: &self.body,
                 origin_id: &self.origin,
@@ -402,7 +396,7 @@ mod tests {
         let mut data = Fixture::new();
         let first = data.known[0].clone();
         let second = KnownMemorySource {
-            source_id: native_ids::stable(Kind::AssistantSource, &"another-original-fragment"),
+            source_id: native_ids::fixture_source_id(&"another-original-fragment"),
             revision: 1,
             origin_id: data.origin.clone(),
         };
@@ -442,7 +436,7 @@ mod tests {
         snapshot.forget_sources = std::slice::from_ref(&changed);
         assert!(MemoryEvidenceRetentionProof::from_snapshot(&snapshot).is_err());
         let foreign = KnownMemorySource {
-            source_id: native_ids::stable(Kind::AssistantSource, &"foreign-input"),
+            source_id: native_ids::fixture_source_id(&"foreign-input"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"foreign-origin"),
         };
@@ -536,7 +530,7 @@ mod tests {
     fn known_background_fragments_require_a_complete_origin_proof_and_no_copy_is_preserved() {
         let mut data = Fixture::new();
         let known = KnownMemorySource {
-            source_id: native_ids::stable(Kind::AssistantSource, &"background"),
+            source_id: native_ids::fixture_source_id(&"background"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"background"),
         };
@@ -609,7 +603,7 @@ mod tests {
     }
     fn background_origin(data: &mut Fixture) -> RetainedMemoryOrigin {
         let source = KnownMemorySource {
-            source_id: native_ids::stable(Kind::AssistantSource, &"independent-background"),
+            source_id: native_ids::fixture_source_id(&"independent-background"),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"independent-background"),
         };
@@ -679,7 +673,7 @@ mod tests {
         for index in 1..256 {
             let origin_id = native_ids::stable(Kind::AssistantOrigin, &index);
             data.known.push(KnownMemorySource {
-                source_id: native_ids::stable(Kind::AssistantSource, &index),
+                source_id: native_ids::fixture_source_id(&index),
                 revision: 1,
                 origin_id: origin_id.clone(),
             });

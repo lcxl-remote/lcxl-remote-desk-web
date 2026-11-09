@@ -289,11 +289,11 @@ async fn read_on(
                 .result
                 .related_results
                 .iter()
-                .any(|item| item.source_id == source.row.source_id)
+                .any(|item| item.source_id == source.row.source_id())
         }) {
             if !versions
                 .iter()
-                .any(|version| version.source_id == source.row.source_id)
+                .any(|version| version.source_id == source.row.source_id())
             {
                 versions.push(source.version()?);
                 selected.push(source.usage.clone());
@@ -478,7 +478,7 @@ fn position(view: &AuthorizedHistoryView) -> Result<WindowPosition, AssistantSto
         admitted_generation: unsigned(view.source.row.admitted_generation)?,
         fragment_index: u32::try_from(view.source.row.fragment_index)
             .map_err(|_| AssistantStoreError::Inaccessible)?,
-        source_id: view.source.row.source_id.clone(),
+        history_id: view.source.row.id,
     })
 }
 pub(super) fn page_cursor(

@@ -184,16 +184,16 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
                 .into_query();
             let docs = document::Entity::find()
                 .select_only()
-                .column(document::Column::SourceId)
+                .column(document::Column::HistoryId)
                 .filter(document::Column::ActorId.eq(actor))
                 .filter(document::Column::SourceKind.eq("history"))
                 .filter(document::Column::DocumentId.in_subquery(postings))
                 .into_query();
-            query = query.filter(history::Column::SourceId.in_subquery(docs));
+            query = query.filter(history::Column::Id.in_subquery(docs));
         }
         let rows = query
             .order_by_desc(history::Column::RecordedAtMs)
-            .order_by_desc(history::Column::SourceId)
+            .order_by_desc(history::Column::Id)
             .limit(maximum + 1)
             .all(db)
             .await?;
@@ -215,7 +215,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
                 continue;
             }
             if terms.is_empty() || request.sort == HistorySort::Time {
-                candidates.push((row.source_id, row.revision));
+                candidates.push((row.source_id(), row.revision));
                 if candidates.len() == policy.limits.retrieval.query_candidates as usize {
                     reasons.insert("candidate_limit".into());
                     break;
@@ -225,7 +225,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
             let Some(doc) = document::Entity::find()
                 .filter(document::Column::ActorId.eq(actor))
                 .filter(document::Column::SourceKind.eq("history"))
-                .filter(document::Column::SourceId.eq(&row.source_id))
+                .filter(document::Column::SourceId.eq(row.source_id()))
                 .filter(document::Column::SourceRevision.eq(row.revision))
                 .one(db)
                 .await?
@@ -252,7 +252,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
             }
             ranked.push(ReadableSearchDocument {
                 document_id: doc.document_id,
-                source_id: row.source_id,
+                source_id: row.source_id(),
                 revision: unsigned(row.revision)?,
                 root_conversation_id: row.root_conversation_id,
                 token_count: doc.token_count as u32,
@@ -313,7 +313,7 @@ pub(crate) async fn search_on<C: ConnectionTrait + ConfigConnection>(
         let (id, revision) = cursor.remaining[0].clone();
         let row = history::Entity::find()
             .filter(history::Column::ActorId.eq(actor))
-            .filter(history::Column::SourceId.eq(&id))
+            .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(&id)))
             .one(db)
             .await?;
         let Some(row) = row.filter(|row| {

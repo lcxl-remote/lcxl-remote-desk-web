@@ -445,7 +445,7 @@ async fn accepted_snapshot_keeps_its_body_after_source_update_or_ordinary_expiry
                 .col_expr(history::Column::Revision, Expr::value(2i64));
         }
         update
-            .filter(history::Column::SourceId.eq(source))
+            .filter(history::Column::Id.eq(desk_assistant_data_store::source_rows::history(source)))
             .exec(&frame.store.db)
             .await
             .unwrap();

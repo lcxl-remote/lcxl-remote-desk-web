@@ -76,7 +76,7 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
         return Err(AssistantStoreError::Inaccessible);
     }
     let original = ThinHistory {
-        source_id: original_source.row.source_id.clone(),
+        id: original_source.row.id,
         revision: original_source.row.revision,
         conversation_id: original_source.row.conversation_id.clone(),
         admitted_generation: original_source.row.admitted_generation,
@@ -300,7 +300,7 @@ async fn direction_on<C: ConnectionTrait + crate::config::ConfigConnection>(
                 (history::Entity, history::Column::FragmentIndex),
                 order.clone(),
             )
-            .order_by((history::Entity, history::Column::SourceId), order)
+            .order_by((history::Entity, history::Column::Id), order)
             .limit(page_size);
         let rows = ThinHistory::find_by_statement(db.get_database_backend().build(&select))
             .all(db)
@@ -316,7 +316,7 @@ async fn direction_on<C: ConnectionTrait + crate::config::ConfigConnection>(
                 admitted_generation: unsigned(row.admitted_generation)?,
                 fragment_index: u32::try_from(row.fragment_index)
                     .map_err(|_| AssistantStoreError::Inaccessible)?,
-                source_id: row.source_id.clone(),
+                history_id: row.id,
             };
             if row.already_seen(query, pending) {
                 through = Some(position);
@@ -349,7 +349,7 @@ async fn direction_on<C: ConnectionTrait + crate::config::ConfigConnection>(
 fn bound(position: &WindowPosition, forward: bool) -> Result<Condition, AssistantStoreError> {
     let generation = Expr::col((history::Entity, history::Column::AdmittedGeneration));
     let fragment = Expr::col((history::Entity, history::Column::FragmentIndex));
-    let source = Expr::col((history::Entity, history::Column::SourceId));
+    let source = Expr::col((history::Entity, history::Column::Id));
     let relation = if forward {
         generation.clone().gt(signed(position.admitted_generation)?)
     } else {
@@ -361,9 +361,9 @@ fn bound(position: &WindowPosition, forward: bool) -> Result<Condition, Assistan
         fragment.clone().lt(i64::from(position.fragment_index))
     };
     let source_relation = if forward {
-        source.gt(position.source_id.clone())
+        source.gt(position.history_id)
     } else {
-        source.lt(position.source_id.clone())
+        source.lt(position.history_id)
     };
     Ok(Condition::any()
         .add(relation)
@@ -384,13 +384,13 @@ fn position(anchor: &PageAnchor) -> Option<(WindowPosition, bool)> {
         PageAnchor::Window {
             admitted_generation,
             fragment_index,
-            source_id,
+            history_id,
             forward,
         } => Some((
             WindowPosition {
                 admitted_generation: *admitted_generation,
                 fragment_index: *fragment_index,
-                source_id: source_id.clone(),
+                history_id: *history_id,
             },
             *forward,
         )),

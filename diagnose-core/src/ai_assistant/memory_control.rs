@@ -15,7 +15,8 @@ pub struct KnownMemorySource {
 
 impl KnownMemorySource {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !native_ids::is(Kind::AssistantSource, &self.source_id)
+        if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&self.source_id)
+            .is_none()
             || !native_ids::is(Kind::AssistantOrigin, &self.origin_id)
             || self.revision == 0
         {
@@ -95,7 +96,7 @@ mod tests {
 
     fn source(seed: &str) -> KnownMemorySource {
         KnownMemorySource {
-            source_id: native_ids::stable(Kind::AssistantSource, &seed),
+            source_id: native_ids::fixture_source_id(&seed),
             revision: 1,
             origin_id: native_ids::stable(Kind::AssistantOrigin, &"same-message"),
         }

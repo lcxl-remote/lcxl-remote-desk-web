@@ -34,7 +34,7 @@ impl Fixture {
             arguments_json: serde_json::json!({
                 "operation": "remember", "content": "用户偏好中文回答",
                 "source_refs": [{"kind": "input", "role": "evidence",
-                    "id": native_ids::stable(Kind::AssistantSource, &"owner-input"), "revision": 1}]
+                    "id": native_ids::fixture_source_id(&"owner-input"), "revision": 1}]
             })
             .to_string(),
         })
@@ -185,7 +185,7 @@ impl Fixture {
 
 #[test]
 fn data_call_resolution_preserves_original_argument_bytes_and_rejects_changes() {
-    let source = native_ids::stable(Kind::AssistantSource, &"observed-source");
+    let source = native_ids::fixture_source_id(&"observed-source");
     let cases = [
         (
             data_tools::SEARCH_MEMORIES,

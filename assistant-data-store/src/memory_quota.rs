@@ -148,10 +148,9 @@ pub fn version_metadata(row: &revision::Model) -> Result<i64, AssistantStoreErro
 }
 pub fn source_metadata(row: &source::Model) -> Result<i64, AssistantStoreError> {
     bytes(
-        12,
+        11,
         1,
         &[
-            &row.source_id,
             &row.memory_id,
             &row.actor_id,
             &row.origin_id,

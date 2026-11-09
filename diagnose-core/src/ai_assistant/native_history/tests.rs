@@ -336,8 +336,7 @@ fn original_native_inventory_has_stable_content_only_history_even_before_owner_c
         .unwrap()
     };
     let original = make(&"a".repeat(64));
-    assert_eq!(original.source_id(), make(&"a".repeat(64)).source_id());
-    assert_ne!(original.source_id(), make(&"b".repeat(64)).source_id());
+    assert_eq!(original.origin_id(), make(&"a".repeat(64)).origin_id());
     let capture = original.capture(0, None);
     assert_eq!(capture.kind, AssistantSourceKind::NativeStatus);
     assert_eq!(capture.statement_timezone, "UTC");

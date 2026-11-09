@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { expect, it } from 'vitest';
 import { MarkdownContent } from './markdown-content';
 
-const id = 'src_AAECAwQFBgcICQoLDA0ODw';
+const id = 'src_h42i';
 it('keeps complete but unbound and streaming markers inert without exposing partial IDs', () => {
     render(<MemoryRouter><MarkdownContent disableLinks assistantSources={[]}>{`Result 〔来源:${id}〕 and 〔来源:src_incomplete`}</MarkdownContent></MemoryRouter>);
     expect(screen.queryByRole('link')).toBeNull();

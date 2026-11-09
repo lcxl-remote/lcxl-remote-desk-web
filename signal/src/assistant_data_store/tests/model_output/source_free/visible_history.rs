@@ -94,7 +94,7 @@ async fn an_original_owner_export_to_another_model_keeps_the_same_logical_owner_
         .unwrap()
         .unwrap();
     assert!(dependencies.is_empty());
-    assert!(!input.source_id.is_empty());
+    assert!(!input.source_id().is_empty());
 }
 
 #[tokio::test]
@@ -333,7 +333,7 @@ async fn history_capacity_and_late_index_failure_preserve_the_real_saved_answer_
             .await
             .unwrap();
         } else {
-            store.db.execute_unprepared("CREATE TRIGGER reject_visible_history_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.source_kind='history' AND EXISTS (SELECT 1 FROM agent_assistant_history h WHERE h.source_id=NEW.source_id AND h.kind='assistant_message') BEGIN SELECT RAISE(ABORT, 'injected visible history index failure'); END").await.unwrap();
+            store.db.execute_unprepared("CREATE TRIGGER reject_visible_history_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.source_kind='history' AND EXISTS (SELECT 1 FROM agent_assistant_history h WHERE h.id=NEW.history_id AND h.kind='assistant_message') BEGIN SELECT RAISE(ABORT, 'injected visible history index failure'); END").await.unwrap();
         }
         let old_version = session.version;
         host(&store).save(&mut session).await.unwrap();
@@ -822,7 +822,7 @@ async fn native_inventory_save_retains_a_verified_empty_snapshot_once_without_ex
         .as_ref()
         .unwrap()
         .summary(
-            &row.source_id,
+            &row.source_id(),
             row.revision as u64,
             desk_agent_protocol::ai_assistant::limits::AssistantProcessingLimits::default()
                 .native_status_model_items as usize,

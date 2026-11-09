@@ -33,7 +33,7 @@ impl Fixture {
         let mut session = personal_session("owner", "root", "device");
         session.input_revision = 1;
         let id = native_ids::stable(Kind::Memory, &"current-memory");
-        let source = native_ids::stable(Kind::AssistantSource, &"current-evidence");
+        let source = native_ids::fixture_source_id(&"current-evidence");
         let record = MemoryRecord {
             memory_id: id.clone(),
             revision: 1,
@@ -175,10 +175,7 @@ fn current_payload_cannot_promote_historical_conflicted_future_or_missing_source
             1 => fixture.record.status = MemoryStatus::PendingConflict,
             2 => fixture.record.valid_until_unix_ms = Some(1000),
             3 => fixture.record.valid_from_unix_ms = 1001,
-            4 => {
-                fixture.record.source_ids[0] =
-                    native_ids::stable(Kind::AssistantSource, &"not-selected")
-            }
+            4 => fixture.record.source_ids[0] = native_ids::fixture_source_id(&"not-selected"),
             _ => {
                 fixture
                     .session

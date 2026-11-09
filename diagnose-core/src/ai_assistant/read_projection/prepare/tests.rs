@@ -145,7 +145,7 @@ impl Fixture {
         }
     }
     fn usage(&self, name: &str) -> AssistantDataReadUse {
-        let source = native_ids::stable(Kind::AssistantSource, &name);
+        let source = native_ids::fixture_source_id(&name);
         AssistantDataReadUse {
             decision_roots: Vec::new(),
             projection_id: native_ids::stable(Kind::AssistantReadProjection, &name),
@@ -538,7 +538,7 @@ fn dependency_conflicts_and_current_control_or_feature_changes_fail_closed() {
 
 #[test]
 fn original_window_content_and_self_reported_bytes_must_match_the_retained_full_fragment() {
-    let source = native_ids::stable(Kind::AssistantSource, &"A");
+    let source = native_ids::fixture_source_id(&"A");
     let arguments = serde_json::json!({"source_id":source,"max_bytes":32768}).to_string();
     let fixture = Fixture::new(
         data_tools::READ_CONVERSATION,
@@ -596,7 +596,7 @@ fn original_window_content_and_self_reported_bytes_must_match_the_retained_full_
 
 #[test]
 fn a_window_keeps_its_original_anchor_as_a_constraint_without_claiming_its_body_was_returned() {
-    let source = native_ids::stable(Kind::AssistantSource, &"anchor");
+    let source = native_ids::fixture_source_id(&"anchor");
     let arguments =
         serde_json::json!({"source_id":source,"view":"latest","max_bytes":32768}).to_string();
     let fixture = Fixture::new(

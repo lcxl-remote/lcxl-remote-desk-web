@@ -91,7 +91,7 @@ impl CurrentMemoryPayload {
             }
             let mut sources = std::collections::BTreeSet::new();
             for source in &memory.source_ids {
-                if !crate::native_ids::is(crate::native_ids::Kind::AssistantSource, source)
+                if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(source).is_none()
                     || !sources.insert(source)
                 {
                     return Err("invalid current-memory source set");

@@ -53,7 +53,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         .filter(history::Column::ExpiresAtMs.gt(super::signed(context.now_unix_ms)?))
         .filter(history::Column::AdmittedGeneration.lte(super::signed(context.corpus_generation)?))
         .order_by_desc(history::Column::AdmittedGeneration)
-        .order_by_desc(history::Column::SourceId)
+        .order_by_desc(history::Column::Id)
         .limit(maximum as u64 + 1)
         .all(db)
         .await?;
@@ -65,7 +65,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         let source = match keyword_search::readable_history_on(
             db,
             context,
-            &row.source_id,
+            &row.source_id(),
             unsigned(row.revision)?,
         )
         .await
@@ -90,7 +90,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         for item in &snapshot.items {
             states
                 .entry((item.kind.as_str().into(), item.native_id.clone()))
-                .or_insert_with(|| (item.clone(), source.row.source_id.clone()));
+                .or_insert_with(|| (item.clone(), source.row.source_id().clone()));
         }
         sources.push(source);
     }
@@ -118,7 +118,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     let additional = sources.collect::<Vec<_>>();
     let mut summary = inventory
         .summary(
-            &source.row.source_id,
+            &source.row.source_id(),
             unsigned(source.row.revision)?,
             context.platform.limits.processing.native_status_model_items as usize,
         )
@@ -139,7 +139,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         .map(|source| {
             Ok(AssistantSourceRef {
                 kind: AssistantSourceKind::NativeStatus,
-                id: source.row.source_id.clone(),
+                id: source.row.source_id().clone(),
                 revision: Some(unsigned(source.row.revision)?),
                 role: SourceRefRole::Evidence,
             })

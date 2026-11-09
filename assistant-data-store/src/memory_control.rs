@@ -333,7 +333,7 @@ async fn target_on<C: ConnectionTrait>(
         .filter(source::Column::ActorId.eq(actor))
         .filter(source::Column::MemoryId.eq(&row.memory_id))
         .filter(source::Column::MemoryRevision.eq(row.revision))
-        .order_by_asc(source::Column::SourceId)
+        .order_by_asc(source::Column::Id)
         .all(db)
         .await?;
     let mut known = Vec::new();
@@ -344,7 +344,7 @@ async fn target_on<C: ConnectionTrait>(
             known.extend(sources);
         }
         let own = KnownMemorySource {
-            source_id: source.source_id,
+            source_id: source.source_id(),
             revision: unsigned(source.memory_revision)?,
             origin_id: source.origin_id,
         };

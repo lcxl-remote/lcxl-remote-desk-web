@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(unique)]
-    pub source_id: String,
     #[sea_orm(indexed)]
     pub origin_id: String,
     #[sea_orm(indexed)]
@@ -52,3 +50,10 @@ pub struct Model {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Model {
+    /// The model-visible source id formatted from this row's primary key.
+    pub fn source_id(&self) -> String {
+        desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(self.id).to_string()
+    }
+}

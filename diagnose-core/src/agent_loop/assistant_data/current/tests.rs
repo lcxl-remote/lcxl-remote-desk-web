@@ -42,7 +42,7 @@ impl Port {
     ) -> CurrentMemoryBlock {
         let data = session.assistant_data.as_ref().unwrap();
         let memory = native_ids::stable(Kind::Memory, &"loop-current-fact");
-        let source = native_ids::stable(Kind::AssistantSource, &"loop-current-evidence");
+        let source = native_ids::fixture_source_id(&"loop-current-evidence");
         let mut record = MemoryRecord {
             memory_id: memory.clone(),
             revision: 1,
@@ -96,10 +96,10 @@ impl Port {
                 let mut record = record.clone();
                 let mut usage = usage.clone();
                 record.memory_id = native_ids::stable(Kind::Memory, &("loop-current-fact", index));
-                record.source_ids = vec![native_ids::stable(
-                    Kind::AssistantSource,
-                    &("loop-current-evidence", index),
-                )];
+                record.source_ids = vec![native_ids::fixture_source_id(&(
+                    "loop-current-evidence",
+                    index,
+                ))];
                 usage.projection_id =
                     native_ids::stable(Kind::AssistantReadProjection, &("loop-candidate", index));
                 usage.memories[0].memory_id = record.memory_id.clone();
