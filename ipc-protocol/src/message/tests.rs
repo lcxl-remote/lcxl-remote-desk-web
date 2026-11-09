@@ -409,8 +409,8 @@ fn start_media_round_trips_wincode() {
             assert_eq!(p.fps, 60);
             assert!(p.start_video);
             assert!(p.audio.is_some());
-            assert_eq!(
-                p.enable_dirty_rect, false,
+            assert!(
+                !p.enable_dirty_rect,
                 "enable_dirty_rect must survive StartMedia wincode round-trip"
             );
         }

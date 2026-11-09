@@ -341,6 +341,10 @@ impl ServiceToWorker {
 /// **event** transport.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 #[serde(tag = "type", content = "payload")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "IPC wire message moved once per event; boxing variants would touch every platform's producers and consumers"
+)]
 pub enum WorkerToService {
     /// Worker has started and is ready to accept connections
     Ready,

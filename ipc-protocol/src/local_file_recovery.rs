@@ -93,6 +93,10 @@ impl LocalFileRecoveryCommand {
 }
 
 #[derive(Clone, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "IPC reply moved once per request; boxing the page would touch every platform's handlers"
+)]
 pub enum LocalFileRecoveryOutcome {
     Page(FileRecoveryPageDto),
     Cleanup(FileRecoveryCleanupDto),
