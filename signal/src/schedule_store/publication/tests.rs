@@ -759,3 +759,82 @@ async fn one_schedule_publish_key_has_one_authorization() {
         .await
         .unwrap();
 }
+
+/// Returns one fixed evidence value, so publish and resume can be compared.
+struct FixedEvidence(TaskRehearsalEvidence);
+
+#[async_trait::async_trait]
+impl TaskPublicationVerifier for FixedEvidence {
+    async fn lock_subject(
+        &self,
+        _: &DatabaseTransaction,
+        _: &entity::Model,
+    ) -> Result<(), ScheduleStoreError> {
+        Ok(())
+    }
+
+    async fn verify(
+        &self,
+        _: &DatabaseTransaction,
+        _: &entity::Model,
+        _: &ValidatedTaskContract,
+        rehearsal: &str,
+        _: Option<i64>,
+    ) -> Result<TaskRehearsalEvidence, ScheduleStoreError> {
+        assert_eq!(rehearsal, self.0.rehearsal_run_id);
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn resume_rejects_evidence_changed_after_publication() {
+    let (store, task, _, input) = fixture().await;
+    let original = TaskRehearsalEvidence {
+        rehearsal_run_id: input.rehearsal_run_id.clone(),
+        conversation_id: "rehearsal-conversation".into(),
+        input_revision: 1,
+        evidence_sha256: "e".repeat(64),
+        finished_at: chrono::Utc::now().timestamp_millis() - 60_000,
+    };
+    store
+        .publish_task(1, &input, &FixedEvidence(original.clone()))
+        .await
+        .unwrap();
+    let published = entity::Entity::find_by_id(task.id)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let paused = store
+        .pause(
+            1,
+            &task.schedule_id,
+            published.revision,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .unwrap();
+    // A changed model target or gate revision yields different evidence.
+    let mut changed = original.clone();
+    changed.evidence_sha256 = "f".repeat(64);
+    assert!(matches!(
+        store
+            .resume_published_task(
+                1,
+                &task.schedule_id,
+                paused.revision,
+                &FixedEvidence(changed)
+            )
+            .await,
+        Err(ScheduleStoreError::Conflict)
+    ));
+    store
+        .resume_published_task(
+            1,
+            &task.schedule_id,
+            paused.revision,
+            &FixedEvidence(original),
+        )
+        .await
+        .unwrap();
+}

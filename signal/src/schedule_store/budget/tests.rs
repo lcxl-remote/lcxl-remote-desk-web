@@ -704,3 +704,53 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
         );
     }
 }
+
+#[tokio::test]
+async fn step_states_reject_a_reservation_from_another_authority() {
+    use sea_orm::{ActiveModelTrait, Set};
+    let (store, task, _, work) = fixture().await;
+    store
+        .db
+        .execute(
+            &sea_orm::Schema::new(store.db.get_database_backend())
+                .create_table_from_entity(crate::entity::agent_action_item::Entity),
+        )
+        .await
+        .unwrap();
+    reserve(&store, &task, &work, TaskBudgetKind::ToolCall, "call-1", 1)
+        .await
+        .unwrap();
+    let txn = store.db.begin().await.unwrap();
+    let authority = ScheduleStore::lock_run_authority(
+        &txn,
+        1,
+        &task.target_device_id,
+        &work.run_id,
+        "budget-node",
+        work.lease_epoch,
+    )
+    .await
+    .unwrap();
+    // Reserved under the current authority: step states derive normally.
+    crate::capability_grant_store::task_grant::all_steps_succeeded_on(&txn, &authority)
+        .await
+        .unwrap();
+    // The same run's reservation made under another recovery epoch is not
+    // evidence for the current authority's steps.
+    let row = ledger::Entity::find()
+        .filter(ledger::Column::Kind.eq("tool_call"))
+        .one(&txn)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut other = authority.provenance().clone();
+    other.recovery_epoch += 1;
+    let mut active: ledger::ActiveModel = row.into();
+    active.authority_json = Set(serde_json::to_string(&other).unwrap());
+    active.update(&txn).await.unwrap();
+    assert!(
+        crate::capability_grant_store::task_grant::all_steps_succeeded_on(&txn, &authority)
+            .await
+            .is_err()
+    );
+}

@@ -433,6 +433,49 @@ fn policy_dictionary_has_one_encoding_in_first_use_order() {
 }
 
 #[test]
+fn policy_dictionary_rejects_a_reordered_but_equivalent_encoding() {
+    let mut secret = user_with_id("secret");
+    secret.sensitivity = Sensitivity::Secret;
+    let original = snapshot(vec![user(), secret, user_with_id("third")]);
+    let registration =
+        NativeInputPolicyRegistration::capture(&original, SOURCE_CONTRACT_REVISION, 1).unwrap();
+    let indices = |value: &NativeInputPolicyRegistration| {
+        value
+            .leaves
+            .iter()
+            .flatten()
+            .map(|leaf| leaf.policy_index)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(registration.policies.len(), 2);
+    assert_eq!(indices(&registration), vec![0, 1, 0]);
+    registration
+        .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+        .unwrap();
+    // Same leaf policies, but the dictionary is not in first-use order.
+    let mut reordered = registration.clone();
+    reordered.policies.swap(0, 1);
+    for leaf in reordered.leaves.iter_mut().flatten() {
+        leaf.policy_index = 1 - leaf.policy_index;
+    }
+    assert_eq!(indices(&reordered), vec![1, 0, 1]);
+    assert!(
+        reordered
+            .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+            .is_err()
+    );
+    // An unused dictionary entry is also rejected.
+    let mut unused = registration;
+    unused.policies.push(unused.policies[0].clone());
+    unused.policies[2].no_export = !unused.policies[2].no_export;
+    assert!(
+        unused
+            .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
+            .is_err()
+    );
+}
+
+#[test]
 fn native_snapshot_cannot_replace_a_restrictive_policy_or_rebind_a_full_input_label() {
     let mut secret = user();
     secret.sensitivity = Sensitivity::Secret;
