@@ -55,7 +55,6 @@ pub(crate) struct HistoryScanItem {
 struct ThinHistory {
     source_id: String,
     revision: i64,
-    content_sha256: String,
     conversation_id: String,
     admitted_generation: i64,
     fragment_index: i32,
@@ -91,7 +90,6 @@ impl ThinHistory {
     fn same_row(&self, row: &history::Model) -> bool {
         self.source_id == row.source_id
             && self.revision == row.revision
-            && self.content_sha256 == row.content_sha256
             && self.conversation_id == row.conversation_id
             && self.admitted_generation == row.admitted_generation
             && self.fragment_index == row.fragment_index
@@ -193,7 +191,6 @@ fn columns(query: &mut SelectStatement, field: HistoryTimeField) {
             [
                 history::Column::SourceId,
                 history::Column::Revision,
-                history::Column::ContentSha256,
                 history::Column::ConversationId,
                 history::Column::AdmittedGeneration,
                 history::Column::FragmentIndex,

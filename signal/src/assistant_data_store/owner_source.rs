@@ -23,7 +23,6 @@ use desk_diagnose_core::{
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, TransactionTrait,
 };
-use sha2::{Digest, Sha256};
 
 pub(crate) async fn owner_source(
     db: &crate::config::connection::DatabaseConnection,
@@ -52,13 +51,28 @@ pub(crate) async fn owner_source_on<C: ConnectionTrait + ConfigConnection>(
     platform_policy: &AssistantDataPolicy,
     now: u64,
 ) -> Result<AssistantSourceResolution, AssistantStoreError> {
+    owner_source_with_original_on(db, actor, source_id, platform_policy, now)
+        .await
+        .map(|(resolution, _)| resolution)
+}
+
+/// Also returns the original history row the resolution was built from, so
+/// owner navigation anchors on that exact row instead of searching for it.
+pub(crate) async fn owner_source_with_original_on<C: ConnectionTrait + ConfigConnection>(
+    db: &C,
+    actor: &str,
+    source_id: &str,
+    platform_policy: &AssistantDataPolicy,
+    now: u64,
+) -> Result<(AssistantSourceResolution, Option<history::Model>), AssistantStoreError> {
     if let Some(row) = history::Entity::find()
         .filter(history::Column::ActorId.eq(actor))
         .filter(history::Column::SourceId.eq(source_id))
         .one(db)
         .await?
     {
-        return history_source_on(db, actor, &row, platform_policy, now).await;
+        let resolution = history_source_on(db, actor, &row, platform_policy, now).await?;
+        return Ok((resolution, Some(row)));
     }
     owner_memory_source_on(db, actor, source_id, platform_policy, now).await
 }
@@ -71,7 +85,7 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
     source_id: &str,
     policy: &AssistantDataPolicy,
     now: u64,
-) -> Result<AssistantSourceResolution, AssistantStoreError> {
+) -> Result<(AssistantSourceResolution, Option<history::Model>), AssistantStoreError> {
     if let Some(source) = evidence::Entity::find()
         .filter(evidence::Column::ActorId.eq(actor))
         .filter(evidence::Column::SourceId.eq(source_id))
@@ -118,13 +132,15 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
                     }
                     .into(),
                 );
-                return Ok(resolved);
+                return Ok((resolved, Some(original)));
             }
         }
     }
     // This retains the independent-evidence lifetime and all existing source,
     // memory version and model-purpose restrictions when no original is usable.
-    memory_source_on(db, actor, source_id, policy, now).await
+    memory_source_on(db, actor, source_id, policy, now)
+        .await
+        .map(|resolution| (resolution, None))
 }
 
 /// Model callers authorize the exact evidence purpose separately. They must
@@ -218,7 +234,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         || current_expiry <= now
         || row.revision <= 0
         || row.content.len() > 4096
-        || row.content_sha256 != format!("{:x}", Sha256::digest(row.content.as_bytes()))
     {
         return Ok(unavailable(&row.source_id));
     }
@@ -380,7 +395,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
             input_event_id: None,
             action_id: None,
             result_id: (kind == "receipt").then(|| proof.original_envelope_id.clone()),
-            content_sha256: row.content_sha256.clone(),
             fragment_index: u32::try_from(row.fragment_index)
                 .map_err(|_| AssistantStoreError::Invalid("invalid source fragment"))?,
             byte_start: doc.byte_start as u32,

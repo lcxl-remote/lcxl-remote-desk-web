@@ -78,7 +78,6 @@ pub(crate) async fn scan_on<C: ConnectionTrait + crate::config::ConfigConnection
     let original = ThinHistory {
         source_id: original_source.row.source_id.clone(),
         revision: original_source.row.revision,
-        content_sha256: original_source.row.content_sha256.clone(),
         conversation_id: original_source.row.conversation_id.clone(),
         admitted_generation: original_source.row.admitted_generation,
         fragment_index: original_source.row.fragment_index,

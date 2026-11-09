@@ -49,7 +49,6 @@ fn search(count: usize) -> ConversationSearchResult {
                     input_event_id: None,
                     action_id: None,
                     result_id: None,
-                    content_sha256: "a".repeat(64),
                     fragment_index: 0,
                     byte_start: 0,
                     byte_end: 1024,

@@ -131,46 +131,25 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     now: u64,
 ) -> Result<AssistantHistoryWindow, AssistantStoreError> {
     request.validate().map_err(AssistantStoreError::Invalid)?;
-    let original = desk_diagnose_core::future::send_phase(|| {
-        super::owner_source::owner_source_on(db, actor, &request.source_id, policy, now)
+    let (original, anchor) = desk_diagnose_core::future::send_phase(|| {
+        super::owner_source::owner_source_with_original_on(
+            db,
+            actor,
+            &request.source_id,
+            policy,
+            now,
+        )
     })
     .await?;
     if original.revision != request.revision || !available(&original) {
         return Err(AssistantStoreError::Inaccessible);
     }
-    let locator = original
-        .locator
-        .as_ref()
-        .ok_or(AssistantStoreError::Inaccessible)?;
-    // A memory handle can resolve to one exact original fragment. Ambiguous
-    // same-text records never select an arbitrary conversation/message.
-    let candidates = if let Some(row) = history::Entity::find()
-        .filter(history::Column::ActorId.eq(actor))
-        .filter(history::Column::SourceId.eq(&request.source_id))
-        .one(db)
-        .await?
-    {
-        vec![row]
-    } else {
-        history::Entity::find()
-            .filter(history::Column::ActorId.eq(actor))
-            .filter(history::Column::ConversationId.eq(&locator.conversation_id))
-            .filter(history::Column::ContentSha256.eq(&locator.content_sha256))
-            .filter(history::Column::FragmentIndex.eq(i64::from(locator.fragment_index)))
-            .filter(
-                history::Column::RecordedAtMs.eq(super::signed(
-                    original
-                        .recorded_at_unix_ms
-                        .ok_or(AssistantStoreError::Inaccessible)?,
-                )?),
-            )
-            .limit(2)
-            .all(db)
-            .await?
-    };
-    let [anchor] = candidates.as_slice() else {
+    if original.locator.is_none() {
         return Err(AssistantStoreError::Inaccessible);
-    };
+    }
+    // The resolution names the exact original history row it was built from.
+    let anchor = anchor.ok_or(AssistantStoreError::Inaccessible)?;
+    let anchor = &anchor;
     let resolved = desk_diagnose_core::future::send_phase(|| {
         super::owner_source::history_source_on(db, actor, anchor, policy, now)
     })

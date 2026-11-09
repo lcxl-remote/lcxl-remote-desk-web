@@ -184,7 +184,7 @@ export function assistantSourceAnchor(source: AssistantSourceResolution): { sess
     const message = value.message_id;
     const validId = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 256 && !/[\s\p{Cc}]/u.test(id);
     if (!validId(value.conversation_id) || !validId(value.root_conversation_id) || !validId(message)
-        || !/^[a-f0-9]{64}$/.test(value.content_sha256) || !nonnegative(value.fragment_index)
+        || !nonnegative(value.fragment_index)
         || !nonnegative(value.byte_start) || !positive(value.byte_end) || value.byte_end <= value.byte_start) return null;
     return { session: value.conversation_id, message };
 }

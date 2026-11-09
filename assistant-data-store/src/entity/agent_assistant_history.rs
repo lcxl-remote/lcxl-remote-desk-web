@@ -27,7 +27,6 @@ pub struct Model {
     pub role: String,
     #[sea_orm(column_type = "Text")]
     pub content: String,
-    pub content_sha256: String,
     pub revision: i64,
     pub admitted_generation: i64,
     #[sea_orm(indexed)]

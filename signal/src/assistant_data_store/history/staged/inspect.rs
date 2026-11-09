@@ -76,7 +76,6 @@ pub(super) async fn inspect_on(
     {
         let body =
             &prepared.retained_content[fragment.byte_start as usize..fragment.byte_end as usize];
-        let hash = format!("{:x}", Sha256::digest(body.as_bytes()));
         if let Some(row) = history::Entity::find()
             .filter(history::Column::SourceId.eq(source_id))
             .one(txn)
@@ -85,7 +84,7 @@ pub(super) async fn inspect_on(
             if row.actor_id != capture.actor_id
                 || row.origin_id != prepared.origin_id
                 || row.revision != signed(capture.revision)?
-                || row.content_sha256 != hash
+                || row.content != body
                 || row.deleted_at_ms.is_some()
                 || row.recorded_at_ms != signed(capture.recorded_at_unix_ms)?
                 || row.statement_timezone != capture.statement_timezone
@@ -106,7 +105,7 @@ pub(super) async fn inspect_on(
                 return Err(AdmissionFailure::Policy);
             }
         } else {
-            new_parts.push((index, hash));
+            new_parts.push(index);
         }
     }
     if new_parts.is_empty() {

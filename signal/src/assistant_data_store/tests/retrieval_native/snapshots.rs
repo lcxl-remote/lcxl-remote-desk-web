@@ -442,10 +442,6 @@ async fn accepted_snapshot_keeps_its_body_after_source_update_or_ordinary_expiry
             let text = "report changed after the original read";
             update = update
                 .col_expr(history::Column::Content, Expr::value(text))
-                .col_expr(
-                    history::Column::ContentSha256,
-                    Expr::value(format!("{:x}", Sha256::digest(text.as_bytes()))),
-                )
                 .col_expr(history::Column::Revision, Expr::value(2i64));
         }
         update

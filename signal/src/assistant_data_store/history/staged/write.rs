@@ -38,13 +38,12 @@ pub(super) async fn write_on(
     let new_parts = inspected
         .new_parts
         .iter()
-        .map(|(index, hash)| {
+        .map(|index| {
             let part = &prepared.index.fragments[*index];
             (
                 part,
                 &prepared.source_ids[*index],
                 &prepared.retained_content[part.byte_start as usize..part.byte_end as usize],
-                hash.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -63,14 +62,14 @@ pub(super) async fn write_on(
     let records = 1_i64; // Count the native source once, independently of its fragments.
     let bytes = new_parts
         .iter()
-        .map(|(_, _, body, _)| body.len() as i64)
+        .map(|(_, _, body)| body.len() as i64)
         .sum::<i64>();
     let terms = new_parts
         .iter()
-        .map(|(part, _, _, _)| part.terms.len() as i64)
+        .map(|(part, _, _)| part.terms.len() as i64)
         .sum::<i64>();
     let mut metadata = 0_i64;
-    for (part, source_id, _, hash) in &new_parts {
+    for (part, source_id, _) in &new_parts {
         // Account UTF-8 metadata plus fixed-width scalar slots. Payload fields
         // and indexed terms have their own counters and are not hidden here.
         metadata += (source_id.len()
@@ -82,7 +81,6 @@ pub(super) async fn write_on(
             + capture.native_id.len()
             + kind.len()
             + capture.role.len()
-            + hash.len()
             + dependencies.len()
             + retention_proof.len()
             + capture.statement_timezone.len()
@@ -102,7 +100,6 @@ pub(super) async fn write_on(
             + capture.conversation_id.len()
             + capture.device_ref.len()
             + capture.actor_id.len()
-            + hash.len()
             + 12 * 8) as i64;
     }
     if existing_origin.is_none() {
@@ -250,7 +247,7 @@ pub(super) async fn write_on(
         write_conversation_on(txn, capture, existing_conversation, recorded)
     })
     .await?;
-    for (part, source_id, body, hash) in new_parts {
+    for (part, source_id, body) in new_parts {
         require_one(
             history::Entity::insert(history::ActiveModel {
                 source_id: Set(source_id.clone()),
@@ -266,7 +263,6 @@ pub(super) async fn write_on(
                 kind: Set(kind.clone()),
                 role: Set(capture.role.into()),
                 content: Set(body.into()),
-                content_sha256: Set(hash.clone()),
                 revision: Set(signed(capture.revision)?),
                 admitted_generation: Set(admitted_generation),
                 recorded_at_ms: Set(recorded),

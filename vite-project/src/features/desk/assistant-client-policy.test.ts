@@ -10,7 +10,7 @@ const content = '引用🙂'.repeat(7000);
 const source = (index = 0) => ({ source_id: nativeId('src', index), revision: 1, availability: 'available' as const,
     content, recorded_at_unix_ms: 100, statement_timezone: 'UTC', source_device: null, notice: null,
     locator: { conversation_id: 'original', root_conversation_id: 'original', message_id: 'answer',
-        input_event_id: null, action_id: null, result_id: null, content_sha256: 'a'.repeat(64), fragment_index: 0,
+        input_event_id: null, action_id: null, result_id: null, fragment_index: 0,
         byte_start: 0, byte_end: new TextEncoder().encode(content).length } });
 const fragments = Array.from({ length: 25 }, (_, index) => ({ source: source(index), role: 'assistant', kind: 'assistant_message' }));
 function respond(data: unknown) {

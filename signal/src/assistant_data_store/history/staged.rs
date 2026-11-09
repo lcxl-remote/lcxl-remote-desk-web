@@ -2,7 +2,6 @@
 //! history writes reuse only those rows and this transaction's own writes.
 
 use super::*;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod inspect;
@@ -16,7 +15,7 @@ pub(crate) struct CaptureRequest<'a> {
 struct Inspection {
     existing_origin: Option<origin::Model>,
     existing_conversation: Option<conversation::Model>,
-    new_parts: Vec<(usize, String)>,
+    new_parts: Vec<usize>,
     runtime: Option<runtime::Model>,
     existing_binding: Option<binding::Model>,
 }

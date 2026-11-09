@@ -123,7 +123,6 @@ pub async fn load_on<C: ConnectionTrait>(
         || row.statement_timezone != input.statement_timezone
         || row.recorded_at_ms <= 0
         || row.recorded_at_ms > signed(context.now_unix_ms)?
-        || row.content_sha256 != format!("{:x}", Sha256::digest(row.content.as_bytes()))
         || proof.actor_id != *actor
         || proof.origin_id != row.origin_id
         || proof.device_ref != row.device_ref

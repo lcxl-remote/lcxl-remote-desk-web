@@ -57,8 +57,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     let device = view
         .source_device
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if locator.content_sha256 != source.row.content_sha256
-        || locator.conversation_id != source.row.conversation_id
+    if locator.conversation_id != source.row.conversation_id
         || locator.root_conversation_id != source.row.root_conversation_id
         || device.device_ref != source.row.device_ref
     {

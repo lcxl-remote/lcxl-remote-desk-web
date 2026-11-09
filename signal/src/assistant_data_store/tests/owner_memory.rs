@@ -565,7 +565,6 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         .await
         .unwrap();
     let body = evidence.body;
-    let hash = format!("{:x}", Sha256::digest(body.as_bytes()));
     let expires = 90 * 86_400_000i64;
     let proof = HistoryRetentionProof {
         actor_id: original.actor_id.clone(),
@@ -590,7 +589,6 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         kind: Set("input".into()),
         role: Set("user".into()),
         content: Set(body.clone()),
-        content_sha256: Set(hash.clone()),
         revision: Set(1),
         admitted_generation: Set(1),
         recorded_at_ms: Set(1),
@@ -976,10 +974,10 @@ async fn rewritten_evidence_cannot_rebind_the_original_input() {
 // These fixtures add canonical metadata to already-retained source graphs. They
 // do not represent a native extraction authorization or a production write.
 #[tokio::test]
-async fn owner_original_navigation_requires_the_exact_declared_version_hash_and_live_source() {
+async fn owner_original_navigation_requires_the_exact_declared_version_and_live_source() {
     use crate::entity::agent_assistant_history as history;
     use desk_agent_protocol::ai_assistant::source::SourceAvailability;
-    for variant in 0..4 {
+    for variant in 0..3 {
         let store = setup().await;
         let (_, source_id, origin_id) = seed(&store, 1, &format!("owner-source-{variant}")).await;
         let original = seed_original_history(&store, &source_id).await;
@@ -996,17 +994,6 @@ async fn owner_original_navigation_requires_the_exact_declared_version_hash_and_
                     .unwrap();
             }
             1 => {
-                history::Entity::update_many()
-                    .col_expr(
-                        history::Column::ContentSha256,
-                        sea_orm::sea_query::Expr::value("f".repeat(64)),
-                    )
-                    .filter(history::Column::SourceId.eq(&original))
-                    .exec(&store.db)
-                    .await
-                    .unwrap();
-            }
-            2 => {
                 origin::Entity::update_many()
                     .col_expr(
                         origin::Column::DeletedAtMs,
@@ -1036,7 +1023,7 @@ async fn owner_original_navigation_requires_the_exact_declared_version_hash_and_
         assert!(result.locator.is_none());
         assert_eq!(
             result.availability,
-            if variant < 2 {
+            if variant < 1 {
                 SourceAvailability::EvidenceOnly
             } else {
                 SourceAvailability::Unavailable
@@ -1125,4 +1112,46 @@ async fn retained_memory_with_more_than_eight_sources_remains_readable_and_forge
             .outcome,
         DataControlOutcome::AlreadyApplied
     );
+}
+
+#[tokio::test]
+async fn memory_window_opens_its_exact_original_even_with_an_identical_sibling() {
+    use crate::entity::agent_assistant_history as history;
+    use desk_agent_protocol::ai_assistant::history_window::{
+        AssistantHistoryWindowRequest, AssistantHistoryWindowView,
+    };
+    use sea_orm::{ActiveModelTrait, Set};
+    let store = setup().await;
+    let (_, source_id, _) = seed(&store, 1, "window-original").await;
+    let original_id = seed_original_history(&store, &source_id).await;
+    let original = history::Entity::find()
+        .filter(history::Column::SourceId.eq(&original_id))
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    // Same conversation, body, fragment and time: only the source id differs.
+    let mut sibling: history::ActiveModel = original.clone().into();
+    sibling.id = sea_orm::ActiveValue::NotSet;
+    sibling.source_id = Set(native_ids::stable(
+        Kind::AssistantSource,
+        &"identical-sibling",
+    ));
+    sibling.native_id = Set("sibling-message".into());
+    sibling.insert(&store.db).await.unwrap();
+    let window = super::super::owner_window::read_on(
+        &store.db,
+        "1",
+        &AssistantHistoryWindowRequest {
+            source_id: source_id.clone(),
+            revision: 1,
+            view: AssistantHistoryWindowView::Context,
+            cursor: None,
+        },
+        &AssistantDataPolicy::default(),
+        1000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(window.anchor_source_id, original_id);
 }

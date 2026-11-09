@@ -22,7 +22,6 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
     QueryFilter, sea_query::Expr,
 };
-use sha2::{Digest, Sha256};
 
 pub mod receipts;
 pub mod sources;

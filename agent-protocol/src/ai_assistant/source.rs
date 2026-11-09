@@ -74,7 +74,6 @@ pub struct AssistantSourceLocator {
     pub input_event_id: Option<String>,
     pub action_id: Option<String>,
     pub result_id: Option<String>,
-    pub content_sha256: String,
     pub fragment_index: u32,
     pub byte_start: u32,
     pub byte_end: u32,

@@ -237,7 +237,6 @@ pub struct PreparedHistoryCapture {
     pub origin_id: String,
     pub source_ids: Vec<String>,
     pub retained_content: String,
-    pub content_sha256: String,
     pub index: IndexProjection,
     pub proof: HistoryRetentionProof,
     pub redacted: bool,
@@ -423,7 +422,6 @@ pub fn prepare_capture(
         .iter()
         .map(|part| history_source_id(&origin_id, part.fragment_index))
         .collect();
-    let content_sha256 = format!("{:x}", Sha256::digest(retained_content.as_bytes()));
     Ok(Some(PreparedHistoryCapture {
         proof: HistoryRetentionProof {
             actor_id: capture.actor_id.into(),
@@ -439,7 +437,6 @@ pub fn prepare_capture(
         origin_id,
         source_ids,
         retained_content,
-        content_sha256,
         index,
         redacted: !redacted.kinds.is_empty(),
     }))

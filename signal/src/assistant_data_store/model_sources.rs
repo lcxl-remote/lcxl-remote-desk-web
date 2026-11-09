@@ -24,7 +24,6 @@ use desk_diagnose_core::ai_assistant::{
     source::{HistoryRetentionProof, allows_independent_fact_use, allows_model_use},
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod retained;
@@ -734,7 +733,6 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         || row.expires_at_ms <= 0
         || row.expires_at_ms as u64 <= now
         || row.content.len() > 4096
-        || row.content_sha256 != format!("{:x}", Sha256::digest(row.content.as_bytes()))
     {
         return Err(AssistantStoreError::Inaccessible);
     }

@@ -10,7 +10,7 @@ vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(module => m
 const id = 'src_AAECAwQFBgcICQoLDA0ODw';
 const source = { source_id:id,revision:1,availability:'available',content:'原始引用',recorded_at_unix_ms:100,statement_timezone:'UTC',source_device:null,
     locator:{conversation_id:'original-run',root_conversation_id:'original-run',message_id:'original-answer',input_event_id:null,action_id:null,result_id:null,
-        content_sha256:'a'.repeat(64),fragment_index:0,byte_start:0,byte_end:12},notice:null };
+        fragment_index:0,byte_start:0,byte_end:12},notice:null };
 const snapshot = (message='original-answer') => ({sessionId:'original-run',messages:[{id:'input',role:'user',text:'原来的问题'},
     {id:message,role:'assistant',text:'原始引用',toolCalls:[]}],messagePage:{hasMore:true,nextBeforeMessageId:'input',limit:100}});
 const response = (data:unknown) => ({ok:true,json:async()=>({success:true,code:0,data})});

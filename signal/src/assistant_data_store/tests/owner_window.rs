@@ -293,7 +293,7 @@ async fn tail_discovery_scans_past_thirty_two_rows_and_keeps_a_valid_anchor_on_b
         .await;
     }
     history::Entity::update_many()
-        .col_expr(history::Column::ContentSha256, Expr::value("0".repeat(64)))
+        .col_expr(history::Column::Content, Expr::value("x"))
         .filter(history::Column::SourceId.ne(&good))
         .exec(&store.db)
         .await

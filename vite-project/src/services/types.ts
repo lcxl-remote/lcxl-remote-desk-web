@@ -5120,10 +5120,6 @@ export type AssistantSourceLocator = {
     /**
      * @type string
     */
-    content_sha256: string;
-    /**
-     * @type string
-    */
     conversation_id: string;
     /**
      * @minLength 0

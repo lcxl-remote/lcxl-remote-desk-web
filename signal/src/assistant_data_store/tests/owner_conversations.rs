@@ -286,8 +286,9 @@ async fn owner_list_scans_past_twenty_unreadable_fragments_with_the_configured_b
     }
     history::Entity::update_many()
         .col_expr(
-            history::Column::ContentSha256,
-            sea_orm::sea_query::Expr::value("0".repeat(64)),
+            // A body that no longer matches its indexed span is unreadable.
+            history::Column::Content,
+            sea_orm::sea_query::Expr::value("x"),
         )
         .filter(history::Column::SourceId.ne(&good))
         .exec(&store.db)
