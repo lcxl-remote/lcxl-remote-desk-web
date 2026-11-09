@@ -11,7 +11,7 @@ use desk_agent_protocol::ai_assistant::memory::{
     MemoryDeleteRequest,
 };
 use desk_diagnose_core::ai_assistant::memory_control::{
-    KnownMemorySource, MemoryControlTarget, canonical_sources, manifest_hash,
+    KnownMemorySource, MemoryControlTarget, canonical_sources, validate_targets,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
@@ -134,8 +134,7 @@ async fn prepare_apply_on<C: ConnectionTrait>(
     for row in &rows {
         targets.push(target_on(db, actor, row).await?);
     }
-    let manifest =
-        manifest_hash(actor, unsigned(cutoff)?, &targets).map_err(AssistantStoreError::Invalid)?;
+    validate_targets(actor, unsigned(cutoff)?, &targets).map_err(AssistantStoreError::Invalid)?;
     let original_runtime = state.clone();
     let before_memories = rows.clone();
     let mut before_sources = Vec::with_capacity(rows.len());
@@ -284,7 +283,6 @@ async fn prepare_apply_on<C: ConnectionTrait>(
         operation_id: operation_id.into(),
         request_sha256: request_hash.into(),
         reason: reason_text.into(),
-        target_manifest_sha256: manifest,
         outcome: "applied".into(),
         accepted_input_seq: cutoff,
         control_generation,
@@ -463,7 +461,6 @@ pub fn receipt_metadata_bytes(row: &receipt::Model) -> Result<i64, AssistantStor
             &row.operation_id,
             &row.request_sha256,
             &row.reason,
-            &row.target_manifest_sha256,
             &row.outcome,
             row.tool_group_id.as_deref().unwrap_or(""),
             row.tool_group_sha256.as_deref().unwrap_or(""),

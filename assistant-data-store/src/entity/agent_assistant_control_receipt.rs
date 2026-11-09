@@ -14,7 +14,6 @@ pub struct Model {
     pub operation_id: String,
     pub request_sha256: String,
     pub reason: String,
-    pub target_manifest_sha256: String,
     pub outcome: String,
     pub accepted_input_seq: i64,
     pub control_generation: i64,

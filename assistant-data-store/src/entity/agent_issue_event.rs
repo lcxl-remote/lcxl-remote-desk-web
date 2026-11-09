@@ -16,7 +16,6 @@ pub struct Model {
     pub subscription_revision: i64,
     #[sea_orm(column_type = "Text")]
     pub admitted_policy_json: Option<String>,
-    pub admitted_policy_sha256: Option<String>,
     #[sea_orm(indexed)]
     pub conversation_id: String,
     pub event_id: String,
@@ -29,12 +28,10 @@ pub struct Model {
     pub source_updated_at_ms: i64,
     #[sea_orm(column_type = "Text")]
     pub snapshot_json: Option<String>,
-    pub snapshot_sha256: String,
     pub last_observation_sha256: String,
     pub edited_at_ms: Option<i64>,
     #[sea_orm(column_type = "Text")]
     pub issue_header_json: Option<String>,
-    pub issue_header_sha256: Option<String>,
     #[sea_orm(indexed)]
     pub work_id: Option<String>,
     pub first_worker_id: Option<String>,

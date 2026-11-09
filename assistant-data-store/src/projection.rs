@@ -76,7 +76,6 @@ pub async fn prepare_on<C: ConnectionTrait>(
         producer_message_id: proof.producer_message_id.clone(),
         tool_call_id: proof.tool_call_id.clone(),
         source_envelope_id: proof.source_envelope.envelope_id.clone(),
-        request_sha256: proof.request_sha256.clone(),
         purpose: purpose(proof.usage.purpose).into(),
         proof_json,
         result_json: Some(content.into()),
@@ -146,7 +145,6 @@ pub fn decode_row(row: projection::Model) -> Result<StoredProjection, AssistantS
         || row.producer_message_id != proof.producer_message_id
         || row.tool_call_id != proof.tool_call_id
         || row.source_envelope_id != proof.source_envelope.envelope_id
-        || row.request_sha256 != proof.request_sha256
         || row.purpose != purpose(proof.usage.purpose)
         || unsigned(row.created_at_ms)? != proof.created_at_unix_ms
         || unsigned(row.unused_until_ms)? != proof.unused_until_unix_ms
@@ -177,7 +175,6 @@ pub fn metadata_bytes(row: &projection::Model) -> Result<i64, AssistantStoreErro
         &row.kind,
         &row.logical_call_id,
         &row.source_envelope_id,
-        &row.request_sha256,
         &row.purpose,
         &row.proof_json,
     ];

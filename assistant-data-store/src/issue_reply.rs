@@ -107,7 +107,6 @@ pub async fn freeze(
         input_revision: Set(i64::try_from(artifact.origin.input_revision).map_err(|_| invalid())?),
         artifact_sha256: Set(digest(&json)),
         artifact_json: Set(Some(json)),
-        receipt_sha256: Set(digest(&receipt_json)),
         receipt_json: Set(receipt_json),
         retired_at_ms: Set(None),
         content_expires_at_ms: Set(artifact
@@ -162,9 +161,6 @@ pub async fn load(
 }
 
 pub fn receipt_key(row: &reply::Model) -> Result<IssueReplyReceiptKey, AssistantStoreError> {
-    if digest(&row.receipt_json) != row.receipt_sha256 {
-        return Err(invalid());
-    }
     let key: IssueReplyReceiptKey =
         serde_json::from_str(&row.receipt_json).map_err(|_| invalid())?;
     key.validate().map_err(|_| invalid())?;
@@ -176,7 +172,6 @@ pub fn decode(row: &reply::Model) -> Result<FrozenIssueReply, AssistantStoreErro
     if row.retired_at_ms.is_some()
         || row.reconciliation_page < 1
         || row.reconciliation_page > i64::from(u32::MAX)
-        || digest(json) != row.artifact_sha256
     {
         return Err(invalid());
     }

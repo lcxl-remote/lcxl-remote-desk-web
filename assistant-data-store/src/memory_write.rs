@@ -255,7 +255,6 @@ pub async fn apply_on<C: ConnectionTrait>(
         actor_id: write.actor.into(),
         producer_call_id: write.producer_call.into(),
         tool_call_id: write.tool_call.into(),
-        request_sha256: write.request_sha256.into(),
         logical_mutation_id: logical.clone(),
         write_outcome: "applied".into(),
         body: next.body.clone(),

@@ -136,7 +136,6 @@ pub(super) async fn seed_with_body(
         actor_id: Set(actor.clone()),
         producer_call_id: Set(format!("call-{label}")),
         tool_call_id: Set(format!("tool-{label}")),
-        request_sha256: Set("b".repeat(64)),
         logical_mutation_id: Set(format!("fixture-{label}")),
         write_outcome: Set("applied".into()),
         body: Set(body.clone()),

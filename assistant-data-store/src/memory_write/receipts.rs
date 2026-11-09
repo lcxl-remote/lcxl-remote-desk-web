@@ -45,7 +45,6 @@ pub async fn collect_on<C: ConnectionTrait>(
             .filter(receipt::Column::ActorId.eq(actor))
             .filter(receipt::Column::Id.eq(row.id))
             .filter(receipt::Column::CommitId.eq(&row.commit_id))
-            .filter(receipt::Column::RequestSha256.eq(&row.request_sha256))
             .exec(db)
             .await?;
         if removed.rows_affected != 1 {

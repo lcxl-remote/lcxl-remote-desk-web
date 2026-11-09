@@ -141,7 +141,6 @@ pub fn version_metadata(row: &revision::Model) -> Result<i64, AssistantStoreErro
             &row.actor_id,
             &row.producer_call_id,
             &row.tool_call_id,
-            &row.request_sha256,
             &row.logical_mutation_id,
             &row.dependencies_json,
         ],

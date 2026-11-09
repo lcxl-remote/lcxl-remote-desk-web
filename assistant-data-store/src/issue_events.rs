@@ -69,7 +69,6 @@ pub(crate) async fn policy_changed_on(
                 conversation_id: Set(policy.conversation_id.clone()),
                 revision: Set(crate::increment(row.revision)?),
                 scan_json: Set(None),
-                scan_sha256: Set(None),
                 lease_id: Set(None),
                 lease_until_ms: Set(None),
                 next_poll_at_ms: Set(now),
@@ -207,7 +206,6 @@ pub async fn claim_on(
             revision: Set(crate::increment(row.revision)?),
             lease_id: Set(Some(lease_id.into())),
             lease_until_ms: Set(Some(until)),
-            scan_sha256: Set(Some(digest(&json))),
             scan_json: Set(Some(json)),
             updated_at_ms: Set(now),
             ..Default::default()
@@ -277,7 +275,6 @@ pub async fn commit_page_on(
             } else {
                 claim.row.watermark_ms
             }),
-            scan_sha256: Set(json.as_deref().map(digest)),
             scan_json: Set(json),
             lease_id: Set(None),
             lease_until_ms: Set(None),
@@ -375,9 +372,9 @@ async fn validate_claim_on(
 }
 
 fn decode_scan(row: &source::Model) -> Result<Option<SourceScan>, AssistantStoreError> {
-    match (&row.scan_json, &row.scan_sha256) {
-        (None, None) => Ok(None),
-        (Some(json), Some(hash)) if digest(json) == *hash => {
+    match &row.scan_json {
+        None => Ok(None),
+        Some(json) => {
             let scan: SourceScan = serde_json::from_str(json).map_err(|_| invalid())?;
             if scan.subscription_revision == 0
                 || scan.started_at_ms < row.watermark_ms
@@ -393,7 +390,6 @@ fn decode_scan(row: &source::Model) -> Result<Option<SourceScan>, AssistantStore
             }
             Ok(Some(scan))
         }
-        _ => Err(invalid()),
     }
 }
 

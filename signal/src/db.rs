@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 55;
+const SIGNAL_SCHEMA_VERSION: i32 = 56;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
@@ -844,6 +844,22 @@ async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnec
         .col(budget::Column::UtcDay)
         .to_owned();
     db.execute(&budget_index).await?;
+    let contract_revision = Index::create()
+        .name("uq_agent_task_contract_revision")
+        .table(agent_task_contract::Entity)
+        .col(agent_task_contract::Column::ScheduleId)
+        .col(agent_task_contract::Column::ContractRevision)
+        .unique()
+        .to_owned();
+    db.execute(&contract_revision).await?;
+    let authorization_revision = Index::create()
+        .name("uq_agent_task_authorization_revision")
+        .table(agent_task_authorization::Entity)
+        .col(agent_task_authorization::Column::ScheduleId)
+        .col(agent_task_authorization::Column::AuthorizationRevision)
+        .unique()
+        .to_owned();
+    db.execute(&authorization_revision).await?;
     Ok(())
 }
 

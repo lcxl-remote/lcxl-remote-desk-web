@@ -491,7 +491,6 @@ fn corrupted_denormalized_query_bindings_are_rejected_even_with_a_valid_json_dig
         retrieval_episode_id: "episode".into(),
         purpose: "model_history".into(),
         kind: proof.request.kind().into(),
-        request_sha256: proof.snapshot.request_sha256.clone(),
         proof_json: raw,
         captured_at_ms: proof.snapshot.captured_at_unix_ms as i64,
         expires_at_ms: proof.snapshot.expires_at_unix_ms as i64,

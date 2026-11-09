@@ -8,9 +8,6 @@ pub fn decode_comment(row: &event::Model) -> Result<IssueSourceComment, Assistan
         .as_deref()
         .filter(|_| row.retired_at_ms.is_none())
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if digest(json) != row.snapshot_sha256 {
-        return Err(invalid());
-    }
     let comment: IssueSourceComment = serde_json::from_str(json).map_err(|_| invalid())?;
     comment.validate().map_err(AssistantStoreError::Invalid)?;
     let policy = original_policy(row)?;
@@ -37,9 +34,6 @@ pub fn original_policy(row: &event::Model) -> Result<IssueSubscription, Assistan
         .as_deref()
         .filter(|_| row.retired_at_ms.is_none())
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if row.admitted_policy_sha256.as_deref() != Some(digest(json).as_str()) {
-        return Err(invalid());
-    }
     let policy: IssueSubscription = serde_json::from_str(json).map_err(|_| invalid())?;
     policy.validate().map_err(AssistantStoreError::Invalid)?;
     if policy.actor_id != row.actor_id
@@ -109,7 +103,6 @@ pub(super) async fn observe_on(
         actor_id: Set(claim.policy.actor_id.clone()),
         subscription_id: Set(claim.policy.subscription_id.clone()),
         subscription_revision: Set(signed(claim.policy.revision)?),
-        admitted_policy_sha256: Set(policy_json.as_deref().map(digest)),
         admitted_policy_json: Set(policy_json),
         conversation_id: Set(claim.policy.conversation_id.clone()),
         event_id: Set(event_id),
@@ -121,7 +114,6 @@ pub(super) async fn observe_on(
         source_created_at_ms: Set(comment.created_at_ms),
         source_updated_at_ms: Set(comment.updated_at_ms),
         snapshot_json: Set((disposition == CommentDisposition::Pending).then_some(json)),
-        snapshot_sha256: Set(hash.clone()),
         last_observation_sha256: Set(hash),
         state: Set(if disposition == CommentDisposition::Pending {
             "pending"

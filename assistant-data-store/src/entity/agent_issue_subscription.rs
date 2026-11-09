@@ -17,7 +17,6 @@ pub struct Model {
     pub enabled: bool,
     #[sea_orm(column_type = "Text")]
     pub policy_json: String,
-    pub policy_sha256: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }

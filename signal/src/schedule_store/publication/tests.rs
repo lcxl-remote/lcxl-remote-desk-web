@@ -576,7 +576,7 @@ async fn revoked_or_replaced_task_authority_cannot_be_reused_by_a_running_lease(
 #[tokio::test]
 async fn expired_or_corrupt_parent_snapshot_and_runtime_never_authorize_actions() {
     use crate::entity::agent_schedule_run as work_row;
-    for case in 0..9 {
+    for case in 0..8 {
         let (store, task, parent, work) = running_fixture().await;
         let now = database_now(&store.db).await.unwrap();
         match case {
@@ -661,17 +661,6 @@ async fn expired_or_corrupt_parent_snapshot_and_runtime_never_authorize_actions(
                     .unwrap();
             }
             7 => {
-                authorization::Entity::update_many()
-                    .set(authorization::ActiveModel {
-                        revision_identity: Set("f".repeat(64)),
-                        ..Default::default()
-                    })
-                    .filter(authorization::Column::Id.eq(parent.id))
-                    .exec(&store.db)
-                    .await
-                    .unwrap();
-            }
-            8 => {
                 let mut proof: TaskRehearsalEvidence =
                     serde_json::from_str(&parent.rehearsal_evidence_json).unwrap();
                 proof.evidence_sha256.clear();
@@ -707,3 +696,26 @@ async fn expired_or_corrupt_parent_snapshot_and_runtime_never_authorize_actions(
 
 mod delegation;
 mod timing;
+
+#[tokio::test]
+async fn one_schedule_revision_has_one_contract_row() {
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    let row = |id: &str, revision: i64| contract_row::ActiveModel {
+        contract_id: Set(id.into()),
+        schedule_id: Set("schedule".into()),
+        owner_user_id: Set(1),
+        task_revision: Set(1),
+        contract_revision: Set(revision),
+        digest_sha256: Set("a".repeat(64)),
+        canonical_json: Set("{}".into()),
+        created_at: Set(1),
+        ..Default::default()
+    };
+    row("contract-1", 1).insert(&db).await.unwrap();
+    row("contract-2", 2).insert(&db).await.unwrap();
+    assert!(row("contract-3", 1).insert(&db).await.is_err());
+}

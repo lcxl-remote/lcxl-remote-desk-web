@@ -17,8 +17,6 @@ pub struct Model {
     pub contract_sha256: String,
     pub authorization_revision: i64,
     #[sea_orm(unique)]
-    pub revision_identity: String,
-    #[sea_orm(unique)]
     pub publication_identity: String,
     pub publication_payload_sha256: String,
     pub rehearsal_run_id: String,

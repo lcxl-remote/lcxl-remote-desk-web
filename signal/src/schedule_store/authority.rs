@@ -1,6 +1,6 @@
 //! Current parent authority read under the same task fence as publication and revocation.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
-use super::{ScheduleStore, ScheduleStoreError, digest, entity, json};
+use super::{ScheduleStore, ScheduleStoreError, digest, entity};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::{capability_grant::TaskGrantProvenance, schedule::SchedulePauseReason};
@@ -329,8 +329,7 @@ impl ScheduleStore {
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if parent.revision_identity != digest(&json(&(&task.schedule_id, authorization_revision))?)
-            || parent.task_revision != task.task_revision
+        if parent.task_revision != task.task_revision
             || parent.contract_revision != contract_revision
             || parent.contract_sha256 != contract.digest()
             || parent.revoked_at.is_some()

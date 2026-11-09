@@ -128,7 +128,7 @@ async fn frozen_comments_survive_replays_edits_and_expanded_rules_without_readmi
         .unwrap();
     assert_eq!(after.len(), 2);
     assert_eq!(decode_comment(&after[0]).unwrap(), original);
-    assert_ne!(after[0].snapshot_sha256, after[0].last_observation_sha256);
+    assert_ne!(after[0].last_observation_sha256, original.fingerprint());
     assert_eq!(after[0].edited_at_ms, Some(2002));
     assert_eq!(after[1].state, "ignored");
     assert_eq!(after[1].reason, "sender_not_allowed");
@@ -460,7 +460,6 @@ async fn echoes_require_the_dispatched_issue_account_and_exact_body_or_native_co
         execution_conversation_id: Set("worker".into()),
         input_revision: Set(1),
         artifact_sha256: Set("".into()),
-        receipt_sha256: Set(digest(&json)),
         receipt_json: Set(json),
         state: Set("unknown".into()),
         attempt: Set(1),

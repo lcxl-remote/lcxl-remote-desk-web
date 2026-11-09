@@ -104,12 +104,9 @@ pub async fn pending_on(
     {
         return Ok(None);
     }
-    let header = match (&row.issue_header_json, &row.issue_header_sha256) {
-        (None, None) => None,
-        (Some(json), Some(hash)) if digest(json) == *hash => {
-            Some(serde_json::from_str(json).map_err(|_| invalid())?)
-        }
-        _ => return Err(invalid()),
+    let header = match &row.issue_header_json {
+        None => None,
+        Some(json) => Some(serde_json::from_str(json).map_err(|_| invalid())?),
     };
     let pending = PendingEvent {
         row,
@@ -145,7 +142,6 @@ pub async fn freeze_header_on(
     Ok(pending_update(pending)
         .filter(event::Column::IssueHeaderJson.is_null())
         .set(event::ActiveModel {
-            issue_header_sha256: Set(Some(digest(&json))),
             issue_header_json: Set(Some(json)),
             updated_at_ms: Set(now),
             ..Default::default()
@@ -168,9 +164,7 @@ pub async fn ignore_on(
             reason: Set(reason.into()),
             snapshot_json: Set(None),
             admitted_policy_json: Set(None),
-            admitted_policy_sha256: Set(None),
             issue_header_json: Set(None),
-            issue_header_sha256: Set(None),
             updated_at_ms: Set(now),
             ..Default::default()
         })
@@ -285,7 +279,6 @@ pub async fn release_attachment_on(
             request_id: Set(None),
             work_id: Set(None),
             issue_header_json: Set(None),
-            issue_header_sha256: Set(None),
             updated_at_ms: Set(now),
             ..Default::default()
         })
@@ -560,5 +553,5 @@ fn pending_update(pending: &PendingEvent) -> sea_orm::UpdateMany<event::Entity> 
         .filter(event::Column::State.eq(&pending.row.state))
         .filter(event::Column::RequestId.eq(pending.row.request_id.clone()))
         .filter(event::Column::RetiredAtMs.is_null())
-        .filter(event::Column::SnapshotSha256.eq(&pending.row.snapshot_sha256))
+        .filter(event::Column::SnapshotJson.eq(pending.row.snapshot_json.clone()))
 }

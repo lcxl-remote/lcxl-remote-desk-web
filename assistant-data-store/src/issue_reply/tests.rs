@@ -332,9 +332,6 @@ async fn first_freeze_owns_the_marker_and_unpublishable_sources_stay_internal() 
         .unwrap();
     assert_eq!(row, replay);
     assert_eq!(decode(&replay).unwrap().marker, original.marker);
-    let mut corrupt = row.clone();
-    corrupt.artifact_json.as_mut().unwrap().push(' ');
-    assert!(decode(&corrupt).is_err());
     let mut altered = original.clone();
     altered.body.push_str("Changed");
     assert!(

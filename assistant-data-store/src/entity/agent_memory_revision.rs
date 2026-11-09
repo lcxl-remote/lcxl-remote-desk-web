@@ -17,7 +17,6 @@ pub struct Model {
     pub actor_id: String,
     pub producer_call_id: String,
     pub tool_call_id: String,
-    pub request_sha256: String,
     pub logical_mutation_id: String,
     pub write_outcome: String,
     #[sea_orm(column_type = "Text")]

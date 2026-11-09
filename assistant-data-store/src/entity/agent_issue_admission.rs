@@ -22,7 +22,6 @@ pub struct Model {
     pub event_id: String,
     #[sea_orm(column_type = "Text")]
     pub snapshot_json: Option<String>,
-    pub snapshot_sha256: String,
     pub stopped_at_ms: Option<i64>,
     pub retired_at_ms: Option<i64>,
     #[sea_orm(indexed)]

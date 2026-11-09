@@ -3,7 +3,6 @@
 use crate::native_ids::{self, Kind};
 use desk_agent_protocol::ai_assistant::source::HistoryDependency;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,32 +56,28 @@ pub struct MemoryControlTarget {
 }
 
 /// Created from the locked, owner-scoped rows. No model or REST body supplies it.
-pub fn manifest_hash(
+pub fn validate_targets(
     actor: &str,
     cutoff_input_seq: u64,
     targets: &[MemoryControlTarget],
-) -> Result<String, &'static str> {
+) -> Result<(), &'static str> {
     desk_agent_protocol::ai_assistant::source::validate_source_id(actor)?;
     if cutoff_input_seq == 0 {
         return Err("missing memory control cutoff");
     }
-    let mut ordered = targets.to_vec();
-    ordered.sort_by(|a, b| (&a.memory_id, a.revision).cmp(&(&b.memory_id, b.revision)));
     let mut identities = BTreeSet::new();
-    for target in &mut ordered {
+    for target in targets {
         if !native_ids::is(Kind::Memory, &target.memory_id)
             || target.revision == 0
-            || !identities.insert(target.memory_id.clone())
+            || !identities.insert(target.memory_id.as_str())
             || target.accepted_input_seq > cutoff_input_seq
             || target.scope_key.is_empty()
         {
             return Err("invalid memory control target");
         }
-        target.known_sources = canonical_sources(std::mem::take(&mut target.known_sources))?;
+        canonical_sources(target.known_sources.clone())?;
     }
-    let bytes = serde_json::to_vec(&("memory-control-v1", actor, cutoff_input_seq, ordered))
-        .map_err(|_| "invalid memory control manifest")?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -138,19 +133,13 @@ mod tests {
     }
 
     #[test]
-    fn a_control_manifest_is_order_independent_and_cannot_cover_a_later_assertion() {
+    fn control_targets_reject_duplicates_and_a_later_assertion() {
         let a = target("A");
         let b = target("B");
-        assert_eq!(
-            manifest_hash("owner", 3, &[a.clone(), b.clone()]),
-            manifest_hash("owner", 3, &[b, a.clone()])
-        );
-        assert!(manifest_hash("owner", 1, std::slice::from_ref(&a)).is_err());
-        assert!(manifest_hash("owner", 3, &[a.clone(), a.clone()]).is_err());
-        let original = manifest_hash("owner", 3, std::slice::from_ref(&a)).unwrap();
-        let mut changed = a;
-        changed.revision = 2;
-        assert_ne!(original, manifest_hash("owner", 3, &[changed]).unwrap());
+        validate_targets("owner", 3, &[a.clone(), b]).unwrap();
+        assert!(validate_targets("owner", 1, std::slice::from_ref(&a)).is_err());
+        assert!(validate_targets("owner", 0, std::slice::from_ref(&a)).is_err());
+        assert!(validate_targets("owner", 3, &[a.clone(), a]).is_err());
     }
 
     #[test]

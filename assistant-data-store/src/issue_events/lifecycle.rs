@@ -96,9 +96,7 @@ async fn retire_on(
         .set(event::ActiveModel {
             snapshot_json: Set(None),
             issue_header_json: Set(None),
-            issue_header_sha256: Set(None),
             admitted_policy_json: Set(None),
-            admitted_policy_sha256: Set(None),
             retired_at_ms: Set(Some(now)),
             updated_at_ms: Set(now),
             ..Default::default()

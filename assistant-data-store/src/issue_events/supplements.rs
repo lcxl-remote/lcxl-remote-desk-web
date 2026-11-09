@@ -106,7 +106,7 @@ pub async fn verify_model_material_on(
                 .filter(event::Column::Id.eq(row.id))
                 .filter(event::Column::RequestId.eq(&admission.request_id))
                 .filter(event::Column::State.eq("attached"))
-                .filter(event::Column::SnapshotSha256.eq(&row.snapshot_sha256))
+                .filter(event::Column::SnapshotJson.eq(row.snapshot_json.clone()))
                 .set(event::ActiveModel {
                     state: Set("consumed".into()),
                     reason: Set("model_accepted_material".into()),

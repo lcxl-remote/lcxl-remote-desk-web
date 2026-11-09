@@ -14,8 +14,6 @@ pub struct Model {
     pub owner_user_id: i32,
     pub task_revision: i64,
     pub contract_revision: i64,
-    #[sea_orm(unique)]
-    pub revision_identity: String,
     pub digest_sha256: String,
     #[sea_orm(column_type = "Text")]
     pub canonical_json: String,

@@ -19,7 +19,6 @@ pub struct Model {
     pub retrieval_episode_id: String,
     pub purpose: String,
     pub kind: String,
-    pub request_sha256: String,
     #[sea_orm(column_type = "Text")]
     pub proof_json: String,
     pub captured_at_ms: i64,

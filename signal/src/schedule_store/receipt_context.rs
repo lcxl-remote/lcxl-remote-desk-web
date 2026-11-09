@@ -1,6 +1,6 @@
 //! Historical identity for receipt verification. Never usable for execution admission.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
-use super::{ScheduleStoreError, digest, entity, json};
+use super::{ScheduleStoreError, digest, entity};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::capability_grant::TaskGrantProvenance;
@@ -67,8 +67,7 @@ impl TaskReceiptContext {
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if parent.revision_identity != digest(&json(&(&work.schedule_id, authorization_revision))?)
-            || parent.task_revision != snapshot.task_revision
+        if parent.task_revision != snapshot.task_revision
             || parent.contract_revision != contract_revision
             || parent.contract_sha256 != contract.digest()
             || parent.version <= 0

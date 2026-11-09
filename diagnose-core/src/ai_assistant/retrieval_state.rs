@@ -439,7 +439,7 @@ impl FrozenRetrievalQuery {
         if self.snapshot.query_id != Self::query_id(&self.binding, &self.initial_logical_call_id)?
             || self.snapshot.actor_id != self.binding.actor_id || self.snapshot.root_conversation_id != self.binding.root_conversation_id
             || self.snapshot.retrieval_episode_id != self.binding.retrieval_episode_id
-            || self.snapshot.purpose != self.request.purpose() || self.snapshot.request_sha256 != self.request.fingerprint()?
+            || self.snapshot.purpose != self.request.purpose()
             || self.source_observation_generation > self.snapshot.corpus_generation
             || self.source_observed_at_unix_ms < self.snapshot.captured_at_unix_ms || self.source_observed_at_unix_ms >= self.snapshot.expires_at_unix_ms
             || self.source_observed_at_unix_ms > self.refreshed_at_unix_ms
@@ -702,7 +702,6 @@ impl FrozenRetrievalQuery {
             &binding.root_conversation_id,
             &binding.retrieval_episode_id,
             request.purpose(),
-            &self.snapshot.request_sha256,
             now,
         )
     }

@@ -23,7 +23,6 @@ pub struct Model {
     pub artifact_sha256: String,
     #[sea_orm(column_type = "Text")]
     pub receipt_json: String,
-    pub receipt_sha256: String,
     pub retired_at_ms: Option<i64>,
     #[sea_orm(indexed)]
     pub content_expires_at_ms: Option<i64>,

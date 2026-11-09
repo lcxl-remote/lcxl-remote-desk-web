@@ -18,7 +18,6 @@ pub struct Model {
     pub watermark_ms: i64,
     #[sea_orm(column_type = "Text")]
     pub scan_json: Option<String>,
-    pub scan_sha256: Option<String>,
     pub lease_id: Option<String>,
     pub lease_until_ms: Option<i64>,
     #[sea_orm(indexed)]

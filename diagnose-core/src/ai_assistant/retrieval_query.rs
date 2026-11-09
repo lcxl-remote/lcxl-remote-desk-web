@@ -168,7 +168,6 @@ impl RetrievalQuerySnapshot {
         root: &str,
         episode: &str,
         purpose: SourceReadPurpose,
-        request_sha256: &str,
         now: u64,
     ) -> Result<&PageAnchor, &'static str> {
         self.validate()?;
@@ -178,7 +177,6 @@ impl RetrievalQuerySnapshot {
             || self.root_conversation_id != root
             || self.retrieval_episode_id != episode
             || self.purpose != purpose
-            || self.request_sha256 != request_sha256
             || self.expires_at_unix_ms <= now
         {
             return Err("retrieval continuation no longer matches its original scope");
@@ -323,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_continuation_cannot_cross_actor_episode_purpose_or_query() {
+    fn opaque_continuation_cannot_cross_actor_episode_or_purpose() {
         let mut query = snapshot();
         let token = native_ids::from_bytes(Kind::AssistantPageCursor, &[7; 16]);
         query
@@ -337,7 +335,6 @@ mod tests {
                     "root",
                     "episode",
                     SourceReadPurpose::ModelHistory,
-                    &"a".repeat(64),
                     200
                 )
                 .is_ok()
@@ -350,7 +347,6 @@ mod tests {
                     "root",
                     "episode",
                     SourceReadPurpose::ModelHistory,
-                    &"a".repeat(64),
                     200
                 )
                 .is_err()
@@ -363,7 +359,6 @@ mod tests {
                     "root",
                     "new-episode",
                     SourceReadPurpose::ModelHistory,
-                    &"a".repeat(64),
                     200
                 )
                 .is_err()
@@ -376,7 +371,6 @@ mod tests {
                     "root",
                     "episode",
                     SourceReadPurpose::OwnerHistory,
-                    &"a".repeat(64),
                     200
                 )
                 .is_err()
@@ -389,20 +383,6 @@ mod tests {
                     "root",
                     "episode",
                     SourceReadPurpose::ModelHistory,
-                    &"b".repeat(64),
-                    200
-                )
-                .is_err()
-        );
-        assert!(
-            query
-                .continuation(
-                    &token,
-                    "actor",
-                    "root",
-                    "episode",
-                    SourceReadPurpose::ModelHistory,
-                    &"a".repeat(64),
                     1000
                 )
                 .is_err()

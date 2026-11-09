@@ -11,7 +11,6 @@ use desk_diagnose_core::{
     issue_reply::ReplyOrigin,
 };
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::OnConflict};
-use sha2::{Digest, Sha256};
 
 const MAX_POLICY_BYTES: usize = 64 * 1024;
 const OVERLAPPING: &str = "overlapping issue subscription";
@@ -21,9 +20,6 @@ pub mod settings;
 pub fn decode_subscription(
     row: &subscription::Model,
 ) -> Result<IssueSubscription, AssistantStoreError> {
-    if digest(&row.policy_json) != row.policy_sha256 {
-        return Err(invalid());
-    }
     let policy: IssueSubscription =
         serde_json::from_str(&row.policy_json).map_err(|_| invalid())?;
     policy.validate().map_err(AssistantStoreError::Invalid)?;
@@ -96,12 +92,10 @@ pub async fn put(
             .filter(subscription::Column::ActorId.eq(&policy.actor_id))
             .filter(subscription::Column::Revision.eq(row.revision))
             .filter(subscription::Column::PolicyJson.eq(row.policy_json))
-            .filter(subscription::Column::PolicySha256.eq(row.policy_sha256))
             .set(subscription::ActiveModel {
                 conversation_id: Set(policy.conversation_id.clone()),
                 revision: Set(policy.revision as i64),
                 enabled: Set(policy.enabled),
-                policy_sha256: Set(digest(&json)),
                 policy_json: Set(json),
                 updated_at_ms: Set(now),
                 ..Default::default()
@@ -117,7 +111,6 @@ pub async fn put(
             conversation_id: Set(policy.conversation_id.clone()),
             revision: Set(policy.revision as i64),
             enabled: Set(policy.enabled),
-            policy_sha256: Set(digest(&json)),
             policy_json: Set(json),
             created_at_ms: Set(now),
             updated_at_ms: Set(now),
@@ -173,9 +166,6 @@ pub fn decode_admission(row: &admission::Model) -> Result<IssueAdmission, Assist
         .as_deref()
         .filter(|_| row.retired_at_ms.is_none())
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if digest(json) != row.snapshot_sha256 {
-        return Err(invalid());
-    }
     let snapshot: IssueAdmission = serde_json::from_str(json).map_err(|_| invalid())?;
     snapshot.validate().map_err(AssistantStoreError::Invalid)?;
     if snapshot.authorization_id != row.authorization_id
@@ -245,7 +235,6 @@ pub(crate) async fn insert_admission_on(
         request_id: Set(snapshot.request_id.clone()),
         execution_root_id: Set(snapshot.execution_root_id.clone()),
         event_id: Set(snapshot.event_id.clone()),
-        snapshot_sha256: Set(digest(&json)),
         snapshot_json: Set(Some(json)),
         stopped_at_ms: Set(None),
         retired_at_ms: Set(None),
@@ -503,9 +492,6 @@ pub async fn stop_conversation(
         .exec(db)
         .await?;
     Ok(())
-}
-fn digest(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 fn invalid() -> AssistantStoreError {
     AssistantStoreError::Invalid("invalid original issue authority")
