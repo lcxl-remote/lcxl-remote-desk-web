@@ -22,8 +22,14 @@ pub struct UiReferenceState {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ReferenceSource {
     Message(String),
-    Attachment { id: String, message: String },
+    Attachment {
+        id: String,
+        message: String,
+    },
     Business(String),
+    /// Durable record marker: keeps a record alias expandable after the
+    /// message that first showed it leaves the conversation.
+    Record,
 }
 
 impl PartialEq for UiReferenceState {
@@ -227,6 +233,54 @@ fn selector_prefix(native: &str) -> Option<&'static str> {
     .map(|(_, prefix)| prefix)
 }
 
+/// Schedule list and proposal receipts are server-labelled tool results.
+fn is_schedule_result(message: &ChatMessage) -> bool {
+    message.role == ChatRole::Tool
+        && message.data_envelope.as_ref().is_some_and(|label| {
+            label.provenance.source_provider_id == crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
+                && matches!(
+                    label.provenance.source_tool_name.as_str(),
+                    "schedule_query" | "schedule_proposal"
+                )
+        })
+}
+
+/// Durable record fields shown to the model and their alias prefixes.
+const RECORD_FIELDS: &[(&str, &str)] = &[("schedule_id", "sc")];
+/// Per-prefix limit for record aliases whose showing messages are gone.
+const MAX_RECORD_ALIASES: usize = 256;
+
+fn record_alias_shape(id: &str) -> bool {
+    RECORD_FIELDS.iter().any(|(_, prefix)| {
+        id.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Visits record ids at their known result locations: top-level fields and
+/// entries of a `tasks` list. The visitor may return an alias to replace the id.
+fn visit_record_ids(value: &mut Value, visitor: &mut impl FnMut(&str, &str) -> Option<String>) {
+    fn fields(value: &mut Value, visitor: &mut impl FnMut(&str, &str) -> Option<String>) {
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        for (field, _) in RECORD_FIELDS {
+            if let Some(id) = object.get_mut(*field)
+                && let Some(native) = id.as_str()
+                && let Some(alias) = visitor(field, native)
+            {
+                *id = Value::String(alias);
+            }
+        }
+    }
+    fields(value, visitor);
+    if let Some(tasks) = value.get_mut("tasks").and_then(Value::as_array_mut) {
+        for task in tasks {
+            fields(task, visitor);
+        }
+    }
+}
+
 fn selector_alias_shape(id: &str) -> bool {
     ["wk", "task", "q", "j", "v"].into_iter().any(|prefix| {
         id.strip_prefix(prefix)
@@ -372,6 +426,12 @@ impl UiReferenceState {
                     Some(&call.id) == message.tool_call_id.as_ref() && call.name == *tool
                 })
             });
+            if is_schedule_result(message)
+                && let Ok(value) = serde_json::from_str::<Value>(&message.text)
+            {
+                self.observe_records(&value, &message.message_id)?;
+                continue;
+            }
             if !native && !browser && accepted.is_none() && data_tool.is_none() {
                 continue;
             }
@@ -835,14 +895,131 @@ impl UiReferenceState {
             let before = entry.sources.len();
             entry.sources.retain(|source| match source {
                 ReferenceSource::Message(id) => sources.contains(id),
-                ReferenceSource::Attachment { .. } | ReferenceSource::Business(_) => true,
+                ReferenceSource::Attachment { .. }
+                | ReferenceSource::Business(_)
+                | ReferenceSource::Record => true,
             });
             let retained = !entry.sources.is_empty() || protected.contains(id);
             changed |= !retained || before != entry.sources.len();
             retained
         });
+        changed |= self.recycle_records(protected);
         self.rebuild_indexes();
         changed
+    }
+
+    /// Bounds durable record aliases. Only entries whose showing messages have
+    /// all left the conversation are candidates; the oldest unprotected ones
+    /// beyond the per-prefix limit are dropped. Dropped aliases are never reused.
+    fn recycle_records(&mut self, protected: &BTreeSet<String>) -> bool {
+        let mut changed = false;
+        for (_, prefix) in RECORD_FIELDS {
+            let mut candidates = self
+                .entries
+                .iter()
+                .filter(|(id, entry)| {
+                    entry.prefix == *prefix
+                        && entry
+                            .sources
+                            .iter()
+                            .all(|source| *source == ReferenceSource::Record)
+                        && !protected.contains(*id)
+                })
+                .filter_map(|(id, _)| Some((id[prefix.len()..].parse::<u64>().ok()?, id.clone())))
+                .collect::<Vec<_>>();
+            if candidates.len() <= MAX_RECORD_ALIASES {
+                continue;
+            }
+            candidates.sort_unstable();
+            for (_, id) in &candidates[..candidates.len() - MAX_RECORD_ALIASES] {
+                self.entries.remove(id);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Registers a durable record shown by `message`.
+    fn register_record(
+        &mut self,
+        field: &str,
+        prefix: &str,
+        native: &str,
+        message: &str,
+    ) -> Result<(), AgentError> {
+        let reference = serde_json::json!({ field: native });
+        self.register_entry(
+            prefix,
+            native.into(),
+            &reference,
+            ReferenceSource::Message(message.into()),
+        )?;
+        let id = self
+            .exact_alias(prefix, native, &reference)
+            .cloned()
+            .expect("registered record alias");
+        self.entries
+            .get_mut(&id)
+            .expect("derived reference index")
+            .sources
+            .insert(ReferenceSource::Record);
+        Ok(())
+    }
+
+    /// Expands record aliases in the top-level record fields of model arguments.
+    /// Native ids pass through; an unknown or mistyped alias is rejected.
+    pub(crate) fn expand_record_ids(&self, value: &mut Value) -> Result<(), AgentError> {
+        let Some(object) = value.as_object_mut() else {
+            return Ok(());
+        };
+        for (field, prefix) in RECORD_FIELDS {
+            if let Some(id) = object.get_mut(*field)
+                && let Some(selected) = id.as_str()
+            {
+                *id = Value::String(self.expand_record_id(prefix, selected)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Expands one record id of the given prefix.
+    pub(crate) fn expand_record_id(&self, prefix: &str, id: &str) -> Result<String, AgentError> {
+        match self.entries.get(id) {
+            Some(entry) if entry.prefix == prefix => Ok(entry.native_id.clone()),
+            Some(_) => Err(invalid(
+                "ID has the wrong type; copy it from the matching result",
+            )),
+            None if record_alias_shape(id) => Err(invalid(
+                "ID is unavailable in this conversation; copy it from a current result",
+            )),
+            None => Ok(id.into()),
+        }
+    }
+
+    /// Present record ids in a result with the aliases registered for it.
+    fn project_records(&self, value: &mut Value, source: &str) {
+        visit_record_ids(value, &mut |field, id| {
+            let prefix = RECORD_FIELDS.iter().find(|(name, _)| *name == field)?.1;
+            self.alias(prefix, id, Some(source)).map(str::to_owned)
+        });
+    }
+
+    fn observe_records(&mut self, value: &Value, message: &str) -> Result<(), AgentError> {
+        let mut found = Vec::new();
+        let mut copy = value.clone();
+        visit_record_ids(&mut copy, &mut |field, id| {
+            found.push((field.to_owned(), id.to_owned()));
+            None
+        });
+        for (field, native) in found {
+            let prefix = RECORD_FIELDS
+                .iter()
+                .find(|(name, _)| *name == field)
+                .expect("visited record field")
+                .1;
+            self.register_record(&field, prefix, &native, message)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn retained_call_aliases(
@@ -864,6 +1041,11 @@ impl UiReferenceState {
                     found.push(id.to_owned());
                 }
             });
+            for (field, _) in RECORD_FIELDS {
+                if let Some(id) = value.get(*field).and_then(Value::as_str) {
+                    found.push(id.to_owned());
+                }
+            }
             for request in
                 std::iter::once(value).chain(value["requests"].as_array().into_iter().flatten())
             {
@@ -1072,7 +1254,7 @@ impl UiReferenceState {
                     entry.sources.iter().any(|locator| match locator {
                         ReferenceSource::Message(id) => id == source,
                         ReferenceSource::Attachment { message, .. } => message == source,
-                        ReferenceSource::Business(_) => false,
+                        ReferenceSource::Business(_) | ReferenceSource::Record => false,
                     })
                 })
                 .then_some((id, entry))
@@ -1239,10 +1421,15 @@ impl UiReferenceState {
                     entry.sources.iter().any(|origin| match origin {
                         ReferenceSource::Message(id) => id == &source,
                         ReferenceSource::Attachment { message, .. } => message == &source,
-                        ReferenceSource::Business(_) => false,
+                        ReferenceSource::Business(_) | ReferenceSource::Record => false,
                     })
                 }))
         {
+            if is_schedule_result(message) {
+                self.project_records(&mut value, &source);
+                message.text = value.to_string();
+                return;
+            }
             crate::ui_model_output::expand_value(&mut value);
             if crate::assistant_data_model::tool(message).is_some() {
                 self.project_conversations(&mut value, &source);
@@ -1924,5 +2111,113 @@ mod reference_lifecycle_tests {
         state.register(&file, "source").unwrap();
         assert_eq!(state.projected_alias(&doc), Some("doc1"));
         assert_eq!(state.projected_alias(&file), Some("f1"));
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use crate::chat::ChatMessage;
+
+    fn schedule_result(message_id: &str, ids: &[String]) -> ChatMessage {
+        let parent = crate::model_message_labels::model_bound_user_message(
+            "owner".into(),
+            "List timers".into(),
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap();
+        let text = serde_json::json!({
+            "ok": true,
+            "tasks": ids.iter().map(|id| serde_json::json!({"schedule_id": id})).collect::<Vec<_>>()
+        })
+        .to_string();
+        let mut message = ChatMessage::tool_result(message_id, "query", &text);
+        message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            parent.data_envelope.as_ref(),
+            message_id,
+            &text,
+            "schedule_query",
+        )
+        .unwrap();
+        message
+    }
+
+    fn schedule(index: u8) -> String {
+        crate::native_ids::from_bytes(crate::native_ids::Kind::Schedule, &[index; 16])
+    }
+
+    #[test]
+    fn schedule_aliases_survive_their_result_and_expand_by_type() {
+        let mut state = UiReferenceState::default();
+        let result = schedule_result("listed", &[schedule(1)]);
+        state.observe(std::slice::from_ref(&result)).unwrap();
+        let mut projected = result.clone();
+        state.project_message(&mut projected);
+        let shown: Value = serde_json::from_str(&projected.text).unwrap();
+        assert_eq!(shown["tasks"][0]["schedule_id"], "sc1");
+
+        // The listed result leaves the conversation; the record alias stays.
+        assert!(state.retain_sources(&BTreeSet::new(), &BTreeSet::new()));
+        assert_eq!(state.expand_record_id("sc", "sc1").unwrap(), schedule(1));
+        let restored: UiReferenceState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(restored.expand_record_id("sc", "sc1").unwrap(), schedule(1));
+
+        assert_eq!(
+            state.expand_record_id("sc", &schedule(2)).unwrap(),
+            schedule(2)
+        );
+        assert!(state.expand_record_id("sc", "sc9").is_err());
+        let mut arguments = serde_json::json!({"schedule_id": "sc1"});
+        state.expand_record_ids(&mut arguments).unwrap();
+        assert_eq!(arguments["schedule_id"], schedule(1));
+
+        // Seeing the same record again reuses its alias.
+        state
+            .observe(&[schedule_result("again", &[schedule(1)])])
+            .unwrap();
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn record_aliases_recycle_oldest_unprotected_beyond_the_limit() {
+        let mut state = UiReferenceState::default();
+        let ids = (0..=MAX_RECORD_ALIASES + 1)
+            .map(|index| crate::native_ids::stable(crate::native_ids::Kind::Schedule, &index))
+            .collect::<Vec<_>>();
+        state.observe(&[schedule_result("listed", &ids)]).unwrap();
+        let total = MAX_RECORD_ALIASES + 2;
+        assert_eq!(state.entries.len(), total);
+
+        // While the result is present nothing is recycled.
+        let present = BTreeSet::from(["listed".to_owned()]);
+        assert!(!state.retain_sources(&present, &BTreeSet::new()));
+        assert_eq!(state.entries.len(), total);
+
+        // sc1 is protected, so sc2 is the only candidate beyond the limit;
+        // numeric order keeps sc10 although it sorts before sc2 as text.
+        let protected = BTreeSet::from(["sc1".to_owned()]);
+        assert!(state.retain_sources(&BTreeSet::new(), &protected));
+        assert_eq!(state.entries.len(), MAX_RECORD_ALIASES + 1);
+        for kept in ["sc1", "sc3", "sc10"] {
+            assert!(state.entries.contains_key(kept), "{kept}");
+        }
+        assert!(state.expand_record_id("sc", "sc2").is_err());
+
+        // A recycled record that appears again gets a new alias.
+        state
+            .observe(&[schedule_result("again", &ids[1..2])])
+            .unwrap();
+        let mut renewed = serde_json::json!({"schedule_id": ids[1].clone()});
+        visit_record_ids(&mut renewed, &mut |_, native| {
+            state.alias("sc", native, None).map(str::to_owned)
+        });
+        assert_eq!(renewed["schedule_id"], format!("sc{}", total + 1));
     }
 }

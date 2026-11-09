@@ -267,6 +267,7 @@ fn resource_devices(
                         .iter()
                         .find(|record| record.proposal.request_id == id)
                         .map(|record| record.device_id.clone()),
+                    ReferenceSource::Record => None,
                 })
                 .collect();
             (!devices.is_empty()).then_some(devices)

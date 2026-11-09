@@ -189,7 +189,9 @@ async fn fresh_task_is_bound_by_server_receipt_and_queries_are_paginated() {
 async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_state() {
     use crate::entity::agent_session;
     use desk_diagnose_core::chat::{ChatRole, ToolCall};
-    for case in 0..3 {
+    for case in 0..4 {
+        // Case 3 cancels with the alias the model saw in the listed result.
+        let aliased = case == 3;
         let (store, work, mut session) = fixture(true).await;
         let task = store.read(1, &work.schedule_id).await.unwrap();
         let now = chrono::Utc::now();
@@ -206,7 +208,7 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
         let call = ToolCall {
             id: "cancel-call".into(),
             name: desk_diagnose_core::schedule::management_tools::CANCEL.into(),
-            arguments_json: json!({"schedule_id":task.schedule_id}).to_string(),
+            arguments_json: json!({"schedule_id": if aliased { "sc1".to_owned() } else { task.schedule_id.clone() }}).to_string(),
         };
         let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
             "assistant".into(),
@@ -260,6 +262,22 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
         let output = policy
             .derive_model_output_envelope(&turn, std::slice::from_ref(&input))
             .unwrap();
+        if aliased {
+            session.conversation.push(query.clone());
+            session
+                .ui_references
+                .observe(&session.conversation)
+                .unwrap();
+            let mut request = desk_diagnose_core::seam::ModelRequest::text_only(
+                session.conversation.clone(),
+                desk_diagnose_core::prompt::ResponseFormatSpec::None,
+            );
+            request.ui_references = Some(session.ui_references.clone());
+            let projected = desk_diagnose_core::ui_model_ids::project_request(&request);
+            let shown: Value =
+                serde_json::from_str(&projected.messages.last().unwrap().text).unwrap();
+            assert_eq!(shown["tasks"][0]["schedule_id"], "sc1");
+        }
         parent.model_controls = Some(Box::new(
             desk_diagnose_core::model_controls::FrozenModelControls::capture(&session, &[query]),
         ));
@@ -320,7 +338,7 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
                 &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
             )
             .await;
-        if case != 0 {
+        if matches!(case, 1 | 2) {
             assert!(reply.is_err());
             assert_eq!(store.read(1, &work.schedule_id).await.unwrap(), task);
             assert_eq!(

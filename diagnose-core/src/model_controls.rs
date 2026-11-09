@@ -297,7 +297,9 @@ fn control_targets(
     let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) else {
         return Vec::new();
     };
-    if references.expand_selector_ids(&mut value).is_err() {
+    if references.expand_selector_ids(&mut value).is_err()
+        || references.expand_record_ids(&mut value).is_err()
+    {
         return Vec::new();
     }
     if call.name == crate::subagent::tools::ACK_REPORTS {

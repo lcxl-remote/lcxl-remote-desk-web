@@ -54,6 +54,8 @@ pub fn same_arguments(
         (Ok(mut original), Ok(mut resolved)) if original.is_object() && resolved.is_object() => {
             if references.expand_selector_ids(&mut original).is_err()
                 || references.expand_selector_ids(&mut resolved).is_err()
+                || references.expand_record_ids(&mut original).is_err()
+                || references.expand_record_ids(&mut resolved).is_err()
             {
                 return false;
             }

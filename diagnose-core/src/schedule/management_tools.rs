@@ -34,7 +34,7 @@ pub fn specs() -> Vec<ToolSpec> {
     }, ToolSpec {
         name: CANCEL.into(),
         description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the schedule_id returned by list_scheduled_tasks in the current request; the server binds its observed revision. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
-        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id"],"properties":{"schedule_id":{"type":"string","minLength":25,"maxLength":25,"pattern":"^sc_[A-Za-z0-9_-]{22}$"}}}),
+        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id"],"properties":{"schedule_id":{"type":"string","minLength":3,"maxLength":16,"pattern":"^sc[1-9][0-9]{0,13}$"}}}),
     }]
 }
 
@@ -107,10 +107,17 @@ pub fn parse(
             })
         }
         CANCEL => {
-            let input: Cancel = serde_json::from_str(&call.arguments_json).map_err(|_| {
+            let mut input: Cancel = serde_json::from_str(&call.arguments_json).map_err(|_| {
                 observation.reject(Stage::Preflight, InputIssue::Semantic);
                 "invalid cancellation"
             })?;
+            input.schedule_id = session
+                .ui_references
+                .expand_record_id("sc", &input.schedule_id)
+                .map_err(|_| {
+                    observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                    "The schedule ID is unavailable in this conversation. Call list_scheduled_tasks again; no cancellation was applied."
+                })?;
             if !crate::native_ids::is(crate::native_ids::Kind::Schedule, &input.schedule_id) {
                 observation.reject(Stage::Preflight, InputIssue::Semantic);
                 return Err("invalid cancellation");
