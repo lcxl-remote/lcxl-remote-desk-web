@@ -828,6 +828,25 @@ impl PersistedAgentSession {
         }
     }
 
+    /// Aliases that must survive pruning: those named by recorded calls and
+    /// those of the current memory facts shown to the model.
+    pub(crate) fn protected_references(&self) -> std::collections::BTreeSet<String> {
+        let mut protected = self
+            .ui_references
+            .retained_call_aliases(&self.conversation, &self.permission_requests);
+        if let Some(data) = &self.assistant_data {
+            protected.extend(
+                self.ui_references.record_aliases(
+                    "memory_id",
+                    data.current_memories
+                        .iter()
+                        .map(|memory| memory.memory_id.as_str()),
+                ),
+            );
+        }
+        protected
+    }
+
     /// Build a non-destructive durable projection. Provider image data is kept
     /// in the live in-memory turn for the next model call, but never enters the
     /// database/SQLite JSON at an intermediate save or crash boundary.
@@ -838,9 +857,7 @@ impl PersistedAgentSession {
             .iter()
             .map(|message| message.message_id.clone())
             .collect();
-        let protected = projection
-            .ui_references
-            .retained_call_aliases(&projection.conversation, &projection.permission_requests);
+        let protected = projection.protected_references();
         projection
             .ui_references
             .retain_sources(&sources, &protected);

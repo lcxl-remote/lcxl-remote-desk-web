@@ -272,7 +272,7 @@ fn search_mode_limits_and_compound_metadata_use_the_configured_schema() {
         arguments_json: json!({"operation":"remember","content":"abcde","context":"fghi"})
             .to_string(),
     };
-    assert!(data_tools::parse_with_limits(&call, &limits).is_err());
+    assert!(data_tools::parse_with_limits(&call, &limits, &Default::default()).is_err());
 }
 
 #[test]

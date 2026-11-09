@@ -1318,9 +1318,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             .iter()
             .map(|message| message.message_id.clone())
             .collect();
-        let protected = session
-            .ui_references
-            .retained_call_aliases(&session.conversation, &session.permission_requests);
+        let protected = session.protected_references();
         let pruned = session.ui_references.retain_sources(&sources, &protected);
         if history_changed || runtime_changed || pruned {
             deps.session_seam.save(session).await?;
@@ -2589,6 +2587,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                 {
                                     match crate::ai_assistant::data_tools::prepare_memory_batch(
                                         &turn.tool_calls,
+                                        &session.ui_references,
                                     ) {
                                         Ok(targets) => targets,
                                         Err(error) => {

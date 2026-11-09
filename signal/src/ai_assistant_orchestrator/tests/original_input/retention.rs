@@ -56,7 +56,9 @@ async fn retention_scenario() {
             };
             if step == 2 {
                 args["operation"] = json!("update");
-                args["memory_id"] = json!(memory_id.as_ref().unwrap());
+                // The model copies the alias its earlier write result showed.
+                assert!(memory_id.is_some());
+                args["memory_id"] = json!("mem1");
                 args["expected_revision"] = json!(1);
                 args["content"] = json!("Use detailed Chinese replies");
             }

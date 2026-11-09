@@ -299,7 +299,9 @@ async fn exercise(stale: bool, exposed: bool, prior: u32) {
     let clock = || "1970-01-01T00:00:01Z".into();
     let deps = deps(&store, &clock);
     let mut sink = Sink::default();
-    let targets = data_tools::prepare_memory_batch(&calls).unwrap().unwrap();
+    let targets = data_tools::prepare_memory_batch(&calls, &Default::default())
+        .unwrap()
+        .unwrap();
     let result = crate::future::phase(|| {
         dispatch_forget(
             &deps,
@@ -517,7 +519,7 @@ impl ModelSeam for FollowupModel {
             ModelTurn {
                 stop_reason: StopReason::ToolUse,
                 tool_calls: vec![ToolCall { id: "read-history".into(), name: data_tools::READ_MEMORY_HISTORY.into(),
-                    arguments_json: serde_json::json!({"memory_id": crate::native_ids::stable(crate::native_ids::Kind::Memory, &"preferred-name")}).to_string() }],
+                    arguments_json: serde_json::json!({"memory_id": shown_memory_alias(&authorized.request, &crate::native_ids::stable(crate::native_ids::Kind::Memory, &"preferred-name"))}).to_string() }],
                 ..Default::default()
             }
         } else if ordinal == 0 && self.unavailable_source {
@@ -623,6 +625,19 @@ async fn exercise_data_followup(history_mode: bool) {
         let mut session = personal_session("owner", "root", "device");
         session.latest_input_seq = 1;
         session.input_revision = 1;
+        // An earlier result showed this memory; the model copies its alias.
+        session
+            .ui_references
+            .register_records(
+                "memory_id",
+                [crate::native_ids::stable(
+                    crate::native_ids::Kind::Memory,
+                    &"preferred-name",
+                )]
+                .iter()
+                .map(String::as_str),
+            )
+            .unwrap();
         let scope = session.scope_snapshot.clone();
         let store = Store {
             stale: false,
@@ -768,4 +783,17 @@ fn memory_history_read_returns_to_the_model_and_reply_failure_keeps_the_read_res
         "memory_history_read_returns_to_the_model_and_reply_failure_keeps_the_read_result",
         true,
     );
+}
+
+/// The alias the session issued for a memory the model saw earlier.
+fn shown_memory_alias(request: &crate::seam::ModelRequest, native: &str) -> String {
+    let alias = request
+        .ui_references
+        .as_ref()
+        .expect("request alias table")
+        .record_aliases("memory_id", std::iter::once(native))
+        .pop_first()
+        .expect("registered memory alias");
+    assert!(alias.starts_with("mem") && alias != native, "{alias}");
+    alias
 }

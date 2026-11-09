@@ -24,7 +24,7 @@ pub fn record_stale_memory_forget(
         .ok_or("missing assistant control state")?;
     let start = group_start(session, producer_id)?;
     let producer = &session.conversation[start];
-    let calls = forget_calls(producer)?;
+    let calls = forget_calls(&session.ui_references, producer)?;
     if !super::super::data_access::eligible_origin(session)
         || session.trigger_origin != crate::session::TriggerOrigin::User
         || session.turn_state != TurnState::Running
@@ -117,7 +117,7 @@ pub fn commit_memory_forget_group(
         .ok_or("missing assistant control state")?;
     let start = group_start(session, producer_message_id)?;
     let producer = &session.conversation[start];
-    let calls = forget_calls(producer)?;
+    let calls = forget_calls(&session.ui_references, producer)?;
     if tool_group_sha256(std::slice::from_ref(producer))? != call_message_sha256 {
         return Err("memory control changed its original producer");
     }
@@ -213,7 +213,7 @@ pub fn read_memory_forget_group(
         .ok_or("missing assistant control state")?;
     let start = group_start(session, producer_message_id)?;
     let producer = &session.conversation[start];
-    let calls = forget_calls(producer)?;
+    let calls = forget_calls(&session.ui_references, producer)?;
     let end = start
         .checked_add(calls.len() + 1)
         .ok_or("invalid control group length")?;
@@ -272,7 +272,10 @@ fn group_start(session: &PersistedAgentSession, id: &str) -> Result<usize, &'sta
     Ok(index)
 }
 
-fn forget_calls(message: &ChatMessage) -> Result<Vec<ToolCall>, &'static str> {
+fn forget_calls(
+    references: &crate::ui_references::UiReferenceState,
+    message: &ChatMessage,
+) -> Result<Vec<ToolCall>, &'static str> {
     if message.role != ChatRole::Assistant || message.tool_calls.is_empty() {
         return Err("invalid memory control producer");
     }
@@ -292,7 +295,7 @@ fn forget_calls(message: &ChatMessage) -> Result<Vec<ToolCall>, &'static str> {
             return Err("duplicate tool call in memory control batch");
         }
     }
-    if super::super::data_tools::forget_batch(&calls)
+    if super::super::data_tools::forget_batch(&calls, references)
         .map_err(|_| "invalid complete forget batch")?
         .is_none()
     {

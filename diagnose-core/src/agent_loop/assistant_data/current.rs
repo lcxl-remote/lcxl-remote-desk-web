@@ -156,11 +156,21 @@ pub(in crate::agent_loop) async fn prepare(
             ));
         }
         let (references, dependencies) = prepare_uses(session, projected.uses)?;
+        // Current facts get record aliases in this save; request projection
+        // only presents them and never allocates.
+        let registered = session.ui_references.register_records(
+            "memory_id",
+            projected
+                .memories
+                .iter()
+                .map(|memory| memory.memory_id.as_str()),
+        )?;
         let data = session
             .assistant_data
             .as_mut()
             .ok_or_else(|| changed("current memory lost its source session"))?;
-        let dirty = data.current_memories != projected.memories
+        let dirty = registered
+            || data.current_memories != projected.memories
             || data.read_uses != references
             || data.history_dependencies != dependencies;
         if dirty {
@@ -172,6 +182,10 @@ pub(in crate::agent_loop) async fn prepare(
             deps.session_seam.save(session).await?;
         }
         *request = *candidate;
+        // The request copied the alias table before these facts registered.
+        if request.ui_references.is_some() {
+            request.ui_references = Some(session.ui_references.clone());
+        }
         return Ok(after.context_bytes.saturating_sub(baseline.context_bytes));
     }
     omit(deps, session, request, base).await?;

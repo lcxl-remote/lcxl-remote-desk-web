@@ -393,12 +393,40 @@ async fn current_body_enters_only_the_request_after_its_exact_source_references_
     let tools = Tools;
     let clock = || "1970-01-01T00:00:01Z".into();
     let deps = deps(&store, &model, &tools, &clock);
+    // The loop copies the alias table into the request before preparation.
+    request.ui_references = Some(session.ui_references.clone());
     prepare(&deps, &mut session, &mut request, "turn")
         .await
         .unwrap();
     assert_eq!(store.saves.get(), 1);
     assert_eq!(request.messages.len(), 2);
     assert!(current_memory::is_projection(&request.messages[1]));
+    // The save registered record aliases; the wire projection shows them.
+    let natives = session
+        .assistant_data
+        .as_ref()
+        .unwrap()
+        .current_memories
+        .iter()
+        .map(|memory| memory.memory_id.clone())
+        .collect::<Vec<_>>();
+    assert!(!natives.is_empty());
+    let aliases = session
+        .ui_references
+        .record_aliases("memory_id", natives.iter().map(String::as_str));
+    assert_eq!(aliases.len(), natives.len());
+    assert!(session.protected_references().is_superset(&aliases));
+    let wire = crate::ui_model_ids::project_request(&request);
+    let shown: serde_json::Value = serde_json::from_str(&wire.messages[1].text).unwrap();
+    for memory in shown["memories"].as_array().unwrap() {
+        let id = memory["memory_id"].as_str().unwrap();
+        assert!(aliases.contains(id), "{id}");
+    }
+    assert!(
+        natives
+            .iter()
+            .all(|native| !wire.messages[1].text.contains(native.as_str()))
+    );
     assert!(
         crate::ai_assistant::seam::AssistantModelDataManifest::validate_absence(&request).is_err()
     );

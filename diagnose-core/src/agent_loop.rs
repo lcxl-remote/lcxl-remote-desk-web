@@ -2211,9 +2211,7 @@ async fn refresh_reference_sources_impl(
     session: &mut PersistedAgentSession,
 ) -> Result<(), AgentError> {
     let references_before = session.ui_references.clone();
-    let protected_references = session
-        .ui_references
-        .retained_call_aliases(&session.conversation, &session.permission_requests);
+    let protected_references = session.protected_references();
     if session.ui_references.has_attachment_sources() {
         let mut before = None;
         let mut positions = std::collections::BTreeSet::new();

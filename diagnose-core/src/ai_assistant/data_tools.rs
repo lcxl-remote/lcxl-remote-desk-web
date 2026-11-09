@@ -18,6 +18,8 @@ use desk_agent_protocol::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::ui_references::UiReferenceState;
+
 pub const SEARCH_MEMORIES: &str = "search_memories";
 pub const READ_MEMORY_HISTORY: &str = "read_memory_history";
 pub const MANAGE_MEMORIES: &str = "manage_memories";
@@ -74,7 +76,7 @@ pub fn memory_registry(
         if update {
             fields.insert(
                 "memory_id".into(),
-                json!({"type":"string","minLength":1,"maxLength":256}),
+                json!({"type":"string","minLength":4,"maxLength":16,"pattern":"^mem[1-9][0-9]{0,12}$"}),
             );
             fields.insert(
                 "expected_revision".into(),
@@ -98,7 +100,7 @@ pub fn memory_registry(
             READ_MEMORY_HISTORY,
             "Read retained revisions of one memory, newest first. Use this for previous names, preferences or changes; locate the memory with search_memories when needed. Current context contains current facts only. current_revision is the head observed on the first page; use search_memories for the latest state. Copy memory_id from observed memories. Revisions may be missing or expired; no result does not prove a fact never existed. recorded_at_unix_ms is platform recording time, not the real-world effective date. Keep historical and pending_conflict values distinct from current preferences. Returned source_ids can be read with read_memory_source. This is read-only and grants no write or execution authority.",
             json!({"type":"object","required":["memory_id"],"additionalProperties":false,"properties":{
-                "memory_id":{"type":"string","minLength":1,"maxLength":256},
+                "memory_id":{"type":"string","minLength":4,"maxLength":16,"pattern":"^mem[1-9][0-9]{0,12}$"},
                 "limit":{"type":"integer","minimum":1,"maximum":limits.retrieval.read_messages,"default":limits.retrieval.read_messages},
                 "cursor":{"type":"string","maxLength":128}}}),
             ToolEffect::MemoryQuery,
@@ -108,7 +110,7 @@ pub fn memory_registry(
             "You decide which stable facts to retain and how they relate to existing memories. Check current memories or search first; update an observed memory_id and expected_revision for a changed fact, preserving still-valid information in complete replacement content. Supply self-contained content and useful context. The platform stores your exact draft after deterministic source, permission, version and quota checks; no second model rewrites or reviews it. The platform binds the actual current owner input automatically; optional source_refs add observed evidence or background. Distinguish owner assertions from questions, quotes, drafts, guesses and one-off activities. Ask for clarification when necessary. Remember/update must be the only tool in the model response. Applied means committed; skipped/rejected/conflict does not confirm a write. content_retention_denied comes from the data in this conversation, never from the wording or topic of the draft: do not reword or retry it. When the fact came from the owner, cite only their input in source_refs; otherwise tell the owner it could not be saved. Continue your answer using the actual tool result. Forget requires an explicit owner request and an observed target revision; every call in that batch must be forget. Never persist credentials.",
             json!({"type":"object","oneOf":[make_variant("remember", false),make_variant("update", true),{
             "type":"object","required":["operation","memory_id","expected_revision"],"additionalProperties":false,"properties":{
-                "operation":{"type":"string","const":"forget"},"memory_id":{"type":"string","minLength":1,"maxLength":256},
+                "operation":{"type":"string","const":"forget"},"memory_id":{"type":"string","minLength":4,"maxLength":16,"pattern":"^mem[1-9][0-9]{0,12}$"},
                 "expected_revision":{"type":"integer","minimum":1}
             }}]}),
             ToolEffect::MemoryWrite,
@@ -335,14 +337,29 @@ fn provided_u32<'de, D: serde::Deserializer<'de>>(
 }
 
 pub fn parse(call: &ToolCall) -> Result<ParsedDataCall, AgentError> {
-    parse_impl(call, None)
+    parse_impl(call, None, &UiReferenceState::default())
 }
 
+/// Parses a recorded model call. Admission has already bound the exact model
+/// argument bytes; record aliases expand only in the parsed request.
 pub fn parse_with_limits(
     call: &ToolCall,
     limits: &desk_agent_protocol::ai_assistant::limits::AssistantDataLimits,
+    references: &UiReferenceState,
 ) -> Result<ParsedDataCall, AgentError> {
-    parse_impl(call, Some(limits))
+    parse_impl(call, Some(limits), references)
+}
+
+fn expand_memory_target(
+    references: &UiReferenceState,
+    request: &mut MemoryWriteRequest,
+) -> Result<(), AgentError> {
+    if let MemoryWriteRequest::Update { memory_id, .. }
+    | MemoryWriteRequest::Forget { memory_id, .. } = request
+    {
+        *memory_id = references.expand_record_id("mem", memory_id)?;
+    }
+    Ok(())
 }
 
 // Missing/duplicate field names come from the target type. Other serde messages
@@ -382,6 +399,7 @@ fn decode_error(error: serde_json::Error) -> AgentError {
 fn parse_impl(
     call: &ToolCall,
     limits: Option<&desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>,
+    references: &UiReferenceState,
 ) -> Result<ParsedDataCall, AgentError> {
     let parsed = match call.name.as_str() {
         SEARCH_MEMORIES => {
@@ -401,7 +419,7 @@ fn parse_impl(
             let input: MemoryHistoryRead =
                 serde_json::from_str(&call.arguments_json).map_err(decode_error)?;
             let request = MemoryHistoryRequest {
-                memory_id: input.memory_id,
+                memory_id: references.expand_record_id("mem", &input.memory_id)?,
                 limit: input.limit.unwrap_or(limits.read_messages),
                 cursor: input.cursor,
             };
@@ -409,8 +427,9 @@ fn parse_impl(
             ParsedDataCall::ReadMemoryHistory(request)
         }
         MANAGE_MEMORIES => {
-            let request: MemoryWriteRequest =
+            let mut request: MemoryWriteRequest =
                 serde_json::from_str(&call.arguments_json).map_err(decode_error)?;
+            expand_memory_target(references, &mut request)?;
             if let Some(limits) = limits {
                 request
                     .validate_with_limits(&limits.memory)
@@ -477,8 +496,9 @@ fn parse_impl(
 
 pub(crate) fn prepare_memory_batch(
     calls: &[ToolCall],
+    references: &UiReferenceState,
 ) -> Result<Option<Vec<MemoryForgetTarget>>, AgentError> {
-    let targets = forget_batch(calls)?;
+    let targets = forget_batch(calls, references)?;
     if targets.is_none()
         && calls.len() != 1
         && calls.iter().any(|call| call.name == MANAGE_MEMORIES)
@@ -490,7 +510,12 @@ pub(crate) fn prepare_memory_batch(
     Ok(targets)
 }
 
-pub fn forget_batch(calls: &[ToolCall]) -> Result<Option<Vec<MemoryForgetTarget>>, AgentError> {
+/// `references` is the issuing session's alias table; forget targets are
+/// returned with native memory ids.
+pub fn forget_batch(
+    calls: &[ToolCall],
+    references: &UiReferenceState,
+) -> Result<Option<Vec<MemoryForgetTarget>>, AgentError> {
     let proposals = calls
         .iter()
         .filter(|call| call.name == MANAGE_MEMORIES)
@@ -512,8 +537,9 @@ pub fn forget_batch(calls: &[ToolCall]) -> Result<Option<Vec<MemoryForgetTarget>
     }
     let mut targets = Vec::new();
     for proposal in proposals {
-        let request = proposal.map_err(decode_error)?;
+        let mut request = proposal.map_err(decode_error)?;
         request.validate().map_err(invalid)?;
+        expand_memory_target(references, &mut request)?;
         if let MemoryWriteRequest::Forget {
             memory_id,
             expected_revision,
@@ -649,7 +675,7 @@ mod tests {
                 arguments_json: arguments.into(),
                 ..proposal
             };
-            let error = parse_with_limits(&proposal, &limits)
+            let error = parse_with_limits(&proposal, &limits, &Default::default())
                 .err()
                 .expect("invalid input was accepted");
             assert_eq!(error.kind, AgentErrorKind::InvalidInput);
@@ -684,7 +710,7 @@ mod tests {
                 name: MANAGE_MEMORIES.into(),
                 arguments_json: arguments.into(),
             };
-            let error = prepare_memory_batch(&[proposal]).unwrap_err();
+            let error = prepare_memory_batch(&[proposal], &Default::default()).unwrap_err();
             assert!(error.message.contains(expected), "{}", error.message);
             assert!(!error.message.contains("PRIVATE_VALUE"));
         }
@@ -698,16 +724,17 @@ mod tests {
             name: SEARCH_MEMORIES.into(),
             arguments_json: r#"{"queries":["language"]}"#.into(),
         };
-        assert!(prepare_memory_batch(std::slice::from_ref(&write)).is_ok());
-        assert!(prepare_memory_batch(&[query.clone(), query.clone()]).is_ok());
-        assert!(prepare_memory_batch(&[write.clone(), query]).is_err());
-        assert!(prepare_memory_batch(&[write.clone(), write]).is_err());
+        assert!(prepare_memory_batch(std::slice::from_ref(&write), &Default::default()).is_ok());
+        assert!(prepare_memory_batch(&[query.clone(), query.clone()], &Default::default()).is_ok());
+        assert!(prepare_memory_batch(&[write.clone(), query], &Default::default()).is_err());
+        assert!(prepare_memory_batch(&[write.clone(), write], &Default::default()).is_err());
         let forget = |id: &str| {
             ToolCall { id: id.into(), name: MANAGE_MEMORIES.into(), arguments_json: serde_json::json!({"operation":"forget","memory_id":crate::native_ids::stable(crate::native_ids::Kind::Memory, &id),"expected_revision":1}).to_string() }
         };
-        let targets = prepare_memory_batch(&[forget("first"), forget("second")])
-            .unwrap()
-            .unwrap();
+        let targets =
+            prepare_memory_batch(&[forget("first"), forget("second")], &Default::default())
+                .unwrap()
+                .unwrap();
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].expected_revision, 1);
         assert_ne!(targets[0].memory_id, targets[1].memory_id);
@@ -909,14 +936,14 @@ mod tests {
             json!({"operation":"forget","memory_id":"m1","expected_revision":2}),
         );
         assert_eq!(
-            forget_batch(std::slice::from_ref(&forget))
+            forget_batch(std::slice::from_ref(&forget), &Default::default())
                 .unwrap()
                 .unwrap()[0]
                 .expected_revision,
             2
         );
         let read = call("c2", SEARCH_MEMORIES, json!({"queries":["language"]}));
-        assert!(forget_batch(&[forget.clone(), read]).is_err());
+        assert!(forget_batch(&[forget.clone(), read], &Default::default()).is_err());
         for extra in [r#", "expected_revision":2}"#, r#", "operation":"forget"}"#] {
             let mut duplicate = forget.clone();
             duplicate.arguments_json = format!(
@@ -924,9 +951,9 @@ mod tests {
                 duplicate.arguments_json.trim_end_matches('}'),
                 extra
             );
-            assert!(forget_batch(&[duplicate]).is_err());
+            assert!(forget_batch(&[duplicate], &Default::default()).is_err());
         }
-        assert!(forget_batch(&[forget.clone(), forget]).is_err());
+        assert!(forget_batch(&[forget.clone(), forget], &Default::default()).is_err());
     }
 
     #[test]
@@ -975,11 +1002,11 @@ mod tests {
             arguments_json: serde_json::json!({"queries": vec!["中🙂".repeat(150); 6], "limit":13})
                 .to_string(),
         };
-        parse_with_limits(&call, &limits).unwrap();
-        assert!(parse_with_limits(&call, &Default::default()).is_err());
+        parse_with_limits(&call, &limits, &Default::default()).unwrap();
+        assert!(parse_with_limits(&call, &Default::default(), &Default::default()).is_err());
         let call = ToolCall { id: "write".into(), name: MANAGE_MEMORIES.into(), arguments_json: serde_json::json!({"operation":"remember","content":"x".repeat(40000),"source_refs":[{"kind":"input","id":"input","revision":1,"role":"evidence"}]}).to_string() };
-        parse_with_limits(&call, &limits).unwrap();
-        assert!(parse_with_limits(&call, &Default::default()).is_err());
+        parse_with_limits(&call, &limits, &Default::default()).unwrap();
+        assert!(parse_with_limits(&call, &Default::default(), &Default::default()).is_err());
     }
     #[test]
     fn read_tools_use_configured_schema_defaults_and_validate_explicit_limits() {
@@ -1002,7 +1029,7 @@ mod tests {
                     name: name.into(),
                     arguments_json: r#"{"source_id":"source"}"#.into(),
                 };
-                match parse_with_limits(&call, &limits).unwrap() {
+                match parse_with_limits(&call, &limits, &Default::default()).unwrap() {
                     ParsedDataCall::ReadConversation(request) => {
                         assert_eq!(request.max_bytes, maximum);
                         assert_eq!(request.limit, 10);
@@ -1014,7 +1041,7 @@ mod tests {
                 }
                 call.arguments_json =
                     serde_json::json!({"source_id":"source","max_bytes":maximum+1}).to_string();
-                assert!(parse_with_limits(&call, &limits).is_err());
+                assert!(parse_with_limits(&call, &limits, &Default::default()).is_err());
                 for malformed in [
                     r#"{"source_id":"source","source_id":"other"}"#,
                     r#"{"source_id":"source","max_bytes":null}"#,
@@ -1022,7 +1049,7 @@ mod tests {
                     r#"{"source_id":"source","unknown":1}"#,
                 ] {
                     call.arguments_json = malformed.into();
-                    assert!(parse_with_limits(&call, &limits).is_err());
+                    assert!(parse_with_limits(&call, &limits, &Default::default()).is_err());
                 }
             }
             let call = ToolCall {
@@ -1033,7 +1060,7 @@ mod tests {
                         .to_string(),
             };
             assert!(matches!(
-                parse_with_limits(&call, &limits).unwrap(),
+                parse_with_limits(&call, &limits, &Default::default()).unwrap(),
                 ParsedDataCall::ReadConversation(_)
             ));
         }
@@ -1048,7 +1075,7 @@ mod tests {
             json!({"memory_id":"memory"}),
         );
         let ParsedDataCall::ReadMemoryHistory(parsed) =
-            parse_with_limits(&request, &limits).unwrap()
+            parse_with_limits(&request, &limits, &Default::default()).unwrap()
         else {
             unreachable!()
         };
@@ -1073,11 +1100,69 @@ mod tests {
             json!({"memory_id":"memory","actor_id":"other"}),
         ] {
             request.arguments_json = arguments.to_string();
-            assert!(parse_with_limits(&request, &limits).is_err());
+            assert!(parse_with_limits(&request, &limits, &Default::default()).is_err());
         }
         let mut session = super::super::test_support::personal_session("owner", "root", "device");
         assert!(session_allows(&registered, &session));
         session.assistant_data.as_mut().unwrap().temporary = true;
         assert!(!session_allows(&registered, &session));
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn memory_aliases_expand_after_exact_argument_parsing() {
+        let native = crate::native_ids::stable(crate::native_ids::Kind::Memory, &"fact");
+        let mut references = UiReferenceState::default();
+        references
+            .register_records("memory_id", std::iter::once(native.as_str()))
+            .unwrap();
+        let call = |name: &str, arguments: Value| ToolCall {
+            id: "call".into(),
+            name: name.into(),
+            arguments_json: arguments.to_string(),
+        };
+        let limits = Default::default();
+        let history = call(READ_MEMORY_HISTORY, json!({"memory_id":"mem1"}));
+        match parse_with_limits(&history, &limits, &references).unwrap() {
+            ParsedDataCall::ReadMemoryHistory(request) => assert_eq!(request.memory_id, native),
+            _ => panic!("history request"),
+        }
+        let forget = call(
+            MANAGE_MEMORIES,
+            json!({"operation":"forget","memory_id":"mem1","expected_revision":1}),
+        );
+        let targets = forget_batch(std::slice::from_ref(&forget), &references)
+            .unwrap()
+            .unwrap();
+        assert_eq!(targets[0].memory_id, native);
+        match parse_with_limits(&forget, &limits, &references).unwrap() {
+            ParsedDataCall::ManageMemory(MemoryWriteRequest::Forget { memory_id, .. }) => {
+                assert_eq!(memory_id, native)
+            }
+            _ => panic!("forget request"),
+        }
+        for unknown in [
+            call(READ_MEMORY_HISTORY, json!({"memory_id":"mem9"})),
+            call(
+                MANAGE_MEMORIES,
+                json!({"operation":"forget","memory_id":"mem9","expected_revision":1}),
+            ),
+        ] {
+            assert!(parse_with_limits(&unknown, &limits, &references).is_err());
+        }
+        assert!(
+            forget_batch(
+                &[call(
+                    MANAGE_MEMORIES,
+                    json!({"operation":"forget","memory_id":"mem9","expected_revision":1}),
+                )],
+                &references
+            )
+            .is_err()
+        );
     }
 }

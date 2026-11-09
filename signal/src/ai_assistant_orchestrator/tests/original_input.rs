@@ -4593,8 +4593,17 @@ async fn owner_memory_turn(update: bool, device_id: &'static str) {
             let mut arguments = json!({"operation":"remember","content":"The owner prefers concise Chinese replies"});
             if let Some(target) = &target {
                 let request:Value = serde_json::from_slice(body).unwrap();
-                assert!(request["messages"].to_string().contains(target), "the update target must be observed by the real model");
-                arguments["operation"] = json!("update"); arguments["memory_id"] = json!(target);
+                let alias = {
+                            let messages = &request["messages"];
+                            assert!(!messages.to_string().contains(target), "the wire shows the alias, not the native id");
+                            messages.as_array().unwrap().iter()
+                                .filter_map(|message| serde_json::from_str::<Value>(message["content"].as_str()?).ok())
+                                .find_map(|content| content["memories"].as_array().filter(|memories| memories.len() == 1)
+                                    .and_then(|memories| memories[0]["memory_id"].as_str().map(str::to_owned)))
+                                .filter(|alias| alias.starts_with("mem"))
+                                .expect("the update target is observed as a current-memory alias")
+                        };
+                arguments["operation"] = json!("update"); arguments["memory_id"] = json!(alias);
                 arguments["expected_revision"] = json!(1);
             }
             memory_sse(json!({"tool_calls":[{"index":0,"id":"owner-memory-write","type":"function","function":{

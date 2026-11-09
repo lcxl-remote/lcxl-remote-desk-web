@@ -246,7 +246,7 @@ fn is_schedule_result(message: &ChatMessage) -> bool {
 }
 
 /// Durable record fields shown to the model and their alias prefixes.
-const RECORD_FIELDS: &[(&str, &str)] = &[("schedule_id", "sc")];
+const RECORD_FIELDS: &[(&str, &str)] = &[("schedule_id", "sc"), ("memory_id", "mem")];
 /// Per-prefix limit for record aliases whose showing messages are gone.
 const MAX_RECORD_ALIASES: usize = 256;
 
@@ -257,8 +257,9 @@ fn record_alias_shape(id: &str) -> bool {
     })
 }
 
-/// Visits record ids at their known result locations: top-level fields and
-/// entries of a `tasks` list. The visitor may return an alias to replace the id.
+/// Visits record ids at their known result locations: top-level fields, the
+/// `memory` object and entries of `tasks` or `memories` lists. The visitor may
+/// return an alias to replace the id.
 fn visit_record_ids(value: &mut Value, visitor: &mut impl FnMut(&str, &str) -> Option<String>) {
     fn fields(value: &mut Value, visitor: &mut impl FnMut(&str, &str) -> Option<String>) {
         let Some(object) = value.as_object_mut() else {
@@ -274,9 +275,14 @@ fn visit_record_ids(value: &mut Value, visitor: &mut impl FnMut(&str, &str) -> O
         }
     }
     fields(value, visitor);
-    if let Some(tasks) = value.get_mut("tasks").and_then(Value::as_array_mut) {
-        for task in tasks {
-            fields(task, visitor);
+    if let Some(memory) = value.get_mut("memory") {
+        fields(memory, visitor);
+    }
+    for list in ["tasks", "memories"] {
+        if let Some(items) = value.get_mut(list).and_then(Value::as_array_mut) {
+            for item in items {
+                fields(item, visitor);
+            }
         }
     }
 }
@@ -451,6 +457,7 @@ impl UiReferenceState {
                 return Err(error);
             }
             if data_tool.is_some() {
+                self.observe_records(&value, &message.message_id)?;
                 self.observe_conversations(
                     &value,
                     ReferenceSource::Message(message.message_id.clone()),
@@ -1004,6 +1011,66 @@ impl UiReferenceState {
         });
     }
 
+    /// Registers records that the model sees outside any conversation message,
+    /// such as current memory facts. Returns whether the table changed.
+    pub(crate) fn register_records<'a>(
+        &mut self,
+        field: &str,
+        natives: impl Iterator<Item = &'a str>,
+    ) -> Result<bool, AgentError> {
+        let prefix = RECORD_FIELDS
+            .iter()
+            .find(|(name, _)| *name == field)
+            .expect("known record field")
+            .1;
+        let before = self.entries.len();
+        for native in natives {
+            let reference = serde_json::json!({ field: native });
+            if self.exact_alias(prefix, native, &reference).is_none() {
+                self.register_entry(prefix, native.into(), &reference, ReferenceSource::Record)?;
+            }
+        }
+        Ok(self.entries.len() != before)
+    }
+
+    /// Aliases of the given records, used to protect them from recycling.
+    pub(crate) fn record_aliases<'a>(
+        &self,
+        field: &str,
+        natives: impl Iterator<Item = &'a str>,
+    ) -> BTreeSet<String> {
+        let prefix = RECORD_FIELDS
+            .iter()
+            .find(|(name, _)| *name == field)
+            .expect("known record field")
+            .1;
+        natives
+            .filter_map(|native| self.alias(prefix, native, None).map(str::to_owned))
+            .collect()
+    }
+
+    /// Presents current memory facts with their record aliases.
+    pub(crate) fn project_current_memories(&self, message: &mut ChatMessage) {
+        if !crate::ai_assistant::current_memory::is_projection(message) {
+            return;
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(&message.text) else {
+            return;
+        };
+        if let Some(memories) = value.get_mut("memories").and_then(Value::as_array_mut) {
+            for memory in memories {
+                if let Some(id) = memory.get_mut("memory_id")
+                    && let Some(alias) = id
+                        .as_str()
+                        .and_then(|native| self.alias("mem", native, None))
+                {
+                    *id = Value::String(alias.into());
+                }
+            }
+        }
+        message.text = value.to_string();
+    }
+
     fn observe_records(&mut self, value: &Value, message: &str) -> Result<(), AgentError> {
         let mut found = Vec::new();
         let mut copy = value.clone();
@@ -1432,6 +1499,7 @@ impl UiReferenceState {
             }
             crate::ui_model_output::expand_value(&mut value);
             if crate::assistant_data_model::tool(message).is_some() {
+                self.project_records(&mut value, &source);
                 self.project_conversations(&mut value, &source);
             }
             self.shorten_value(&mut value, Some(&source));
@@ -2183,6 +2251,55 @@ mod record_tests {
             .observe(&[schedule_result("again", &[schedule(1)])])
             .unwrap();
         assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn memory_results_and_current_facts_share_one_alias() {
+        let native = crate::native_ids::stable(crate::native_ids::Kind::Memory, &"fact");
+        let mut state = UiReferenceState::default();
+        // A current fact registers before any result shows it.
+        assert!(
+            state
+                .register_records("memory_id", std::iter::once(native.as_str()))
+                .unwrap()
+        );
+        assert!(
+            !state
+                .register_records("memory_id", std::iter::once(native.as_str()))
+                .unwrap()
+        );
+        let call = ChatMessage::assistant_tool_calls(
+            "caller",
+            "",
+            vec![crate::chat::ToolCallRef {
+                id: "search".into(),
+                name: crate::ai_assistant::data_tools::SEARCH_MEMORIES.into(),
+                arguments_json: "{}".into(),
+            }],
+        );
+        let text = serde_json::json!({"memories":[{"memory_id": native}]}).to_string();
+        let mut result = schedule_result("found", &[]);
+        result.tool_call_id = Some("search".into());
+        result.text = text.clone();
+        result.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            result.data_envelope.as_ref(),
+            "found",
+            &text,
+            crate::ai_assistant::data_tools::SEARCH_MEMORIES,
+        )
+        .unwrap();
+        state.observe(&[call, result.clone()]).unwrap();
+        assert_eq!(state.entries.len(), 1);
+        let mut projected = result;
+        state.project_message(&mut projected);
+        let shown: Value = serde_json::from_str(&projected.text).unwrap();
+        assert_eq!(shown["memories"][0]["memory_id"], "mem1");
+        assert_eq!(state.expand_record_id("mem", "mem1").unwrap(), native);
+        assert!(state.expand_record_id("sc", "mem1").is_err());
+        assert_eq!(
+            state.record_aliases("memory_id", std::iter::once(native.as_str())),
+            BTreeSet::from(["mem1".to_owned()])
+        );
     }
 
     #[test]

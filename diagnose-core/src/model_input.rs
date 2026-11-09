@@ -544,8 +544,15 @@ fn string_example(schema: &Value) -> Value {
     let pattern = schema["pattern"].as_str().unwrap_or("");
     let mut value = if pattern.contains("[0-9a-f]{64}") {
         "0".repeat(64)
-    } else if pattern == "^sc[1-9][0-9]{0,13}$" {
-        "sc1".into()
+    } else if let Some(prefix) = pattern
+        .strip_prefix('^')
+        .and_then(|rest| {
+            rest.strip_suffix("[1-9][0-9]{0,13}$")
+                .or(rest.strip_suffix("[1-9][0-9]{0,12}$"))
+        })
+        .filter(|prefix| prefix.bytes().all(|b| b.is_ascii_lowercase()))
+    {
+        format!("{prefix}1")
     } else if pattern.starts_with("^https://") || pattern.starts_with("^https?://") {
         "https://example.invalid/".into()
     } else if pattern.starts_with("^Merged!") {

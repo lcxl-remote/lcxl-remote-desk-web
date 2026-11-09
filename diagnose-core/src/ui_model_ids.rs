@@ -908,6 +908,9 @@ pub(crate) fn project_model_message(
         project_review_message(message, references, locators);
     }
     project_result_view(message, references);
+    if let Some(references) = references {
+        references.project_current_memories(message);
+    }
     crate::result_model_ids::project_runtime_registry(message, locators);
     for call in &mut message.tool_calls {
         if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {

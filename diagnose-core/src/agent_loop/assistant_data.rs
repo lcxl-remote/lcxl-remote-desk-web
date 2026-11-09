@@ -454,7 +454,7 @@ async fn invoke(
         .as_ref()
         .ok_or_else(|| invalid("missing assistant data policy snapshot"))?
         .limits;
-    let arguments = data_tools::parse_with_limits(call, limits)?;
+    let arguments = data_tools::parse_with_limits(call, limits, &session.ui_references)?;
     let context = AssistantDataCall {
         session,
         tool_call: call,

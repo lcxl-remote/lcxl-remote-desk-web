@@ -121,7 +121,7 @@ impl Frame {
             .unwrap();
         let mut session = Box::new(PersistedAgentSession::decode_json(&row.state_json).unwrap());
         let calls = make_calls(&store, &session).await;
-        let control_targets = data_tools::forget_batch(&calls)
+        let control_targets = data_tools::forget_batch(&calls, &Default::default())
             .ok()
             .flatten()
             .unwrap_or_default();

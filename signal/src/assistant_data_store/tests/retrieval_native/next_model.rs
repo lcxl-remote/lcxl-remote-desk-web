@@ -268,7 +268,7 @@ impl Frame {
             .iter()
             .map(|call| data_tools::parse(call).ok())
             .collect();
-        self.control_targets = data_tools::forget_batch(&calls)
+        self.control_targets = data_tools::forget_batch(&calls, &Default::default())
             .ok()
             .flatten()
             .unwrap_or_default();

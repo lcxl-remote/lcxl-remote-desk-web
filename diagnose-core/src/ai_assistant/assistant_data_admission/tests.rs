@@ -509,6 +509,7 @@ fn memory_control_binds_the_complete_original_batch_input_sequence_and_call_mess
                 arguments_json: call.arguments_json.clone(),
             })
             .collect::<Vec<_>>(),
+        &Default::default(),
     )
     .unwrap()
     .unwrap();
@@ -570,7 +571,11 @@ fn memory_control_binds_the_complete_original_batch_input_sequence_and_call_mess
 #[test]
 fn model_boundary_rejects_mixed_and_duplicate_forget_batches() {
     for fixture in [Fixture::new(), Fixture::memory_write()] {
-        assert!(data_tools::forget_batch(&[fixture.call]).unwrap().is_none());
+        assert!(
+            data_tools::forget_batch(&[fixture.call], &Default::default())
+                .unwrap()
+                .is_none()
+        );
     }
     let first = forget_call("first", 1);
     let read = ToolCall {
@@ -581,6 +586,6 @@ fn model_boundary_rejects_mixed_and_duplicate_forget_batches() {
     let mut duplicate = first.clone();
     duplicate.id = "duplicate".into();
     for calls in [vec![first.clone(), read], vec![first, duplicate]] {
-        assert!(data_tools::forget_batch(&calls).is_err());
+        assert!(data_tools::forget_batch(&calls, &Default::default()).is_err());
     }
 }
