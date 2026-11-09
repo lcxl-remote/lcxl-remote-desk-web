@@ -12,6 +12,10 @@ pub(super) fn cleanup_worker_socket_paths(socket_path: &str) {
     }
 }
 
+/// `sun_path` capacity on macOS; Linux allows 108, so this bound covers both.
+#[cfg(not(target_os = "windows"))]
+const MAX_SOCKET_PATH_BYTES: usize = 104;
+
 #[cfg(not(target_os = "windows"))]
 pub(super) fn allocate_worker_socket_path(
     session_id: u32,
@@ -31,7 +35,9 @@ pub(super) fn allocate_worker_socket_path_for(
     let runtime_root = if effective_uid == 0 {
         std::path::PathBuf::from("/run/lcxl-remote-desk/workers")
     } else {
-        std::env::temp_dir().join(format!("lcxl-remote-desk-{effective_uid}/workers"))
+        // Keep the name short: macOS per-user temp directories are long and a
+        // Unix socket path must fit `sun_path` (104 bytes on macOS).
+        std::env::temp_dir().join(format!("lcxl-rd-{effective_uid}"))
     };
     std::fs::create_dir_all(&runtime_root)?;
     std::fs::set_permissions(&runtime_root, std::fs::Permissions::from_mode(0o700))?;
@@ -45,7 +51,13 @@ pub(super) fn allocate_worker_socket_path_for(
         return Err(format!("unsafe worker runtime directory {}", runtime_root.display()).into());
     }
 
-    let worker_dir = runtime_root.join(format!("session-{session_id}-{}", uuid::Uuid::new_v4()));
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let worker_dir = runtime_root.join(format!("s{session_id}-{}", &nonce[..12]));
+    // The longest socket in the directory is the media sibling.
+    let longest = worker_dir.join("event.sock-media");
+    if longest.as_os_str().len() >= MAX_SOCKET_PATH_BYTES {
+        return Err(format!("worker socket path is too long: {}", longest.display()).into());
+    }
     std::fs::create_dir(&worker_dir)?;
     std::fs::set_permissions(&worker_dir, std::fs::Permissions::from_mode(0o700))?;
     if let Some((uid, gid)) = owner {

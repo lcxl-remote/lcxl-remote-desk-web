@@ -742,7 +742,8 @@ pub(super) async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed
     // No worker is installed, so the dispatch fails before the worker ran.
     match read_fleet_result(&mut rx).disposition {
         EdgeExecDisposition::DispatchFailedBeforeWorker { error } => {
-            assert!(error.message.contains("worker unavailable"), "{error:?}");
+            assert_eq!(error.kind, AgentErrorKind::SessionUnavailable, "{error:?}");
+            assert!(error.message.contains("No active worker"), "{error:?}");
         }
         other => panic!("expected DispatchFailedBeforeWorker, got {other:?}"),
     }
@@ -788,7 +789,8 @@ pub(super) async fn assistant_switch_rejects_agentic_exec_without_blocking_fleet
 
     match read_fleet_result(&mut rx).disposition {
         EdgeExecDisposition::DispatchFailedBeforeWorker { error } => {
-            assert!(error.message.contains("worker unavailable"), "{error:?}");
+            assert_eq!(error.kind, AgentErrorKind::SessionUnavailable, "{error:?}");
+            assert!(error.message.contains("No active worker"), "{error:?}");
         }
         other => panic!("expected fleet dispatch attempt, got {other:?}"),
     }

@@ -151,7 +151,8 @@ async fn reused_approval_credentials_survive_reload_and_runtime_database_rebuild
             .as_deref(),
         Some("synthetic-main-key")
     );
-    assert!(!reloaded.global_config.approval_gateway.enabled);
+    // Reuse copies credentials only; the approval gateway keeps its default enabled state.
+    assert!(reloaded.global_config.approval_gateway.enabled);
     assert_eq!(
         reloaded
             .global_config

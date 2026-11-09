@@ -37,9 +37,17 @@ pub(super) async fn make_ctx_with_attached_supervisor() -> (
             "SWD\\Test\\Test",
         );
     ctx.virtual_display = Some(std::sync::Arc::new(supervisor));
-    // Seed the source PC with a deterministic epoch. Terminal display
-    // commands are connection-scoped and are rejected when either the
-    // source PC or its epoch is absent.
+    seed_display_source(&ctx).await;
+    // Wire a mock IPC sink so send_to_worker has somewhere to go.
+    let (ipc_tx, ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+    ctx.worker_mgr.install_active_for_test(ipc_tx).await;
+    (ctx, rx, ipc_rx)
+}
+
+/// Seed the source PC with a deterministic epoch. Terminal display commands
+/// are connection-scoped and are rejected when either the source PC or its
+/// epoch is absent.
+pub(super) async fn seed_display_source(ctx: &RouterContext) {
     let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
         session_target_id: None,
         requested_wayland_control_mode: Some("auto".to_string()),
@@ -58,10 +66,6 @@ pub(super) async fn make_ctx_with_attached_supervisor() -> (
         .await
         .expect("seed display source PC");
     pc.write().await.connection_epoch = TEST_CONNECTION_EPOCH.to_string();
-    // Wire a mock IPC sink so send_to_worker has somewhere to go.
-    let (ipc_tx, ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
-    ctx.worker_mgr.install_active_for_test(ipc_tx).await;
-    (ctx, rx, ipc_rx)
 }
 
 /// Variant of `make_ctx` that hands the caller a fresh
@@ -1801,6 +1805,7 @@ pub(super) fn classify_change_display_settings_is_worker_owned() {
 #[tokio::test]
 pub(super) async fn route_returns_error_when_supervisor_is_none() {
     let (ctx, mut rx) = make_ctx_with_rx().await;
+    seed_display_source(&ctx).await;
     let model = make_change_display_settings_model(
         "req-1",
         ChangeDisplaySettingsPayload {
@@ -1830,6 +1835,7 @@ pub(super) async fn route_returns_error_when_supervisor_is_none() {
 #[tokio::test]
 pub(super) async fn route_returns_error_when_toggle_off() {
     let (mut ctx, mut rx) = make_ctx_with_rx().await;
+    seed_display_source(&ctx).await;
     ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
         ctx.worker_mgr.clone(),
     )));
@@ -1861,6 +1867,7 @@ pub(super) async fn route_returns_error_when_toggle_off() {
 #[tokio::test]
 pub(super) async fn route_returns_error_when_supervisor_inactive() {
     let (mut ctx, mut rx) = make_ctx_with_rx().await;
+    seed_display_source(&ctx).await;
     ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
         ctx.worker_mgr.clone(),
     )));

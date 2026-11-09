@@ -1449,7 +1449,10 @@ fn private_test_directory() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
-    builder.tempdir().unwrap()
+    // State paths reject symlinked parents; macOS `/var` is a symlink, so use
+    // the canonical temp location.
+    let root = std::env::temp_dir().canonicalize().unwrap();
+    builder.tempdir_in(root).unwrap()
 }
 
 #[cfg(test)]
