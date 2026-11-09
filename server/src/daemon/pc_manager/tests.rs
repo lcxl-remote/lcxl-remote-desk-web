@@ -398,18 +398,17 @@ fn default_daemon_ice_timeouts_match_recovery_budget() {
     const WEBRTC_DEFAULT_DISCONNECTED_SECS: u64 = 5;
     const WEBRTC_DEFAULT_FAILED_SECS: u64 = 25;
 
-    assert!(
-        DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS <= WEBRTC_DEFAULT_DISCONNECTED_SECS,
-        "DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS must not exceed the \
-             webrtc-rs default ({WEBRTC_DEFAULT_DISCONNECTED_SECS}s); \
-             got {DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS}s",
-    );
-    assert!(
-        DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS < WEBRTC_DEFAULT_FAILED_SECS,
-        "DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS must be strictly less than \
-             the webrtc-rs default ({WEBRTC_DEFAULT_FAILED_SECS}s); \
-             got {DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS}s",
-    );
+    // Constants only: checked at compile time.
+    const {
+        assert!(
+            DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS <= WEBRTC_DEFAULT_DISCONNECTED_SECS,
+            "DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS must not exceed the webrtc-rs default"
+        );
+        assert!(
+            DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS < WEBRTC_DEFAULT_FAILED_SECS,
+            "DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS must be strictly less than the webrtc-rs default"
+        );
+    }
 
     let total =
         DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS + DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS;

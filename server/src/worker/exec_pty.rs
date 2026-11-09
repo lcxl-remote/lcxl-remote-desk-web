@@ -6,7 +6,8 @@
 //! approved execution.
 
 use std::sync::Arc;
-#[cfg(unix)]
+// Only the Linux PTY runner polls descriptors directly.
+#[cfg(target_os = "linux")]
 #[path = "exec_pty_io_unix.rs"]
 pub(crate) mod native_io;
 

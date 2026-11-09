@@ -99,7 +99,7 @@ pub fn collect(params: &ServiceStatusParams) -> Result<ServiceStatusOutput, Agen
 /// Map a Win32 `SERVICE_STATUS_CURRENT_STATE` code to a stable lowercase
 /// label. Shared by the single-service and bulk-enumeration paths so both
 /// report identical strings. Platform-agnostic for unit testing.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn state_label(raw: u32) -> String {
     match raw {
         1 => "stopped",
@@ -116,6 +116,7 @@ fn state_label(raw: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
     #[cfg(windows)]
     #[test]

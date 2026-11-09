@@ -703,6 +703,8 @@ impl WorkerManager {
     /// Mint an independently fenced identity for one keyed resident worker.
     /// Unlike the legacy adapter, starting one resident must not supersede any
     /// other session's lanes.
+    // Resident workers run on Linux and Windows; tests install them directly.
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     fn mint_resident_worker(&self, key: WorkerKey) -> WorkerMessageSink {
         let incarnation = WorkerIncarnation(self.next_incarnation.fetch_add(1, Ordering::Relaxed));
         let current = self
@@ -1249,6 +1251,7 @@ impl WorkerManager {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     async fn stop_resident_worker(&self, key: &WorkerKey) {
         let worker = self.inner.lock().await.resident_workers.remove(key);
         let Some(mut worker) = worker else {

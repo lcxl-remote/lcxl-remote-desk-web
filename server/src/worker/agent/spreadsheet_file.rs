@@ -1356,9 +1356,11 @@ fn inspect_xlsx(
         if file.size() > MAX_XML_BYTES && name.ends_with(".xml") {
             return Err(invalid("selected .xlsx contains an oversized XML part"));
         }
-        if name == "xl/vbaproject.bin" || name.starts_with("xl/externallinks/") {
-            unsupported_features.push(name);
-        } else if name == "xl/connections.xml" || name.starts_with("xl/querytables/") {
+        if name == "xl/vbaproject.bin"
+            || name.starts_with("xl/externallinks/")
+            || name == "xl/connections.xml"
+            || name.starts_with("xl/querytables/")
+        {
             unsupported_features.push(name);
         }
     }

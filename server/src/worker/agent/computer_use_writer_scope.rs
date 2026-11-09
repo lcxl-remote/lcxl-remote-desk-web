@@ -94,7 +94,7 @@ mod tests {
             );
             for other in [
                 ComputerUseAdapterRef {
-                    kind: adapter.kind.clone(),
+                    kind: adapter.kind,
                     version: "live/v1".into(),
                 },
                 ComputerUseAdapterRef {

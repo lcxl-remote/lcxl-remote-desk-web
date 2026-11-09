@@ -331,6 +331,7 @@ impl Settings {
         // stable and retained.
         let lock_file = std::fs::File::options()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(store.paths().config_lock_file())?;

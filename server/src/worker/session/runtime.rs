@@ -899,6 +899,8 @@ impl WorkerSession {
                                         None => warn!("Wayland Portal authorize command received without a Wayland broker"),
                                     }
                                     #[cfg(not(target_os = "linux"))]
+                                    let _ = payload;
+                                    #[cfg(not(target_os = "linux"))]
                                     warn!("Wayland Portal authorize command ignored on this platform");
                                 }
                                 ServiceToWorker::CancelWaylandPortal(payload) => {
@@ -908,6 +910,8 @@ impl WorkerSession {
                                             .cancel(&payload.operation_id, payload.generation)
                                             .await;
                                     }
+                                    #[cfg(not(target_os = "linux"))]
+                                    let _ = payload;
                                     #[cfg(not(target_os = "linux"))]
                                     warn!("Wayland Portal cancel command ignored on this platform");
                                 }

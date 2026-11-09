@@ -414,6 +414,7 @@ pub(super) fn launch_worker_as_user(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::*;
 
     #[cfg(target_os = "linux")]

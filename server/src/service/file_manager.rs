@@ -364,7 +364,6 @@ mod tests {
         let req = DeleteFileRequest {
             file_path: file_path.to_string_lossy().to_string(),
             delete_permanently: Some(true),
-            ..Default::default()
         };
 
         let result = delete_file(req).await;

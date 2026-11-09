@@ -517,7 +517,7 @@ impl ResponseError for DeskError {
                 .json(RestResponse::failed_with_data(
                     error_code,
                     Some(self.to_string()),
-                    Some(reason.clone()),
+                    Some(*reason),
                 ));
         }
         // write as json

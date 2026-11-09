@@ -2115,7 +2115,6 @@ mod tests {
         let query = UiInspectQuery {
             element_id: None,
             queries: vec!["AXStaticText".into()],
-            ..Default::default()
         };
         let found = collect_application_selection(
             app.process_id,
@@ -2160,7 +2159,6 @@ mod tests {
         let query = UiInspectQuery {
             element_id: None,
             queries: identified.native_id.clone().into_iter().collect(),
-            ..Default::default()
         };
         let by_id = collect_application_selection(
             app.process_id,
@@ -2183,7 +2181,6 @@ mod tests {
         let query = UiInspectQuery {
             element_id: None,
             queries: vec!["nonexistent-precise-query".into()],
-            ..Default::default()
         };
         assert!(
             collect_application_selection(

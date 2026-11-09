@@ -1030,7 +1030,13 @@ impl ComputerUseBroker {
         }
         #[cfg(not(windows))]
         {
-            let _ = (process_id, selected_display, action);
+            let _ = (
+                process_id,
+                selected_display,
+                action,
+                window_handle,
+                process_started_at,
+            );
             Err(error(
                 AgentErrorKind::UnsupportedCapability,
                 "the raw-input beta adapter is not enabled on this platform",
@@ -1075,7 +1081,13 @@ impl ComputerUseBroker {
         }
         #[cfg(not(windows))]
         {
-            let _ = (process_id, selected_display, action);
+            let _ = (
+                process_id,
+                selected_display,
+                action,
+                window_handle,
+                process_started_at,
+            );
             Err(error(
                 AgentErrorKind::UnsupportedCapability,
                 "the raw-input beta adapter is not enabled on this platform",
@@ -4597,7 +4609,6 @@ mod tests {
         let q = desk_agent_protocol::computer_use::UiInspectQuery {
             element_id: None,
             queries: vec!["missing".into(), "button".into()],
-            ..Default::default()
         };
         assert!(ui_query_matches(Some(&q), &tree.nodes[2]));
         let q = desk_agent_protocol::computer_use::UiInspectQuery {
@@ -5636,10 +5647,12 @@ mod tests {
     fn reference_ttl_covers_readiness_cache_and_model_request_windows() {
         const MODEL_REQUEST_TIMEOUT_SECS: i64 = 180;
 
-        assert!(
-            OBJECT_REF_TTL_SECS > READINESS_VALIDITY_SECS + MODEL_REQUEST_TIMEOUT_SECS,
-            "an advertised context reference must survive until the first model tool call"
-        );
+        const {
+            assert!(
+                OBJECT_REF_TTL_SECS > READINESS_VALIDITY_SECS + MODEL_REQUEST_TIMEOUT_SECS,
+                "an advertised context reference must survive until the first model tool call"
+            );
+        }
     }
 
     #[test]

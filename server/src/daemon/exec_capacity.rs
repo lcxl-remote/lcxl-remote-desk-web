@@ -240,9 +240,9 @@ mod tests {
             daemon_pty: false,
         };
         assert!(cap.bind("generation", binding.clone()).is_err());
-        assert_eq!(cap.try_admit("generation", 1, T).unwrap(), true);
+        assert!(cap.try_admit("generation", 1, T).unwrap());
         cap.bind("generation", binding.clone()).unwrap();
-        assert_eq!(cap.try_admit("generation", 1, T).unwrap(), false);
+        assert!(!cap.try_admit("generation", 1, T).unwrap());
         assert_eq!(
             cap.binding_for_owner("generation", Some("browser")),
             Some(binding.clone())
