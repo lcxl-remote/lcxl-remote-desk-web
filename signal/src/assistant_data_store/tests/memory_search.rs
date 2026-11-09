@@ -18,7 +18,7 @@ use desk_agent_protocol::ai_assistant::{
 };
 use desk_diagnose_core::{
     ai_assistant::{
-        data_access::{AssistantDataToolAccess, scope_sha256},
+        data_access::{AssistantDataToolAccess, assistant_scope},
         data_tools,
         history::serialized_tool_response_bytes,
         retrieval::index_source,
@@ -498,7 +498,7 @@ async fn the_original_observation_and_memory_device_rule_are_enforced_before_bod
         memory_state_generation: data.memory_state_generation,
     };
     let devices = BTreeSet::from([data.source_device_ref.clone()]);
-    let hash = scope_sha256(&frame.session).unwrap();
+    let admitted = assistant_scope(&frame.session).unwrap();
     let version = QuerySourceVersion {
         source_id: row.memory_id,
         revision: row.revision as u64,
@@ -506,7 +506,7 @@ async fn the_original_observation_and_memory_device_rule_are_enforced_before_bod
     let mut authority = MemoryReadAuthorization {
         actor_id: "1",
         current_device_ref: &data.source_device_ref,
-        scope_sha256: &hash,
+        assistant_scope: &admitted,
         scope,
         access: &access,
         platform: &policy,
@@ -636,7 +636,7 @@ async fn storage_views_apply_original_device_consent_and_keep_pending_facts_out_
     let all_devices =
         BTreeSet::from([original_a.device_ref.clone(), original_b.device_ref.clone()]);
     let current_device = BTreeSet::from([original_a.device_ref.clone()]);
-    let hash = "b".repeat(64);
+    let admitted = desk_diagnose_core::ai_assistant::data_access::AssistantScope::default();
     let destination = super::model_sources::destination("model");
     let version = QuerySourceVersion {
         source_id: row.memory_id.clone(),
@@ -645,7 +645,7 @@ async fn storage_views_apply_original_device_consent_and_keep_pending_facts_out_
     let mut authority = MemoryReadAuthorization {
         actor_id: "1",
         current_device_ref: &original_a.device_ref,
-        scope_sha256: &hash,
+        assistant_scope: &admitted,
         scope: &scope,
         access: &access,
         platform: &policy,
@@ -827,12 +827,12 @@ async fn one_thousand_independent_facts_keep_sparse_retrieval_bounded_and_readab
     )
     .unwrap()
     .unwrap();
-    let hash = "b".repeat(64);
+    let admitted = desk_diagnose_core::ai_assistant::data_access::AssistantScope::default();
     let destination = super::model_sources::destination("model");
     let authority = MemoryReadAuthorization {
         actor_id: "1",
         current_device_ref: device,
-        scope_sha256: &hash,
+        assistant_scope: &admitted,
         scope: &scope,
         access: &access,
         platform: &policy,

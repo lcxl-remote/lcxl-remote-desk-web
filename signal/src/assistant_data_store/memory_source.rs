@@ -18,7 +18,7 @@ use desk_agent_protocol::ai_assistant::{
 };
 use desk_diagnose_core::{
     ai_assistant::{
-        data_access::scope_sha256,
+        data_access::assistant_scope,
         data_control::CurrentMemoryUse,
         memory_access::usable_memory_scope,
         retrieval_response::ToolReplyBudget,
@@ -179,11 +179,12 @@ async fn source_on(
     let scope =
         usable_memory_scope(fence.context.session, now).ok_or(AssistantStoreError::Inaccessible)?;
     let devices = memory_view::retrieval_devices_on(db, fence, now).await?;
-    let scope_hash = scope_sha256(fence.context.session).map_err(AssistantStoreError::Invalid)?;
+    let current_scope =
+        assistant_scope(fence.context.session).map_err(AssistantStoreError::Invalid)?;
     let authority = MemoryReadAuthorization {
         actor_id: actor,
         current_device_ref: &data.source_device_ref,
-        scope_sha256: &scope_hash,
+        assistant_scope: &current_scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,
@@ -263,7 +264,7 @@ async fn source_on(
         source_envelope_id: "assistant-memory-evidence".into(),
         purpose: SourceReadPurpose::MemoryEvidence,
         retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-        scope_sha256: scope_hash,
+        scope: current_scope,
         policy_revision: fence.access.policy_revision,
         control_generation: fence.access.control_generation,
         memory_state_generation: fence.access.memory_state_generation,

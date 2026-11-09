@@ -355,7 +355,6 @@ pub(super) async fn insert_provider_usage(
         envelope_ids_json: Set("[]".into()),
         input_lineage_json: Set("[]".into()),
         input_snapshot_json: Set("{}".into()),
-        projection_digest_sha256: Set("digest".into()),
         total_bytes: Set(100),
         state: Set("dispatch_intent".into()),
         authorized_at: Set(start),

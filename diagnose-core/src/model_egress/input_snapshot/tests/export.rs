@@ -1,10 +1,7 @@
 use super::*;
 use crate::{
-    chat::{ChatMessage, ModelTurn, StopReason, ToolCall},
-    model_egress::{
-        AuthorizedModelRequest, ModelEgressPolicy, NativeModelOutputEvidence,
-        NativeModelOutputSources,
-    },
+    chat::{ChatMessage, ToolCall},
+    model_egress::{AuthorizedModelRequest, ModelEgressPolicy},
     model_message_labels::{ReadResultLabel, read_result_envelope},
     prompt::ResponseFormatSpec,
     seam::{ModelRequest, ToolOutputFormat, ToolRunOutput},
@@ -131,49 +128,6 @@ fn native_export_metadata_rejects_identity_content_constraint_and_recipient_repl
         }
         assert!(changed.fingerprint().is_err(), "case {case}");
     }
-}
-
-#[test]
-fn original_background_changes_are_bound_even_when_the_projected_body_and_thin_lineage_do_not_change()
- {
-    let (policy, authorized, _) = authorized(true);
-    let snapshot = authorized.input_snapshot().unwrap();
-    let inputs =
-        project_model_input_lineage(&authorized.audit, &authorized.input_envelopes).unwrap();
-    let output = policy
-        .derive_model_output_envelope(
-            &ModelTurn {
-                text: "Research conclusion".into(),
-                stop_reason: StopReason::EndTurn,
-                ..Default::default()
-            },
-            &authorized.input_envelopes,
-        )
-        .unwrap();
-    let evidence = NativeModelOutputEvidence::from_receipt(
-        "physical",
-        "root",
-        "actual-export",
-        100,
-        200,
-        &authorized.audit,
-        &inputs,
-        &snapshot,
-        &output,
-    )
-    .unwrap();
-    let mut changed = snapshot;
-    changed.exports[0].source.provenance.source_envelope_ids = vec!["different-background".into()];
-    assert_ne!(
-        changed.fingerprint().unwrap(),
-        evidence.input_snapshot_sha256
-    );
-    let sources = NativeModelOutputSources {
-        evidence,
-        inputs,
-        input_snapshot: changed,
-    };
-    assert!(sources.validate(&output).is_err());
 }
 
 #[test]

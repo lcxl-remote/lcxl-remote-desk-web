@@ -118,7 +118,7 @@ fn candidate_identity_is_not_a_proof_and_unselected_session_caches_do_not_become
         source_envelope_id: envelope.envelope_id.clone(),
         purpose: SourceReadPurpose::ModelMemory,
         retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-        scope_sha256: "a".repeat(64),
+        scope: Box::default(),
         policy_revision: 1,
         control_generation: 1,
         memory_state_generation: 1,

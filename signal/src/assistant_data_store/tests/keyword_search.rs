@@ -24,7 +24,7 @@ pub(super) struct Frame {
     pub(super) policy: AssistantDataPolicy,
     pub(super) scope: desk_agent_protocol::ai_assistant::history::HistoryAccessScope,
     pub(super) device: String,
-    pub(super) hash: String,
+    pub(super) assistant_scope: desk_diagnose_core::ai_assistant::data_access::AssistantScope,
     pub(super) generation: u64,
     pub(super) destination: desk_agent_protocol::data_lineage::DestinationIdentity,
 }
@@ -49,7 +49,7 @@ impl Frame {
             access,
             scope,
             device: device.into(),
-            hash: "a".repeat(64),
+            assistant_scope: Default::default(),
             policy: AssistantDataPolicy::default(),
             generation: unsigned(
                 runtime_on(&store.db, "1")
@@ -65,7 +65,7 @@ impl Frame {
         HistorySearchAuthorization {
             actor_id: "1",
             current_device_ref: &self.device,
-            scope_sha256: &self.hash,
+            assistant_scope: &self.assistant_scope,
             scope: &self.scope,
             access: &self.access,
             platform: &self.policy,

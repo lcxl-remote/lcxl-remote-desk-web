@@ -240,7 +240,6 @@ pub struct FloorReconciliationPlan {
     pub notice_kind: ContextNoticeKind,
     pub base_state: ModelContextState,
     pub next_state: ModelContextState,
-    pub history_sha256: String,
     pub discarded_through_message_id: String,
 }
 
@@ -248,14 +247,12 @@ pub struct FloorReconciliationPlan {
 pub struct CompressionPlan {
     pub base_state: ModelContextState,
     pub base_session_version: i64,
-    pub history_sha256: String,
     pub policy: PinnedContextPolicy,
     pub planning_options: super::ContextPlanningOptions,
     pub protection: ContextProtectionSet,
     pub policy_key: ContextPolicyKey,
     pub input: CompressionInputV1,
     pub input_canonical_json: String,
-    pub input_projection_sha256: String,
     pub covered_projection_sha256: String,
     pub covered_from_message_id: String,
     pub covered_through_message_id: String,
@@ -628,12 +625,10 @@ fn plan_model_context_inner(
         CompressionPlan {
             base_state: state.clone(),
             base_session_version: session_version,
-            history_sha256: history_sha256(conversation)?,
             policy: policy.clone(),
             planning_options: options,
             protection: protection.clone(),
             policy_key,
-            input_projection_sha256: sha256_hex(input_canonical_json.as_bytes()),
             covered_projection_sha256: sha256_hex(&canonical_bytes(&full_covered_projection)?),
             input,
             input_canonical_json,
@@ -688,11 +683,7 @@ pub fn apply_validated_checkpoint(
     state: &ModelContextState,
     session_version: i64,
 ) -> Result<(ModelContextState, ModelContextView), ModelContextError> {
-    if state != &plan.base_state
-        || session_version != plan.base_session_version
-        || history_sha256(conversation)? != plan.history_sha256
-        || sha256_hex(plan.input_canonical_json.as_bytes()) != plan.input_projection_sha256
-    {
+    if state != &plan.base_state || session_version != plan.base_session_version {
         return Err(ModelContextError::StaleCompressionPlan);
     }
     // Re-run the pure planner from the exact base inputs instead of trusting the
@@ -805,10 +796,9 @@ pub fn apply_validated_checkpoint(
 
 pub fn apply_floor_reconciliation(
     plan: &FloorReconciliationPlan,
-    conversation: &[ChatMessage],
     state: &ModelContextState,
 ) -> Result<ModelContextState, ModelContextError> {
-    if state != &plan.base_state || history_sha256(conversation)? != plan.history_sha256 {
+    if state != &plan.base_state {
         return Err(ModelContextError::StaleCompressionPlan);
     }
     Ok(plan.next_state.clone())
@@ -984,7 +974,6 @@ fn floor_reconciliation_plan(
         notice_kind: ContextNoticeKind::Restricted,
         base_state: state.clone(),
         next_state,
-        history_sha256: history_sha256(conversation)?,
         discarded_through_message_id,
     })
 }
@@ -1399,10 +1388,6 @@ fn summary_json_byte_limit(history_budget: usize) -> usize {
     summary_context_cost_limit(history_budget).saturating_sub(framing) / 2
 }
 
-fn history_sha256(conversation: &[ChatMessage]) -> Result<String, ModelContextError> {
-    Ok(sha256_hex(&canonical_bytes(conversation)?))
-}
-
 fn canonical_json<T: Serialize + ?Sized>(value: &T) -> Result<String, ModelContextError> {
     serde_json::to_string(value)
         .map_err(|error| ModelContextError::InvalidCheckpoint(error.to_string()))
@@ -1684,8 +1669,6 @@ mod tests {
             .text
             .push_str(" tampered after provider dispatch");
         tampered_plan.input_canonical_json = canonical_json(&tampered_plan.input).unwrap();
-        tampered_plan.input_projection_sha256 =
-            sha256_hex(tampered_plan.input_canonical_json.as_bytes());
         assert!(matches!(
             apply_validated_checkpoint(
                 &tampered_plan,
@@ -1942,8 +1925,7 @@ mod tests {
             panic!("expected floor reconciliation");
         };
         assert_eq!(plan.discarded_through_message_id, "bad-tool");
-        let state = apply_floor_reconciliation(&plan, &conversation, &ModelContextState::default())
-            .unwrap();
+        let state = apply_floor_reconciliation(&plan, &ModelContextState::default()).unwrap();
         assert_eq!(
             state.entries[0].floor_group_head_message_id.as_deref(),
             Some("recent")
@@ -2472,8 +2454,7 @@ mod tests {
             panic!("expected discard-only reconciliation for an early oversized group");
         };
         assert_eq!(plan.discarded_through_message_id, "oversized-old");
-        let state = apply_floor_reconciliation(&plan, &conversation, &ModelContextState::default())
-            .unwrap();
+        let state = apply_floor_reconciliation(&plan, &ModelContextState::default()).unwrap();
         let ContextBuildPlan::Ready(ready) = plan_model_context(
             &conversation,
             &state,

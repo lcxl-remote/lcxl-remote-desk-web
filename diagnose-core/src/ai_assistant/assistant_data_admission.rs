@@ -2,7 +2,7 @@
 //! Native receipt reads and current source/task permissions remain host responsibilities.
 
 use super::{
-    data_access::{AssistantDataToolAccess, eligible_origin, scope_sha256},
+    data_access::{AssistantDataToolAccess, assistant_scope, eligible_origin},
     data_tools::ParsedDataCall,
     history::{RetrievalCallKind, search_call_kind},
     memory_access::usable_memory_scope,
@@ -370,7 +370,7 @@ fn persisted_producer<'a>(
         || persisted.focus_epoch != expected.focus_epoch
         || persisted.agent_role != expected.agent_role
         || persisted.assistant_data != expected.assistant_data
-        || scope_sha256(persisted)? != scope_sha256(expected)?
+        || assistant_scope(persisted)? != assistant_scope(expected)?
     {
         return Err("original persisted assistant-data session changed");
     }

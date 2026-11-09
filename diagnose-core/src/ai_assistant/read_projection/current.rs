@@ -4,7 +4,7 @@
 use super::{ReadProjectionKind, ReadProjectionProof, request_sha256};
 use crate::ai_assistant::{
     current_memory::CurrentMemoryPayload,
-    data_access::{AssistantDataToolAccess, eligible_origin, scope_sha256},
+    data_access::{AssistantDataToolAccess, assistant_scope, eligible_origin},
     memory_access::usable_memory_scope,
     seam::AssistantDataReadUse,
 };
@@ -122,7 +122,7 @@ impl ReadProjectionProof {
             source_envelope_id: "pending-current-memory-label".into(),
             purpose: SourceReadPurpose::ModelMemory,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-            scope_sha256: scope_sha256(session)?,
+            scope: assistant_scope(session)?,
             policy_revision: access.policy_revision,
             control_generation: access.control_generation,
             memory_state_generation: access.memory_state_generation,

@@ -16,7 +16,7 @@ use desk_agent_protocol::{
 use desk_diagnose_core::{
     ai_assistant::{
         current_memory::CurrentMemoryPayload,
-        data_access::scope_sha256,
+        data_access::assistant_scope,
         memory_access::{MemoryAccessScope, usable_memory_scope},
         read_projection::{CurrentMemoryPreparation, ReadProjectionKind, ReadProjectionProof},
         retrieval_query::QuerySourceVersion,
@@ -118,7 +118,7 @@ async fn prepare_on(
         return Ok(empty(fence.access.memory_state_generation));
     }
     let scope = usable_memory_scope(session, now).ok_or(AssistantStoreError::Inaccessible)?;
-    let scope_hash = scope_sha256(session).map_err(AssistantStoreError::Invalid)?;
+    let current_scope = assistant_scope(session).map_err(AssistantStoreError::Invalid)?;
     let devices = desk_diagnose_core::future::boxed(|| fact_devices_on(db, session, scope))
         .await?
         .into_iter()
@@ -155,7 +155,7 @@ async fn prepare_on(
     let authority = MemoryReadAuthorization {
         actor_id: &session.actor_id,
         current_device_ref: &scope.current_device_ref,
-        scope_sha256: &scope_hash,
+        assistant_scope: &current_scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,

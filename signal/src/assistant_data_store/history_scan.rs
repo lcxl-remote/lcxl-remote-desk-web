@@ -156,7 +156,7 @@ async fn devices_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         || query.binding.root_conversation_id != context.scope.root_conversation_id
         || query.binding.retrieval_episode_id != context.scope.retrieval_episode_id
         || query.binding.source_device_ref != context.current_device_ref
-        || query.binding.scope_sha256 != context.scope_sha256
+        || *query.binding.scope != *context.assistant_scope
         || query.binding.history_scope.as_deref() != Some(context.scope)
         || &query.binding.destination != context.destination
         || query.snapshot.policy_revision != context.access.policy_revision

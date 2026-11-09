@@ -138,10 +138,6 @@ async fn ready_request_for(
             actor_input_seq: data.current_actor_input_seq,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
             task_id: data.retrieval_task_id.clone(),
-            scope_sha256: desk_diagnose_core::ai_assistant::data_access::scope_sha256(
-                &fixture.session,
-            )
-            .unwrap(),
             policy_revision: usage.policy_revision,
 
             memory_state_generation: data.memory_state_generation,

@@ -87,7 +87,7 @@ async fn read_on(
                 || scope.current_device_refs().contains(device)
         })
         .collect::<BTreeSet<_>>();
-    let authority = read_authority(&fence, &binding.scope_sha256, &devices, now)?;
+    let authority = read_authority(&fence, &binding.scope, &devices, now)?;
     memory_view::validate_context_on(db, &authority).await?;
     let head =
         desk_assistant_data_store::memory_history::head_on(db, &authority, &request.memory_id)
@@ -183,7 +183,7 @@ async fn read_on(
         return Err(AssistantStoreError::Inaccessible);
     };
     let current_revision = *current_revision;
-    let authority = read_authority(&fence, &query.binding.scope_sha256, &devices, now)?;
+    let authority = read_authority(&fence, &query.binding.scope, &devices, now)?;
     let batch = desk_diagnose_core::future::send_phase(|| {
         desk_assistant_data_store::memory_history::scan_on::<_, memory_view::NativeMemoryReader>(
             db,
@@ -283,7 +283,7 @@ async fn read_on(
 
 fn read_authority<'a>(
     fence: &'a NativeAssistantDataFence<'_>,
-    scope_hash: &'a str,
+    assistant_scope: &'a desk_diagnose_core::ai_assistant::data_access::AssistantScope,
     devices: &'a BTreeSet<String>,
     now: u64,
 ) -> Result<MemoryReadAuthorization<'a>, AssistantStoreError> {
@@ -292,7 +292,7 @@ fn read_authority<'a>(
     Ok(MemoryReadAuthorization {
         actor_id: &fence.context.session.actor_id,
         current_device_ref: &scope.current_device_ref,
-        scope_sha256: scope_hash,
+        assistant_scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,

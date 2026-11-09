@@ -57,7 +57,7 @@ fn prepare(
             retrieval_episode_id: frame.scope.retrieval_episode_id.clone(),
             source_device_ref: frame.device.clone(),
             task_id: frame.scope.task_id.clone(),
-            scope_sha256: frame.hash.clone(),
+            scope: Box::new(frame.assistant_scope.clone()),
             history_scope: Some(Box::new(frame.scope.clone())),
             memory_device_rule: None,
             request_memory_device_refs: Vec::new(),

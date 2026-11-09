@@ -15,7 +15,7 @@ use desk_agent_protocol::ai_assistant::{
     memory::MemoryUsePurpose, source::SourceReadPurpose, user_instructions::AssistantDataPolicy,
 };
 use desk_diagnose_core::ai_assistant::native_export::{
-    AssistantDataExportAuthorization, AssistantNativeSourceSet, input_lineage_sha256,
+    AssistantDataExportAuthorization, AssistantNativeSourceSet,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect,
@@ -178,7 +178,6 @@ async fn prepare_grant_on<C: ConnectionTrait>(
         physical_call_id: grant.native_call.physical_call_id.clone(),
         consumer_conversation_id: grant.consumer_conversation_id.clone(),
         projection_id: grant.projection_id.clone(),
-        projection_sha256: grant.projection_sha256.clone(),
         purpose: purpose(grant.purpose).into(),
         proof_json: serde_json::to_string(grant)
             .map_err(|_| AssistantStoreError::Invalid("invalid assistant export proof"))?,
@@ -286,7 +285,6 @@ async fn prepare_call_set_on<C: ConnectionTrait>(
         .filter(native::Column::EnvelopeIdsJson.eq(row.envelope_ids_json))
         .filter(native::Column::InputLineageJson.eq(row.input_lineage_json))
         .filter(native::Column::InputSnapshotJson.eq(row.input_snapshot_json))
-        .filter(native::Column::ProjectionDigestSha256.eq(row.projection_digest_sha256))
         .filter(native::Column::TotalBytes.eq(row.total_bytes))
         .exec(db)
         .await?;
@@ -472,7 +470,6 @@ pub(crate) fn decode_row(
         || row.physical_call_id != proof.native_call.physical_call_id
         || row.consumer_conversation_id != proof.consumer_conversation_id
         || row.projection_id != proof.projection_id
-        || row.projection_sha256 != proof.projection_sha256
         || row.purpose != purpose(proof.purpose)
         || unsigned(row.authorized_at_ms)? != proof.authorized_at_unix_ms
         || unsigned(row.expires_at_ms)? != proof.expires_at_unix_ms
@@ -647,7 +644,6 @@ pub(crate) fn metadata_bytes(row: &authorization::Model) -> Result<i64, Assistan
             &row.physical_call_id,
             &row.consumer_conversation_id,
             &row.projection_id,
-            &row.projection_sha256,
             &row.purpose,
             &row.proof_json,
         ],
@@ -751,11 +747,9 @@ async fn verify_native_on<C: ConnectionTrait>(
     {
         return Err(AssistantStoreError::Inaccessible);
     }
-    let (audit, inputs, _) = crate::model_egress_store::receipt_inputs(&row)?;
+    let (audit, _, _) = crate::model_egress_store::receipt_inputs(&row)?;
     if row.export_authorization_id != grant.native_call.model_export_authorization_id
         || audit.destination != grant.native_call.destination
-        || input_lineage_sha256(&inputs).map_err(AssistantStoreError::Invalid)?
-            != grant.native_call.input_lineage_sha256
     {
         return Err(AssistantStoreError::Inaccessible);
     }

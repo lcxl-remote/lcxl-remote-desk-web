@@ -9,9 +9,7 @@ use desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy;
 use desk_diagnose_core::{
     ai_assistant::{
         data_access::{AssistantDataToolAccess, retained_context_eligible},
-        native_export::{
-            AssistantDataExportAuthorization, NativeAssistantModelCall, input_lineage_sha256,
-        },
+        native_export::{AssistantDataExportAuthorization, NativeAssistantModelCall},
     },
     seam::ModelRequest,
     session::{PersistedAgentSession, TurnState},
@@ -177,7 +175,6 @@ pub(crate) fn authorize_on<'a>(
         {
             deadline = deadline.min(until);
         }
-        let lineage_sha256 = input_lineage_sha256(&inputs).map_err(AssistantStoreError::Invalid)?;
         let mut grants = Vec::with_capacity(manifest.read_projection_ids.len());
         for id in &manifest.read_projection_ids {
             let source = super::projection::load_on(db, &manifest.actor_id, id)
@@ -227,7 +224,6 @@ pub(crate) fn authorize_on<'a>(
                 physical_call_id: physical_call_id.into(),
                 model_export_authorization_id: native.export_authorization_id.clone(),
                 destination: audit.destination.clone(),
-                input_lineage_sha256: lineage_sha256.clone(),
                 authority_expires_at_unix_ms: Some(deadline),
             };
             let grant = AssistantDataExportAuthorization::for_projection(
@@ -249,7 +245,6 @@ pub(crate) fn authorize_on<'a>(
             physical_call_id: physical_call_id.into(),
             model_export_authorization_id: native.export_authorization_id.clone(),
             destination: audit.destination.clone(),
-            input_lineage_sha256: lineage_sha256,
             authority_expires_at_unix_ms: Some(deadline),
         };
         let set =

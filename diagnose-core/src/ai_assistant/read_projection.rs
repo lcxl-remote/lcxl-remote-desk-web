@@ -116,7 +116,7 @@ impl ReadProjectionProof {
             && self.request_sha256 == other.request_sha256
             && self.usage.purpose == other.usage.purpose
             && self.usage.retrieval_episode_id == other.usage.retrieval_episode_id
-            && self.usage.scope_sha256 == other.usage.scope_sha256
+            && self.usage.scope == other.usage.scope
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -372,7 +372,7 @@ pub fn request_sha256(tool_name: &str, arguments_json: &str) -> Result<String, &
 mod tests {
     use super::*;
     use crate::{
-        ai_assistant::{data_access::scope_sha256, test_support::personal_session},
+        ai_assistant::{data_access::assistant_scope, test_support::personal_session},
         model_message_labels::model_bound_user_message,
         native_ids::{self, Kind},
     };
@@ -413,7 +413,7 @@ mod tests {
                 source_envelope_id: envelope.envelope_id.clone(),
                 purpose: SourceReadPurpose::ModelMemory,
                 retrieval_episode_id: "episode-1".into(),
-                scope_sha256: scope_sha256(&session).unwrap(),
+                scope: assistant_scope(&session).unwrap(),
                 policy_revision: 1,
                 control_generation: 1,
                 memory_state_generation: 1,
@@ -711,7 +711,7 @@ mod tests {
         let reference = proof.usage.reference();
         reference.validate().unwrap();
         assert_eq!(reference.projection_id, proof.usage.projection_id);
-        assert_eq!(reference.scope_sha256, proof.usage.scope_sha256);
+        assert_eq!(reference.scope, proof.usage.scope);
         let encoded = serde_json::to_value(reference).unwrap();
         assert!(encoded.get("history_dependencies").is_none());
         assert!(encoded.get("memories").is_none());

@@ -60,7 +60,6 @@ impl ArchivedAssistantOutput {
             || evidence.model_export_authorization_id
                 != self.source_set.model_export_authorization_id
             || evidence.destination != self.source_set.destination
-            || evidence.input_lineage_sha256 != self.source_set.input_lineage_sha256
             || (self.actor_input_seq == 0
                 && self.source_set.context.task_id.as_deref()
                     != Some(self.source_set.consumer_conversation_id.as_str()))

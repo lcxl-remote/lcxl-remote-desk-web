@@ -310,20 +310,6 @@ async fn acceptance_leaves_the_archive_as_the_only_copy_of_the_input_lists() {
         .await
         .unwrap();
     assert!(!sources.input_snapshot.envelopes.is_empty());
-    native::Entity::update_many()
-        .col_expr(
-            native::Column::ProjectionDigestSha256,
-            Expr::value("a".repeat(64)),
-        )
-        .filter(native::Column::ReceiptId.eq("plain-native"))
-        .exec(&store.db)
-        .await
-        .unwrap();
-    assert!(
-        SignalModelEgressStore::read_context_output_on(&store.db, "root", &parent)
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]

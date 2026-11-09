@@ -12,7 +12,7 @@ use crate::{
 use desk_agent_protocol::{AgentScope, ExecutionMode};
 use desk_diagnose_core::{
     ai_assistant::{
-        data_access::scope_sha256,
+        data_access::assistant_scope,
         read_projection::ReadProjectionProof,
         seam::{AssistantModelDataManifest, SelectedAssistantEnvelope},
     },
@@ -93,7 +93,7 @@ pub(super) async fn fixture_with_model(
     session.begin_focus_epoch(1, Vec::new()).unwrap();
     txn.commit().await.unwrap();
     let mut selected = super::model_sources::memory_usage(&store, &memory, &source).await;
-    selected.scope_sha256 = scope_sha256(&session).unwrap();
+    selected.scope = assistant_scope(&session).unwrap();
     selected.retrieval_episode_id = session
         .assistant_data
         .as_ref()
@@ -189,7 +189,6 @@ pub(super) async fn fixture_with_model(
         actor_input_seq: data.current_actor_input_seq,
         retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
         task_id: None,
-        scope_sha256: scope_sha256(&session).unwrap(),
         policy_revision: 1,
 
         memory_state_generation: data.memory_state_generation,

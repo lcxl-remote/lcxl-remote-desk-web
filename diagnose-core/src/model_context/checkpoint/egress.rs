@@ -60,7 +60,6 @@ pub fn reconcile_context_eligibility(
             notice_kind: ContextNoticeKind::Refreshed,
             base_state: state.clone(),
             next_state,
-            history_sha256: history_sha256(conversation)?,
             discarded_through_message_id: conversation[groups[floor - 1].end - 1]
                 .message_id
                 .clone(),

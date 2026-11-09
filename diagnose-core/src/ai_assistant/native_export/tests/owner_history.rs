@@ -42,7 +42,7 @@ fn original_with_turn(
     AssistantDataExportAuthorization,
     ArchivedAssistantOutput,
 ) {
-    let (session, mut manifest, mut selected, mut call) = fixture();
+    let (session, mut manifest, mut selected, call) = fixture();
     let access = AssistantDataToolAccess {
         settings: Default::default(),
         policy_revision: 1,
@@ -119,7 +119,6 @@ fn original_with_turn(
     let request = egress.authorize_request(raw).unwrap();
     let input_snapshot = request.input_snapshot().unwrap();
     let inputs = project_model_input_lineage(&request.audit, &request.input_envelopes).unwrap();
-    call.input_lineage_sha256 = input_lineage_sha256(&inputs).unwrap();
     manifest.read_projection_ids = vec![proof.usage.projection_id.clone()];
     manifest.current_memories = proof.usage.memories.clone();
     manifest.selected_envelopes = vec![SelectedAssistantEnvelope {
@@ -153,8 +152,7 @@ fn original_with_turn(
     let input_policies =
         NativeInputPolicyRegistration::capture(&input_snapshot, SOURCE_CONTRACT_REVISION, 1)
             .unwrap();
-    let input_policy_graph =
-        NativeInputPolicyGraph::empty(&input_snapshot, "owner", "root").unwrap();
+    let input_policy_graph = NativeInputPolicyGraph::empty("owner", "root").unwrap();
     let archive = ArchivedAssistantOutput {
         source_set,
         input_revision: 1,
@@ -208,7 +206,7 @@ fn owner_copy_retains_original_identity_without_new_consent_settings_or_model_au
 #[test]
 fn missing_membership_changed_projection_or_invalid_consumption_never_proves_an_owner_copy() {
     let (_, proof, grant, archive) = original();
-    for case in 0..7 {
+    for case in 0..6 {
         let mut old = archive.clone();
         let mut read = proof.clone();
         let mut original_grant = grant.clone();
@@ -220,8 +218,7 @@ fn missing_membership_changed_projection_or_invalid_consumption_never_proves_an_
             2 => original_grant.actor_id = "another-owner".into(),
             3 => first = proof.created_at_unix_ms - 1,
             4 => first = grant.authorized_at_unix_ms + 1,
-            5 => last = grant.authorized_at_unix_ms - 1,
-            _ => old.source_set.authorizations[0].proof_sha256 = "b".repeat(64),
+            _ => last = grant.authorized_at_unix_ms - 1,
         }
         assert!(
             OwnerHistoryReadValidation::for_consumed_projection(
@@ -239,7 +236,7 @@ fn missing_membership_changed_projection_or_invalid_consumption_never_proves_an_
 
 #[test]
 fn a_grant_sealed_for_the_same_sink_does_not_substitute_for_the_exact_original_input_label() {
-    let (_, proof, mut grant, mut archive) = original();
+    let (_, proof, grant, archive) = original();
     // Seal another valid proof with the same content digest and destination.
     // Its full label is absent from the actual immutable input snapshot.
     let mut other = proof.clone();
@@ -254,8 +251,6 @@ fn a_grant_sealed_for_the_same_sink_does_not_substitute_for_the_exact_original_i
         .source_envelope
         .allowed_destinations
         .push(another_destination);
-    grant.projection_sha256 = other.fingerprint().unwrap();
-    archive.source_set.authorizations[0].proof_sha256 = grant.fingerprint().unwrap();
     archive
         .validate_grants(std::slice::from_ref(&grant))
         .unwrap();
@@ -423,7 +418,6 @@ fn a_tool_read_binds_the_actual_producer_result_label_and_original_consumed_call
         physical_call_id: "query-physical".into(),
         model_export_authorization_id: "query-export".into(),
         destination: egress.destination.clone(),
-        input_lineage_sha256: input_lineage_sha256(&inputs).unwrap(),
         authority_expires_at_unix_ms: Some(5000),
     };
     let grant = AssistantDataExportAuthorization::for_projection(
@@ -500,11 +494,8 @@ fn a_tool_read_binds_the_actual_producer_result_label_and_original_consumed_call
     // acquire the old result's exact outer label or producer relationship.
     let mut other = proof;
     other.tool_call_id = Some("other-read-call".into());
-    let mut changed_grant = grant;
-    changed_grant.projection_sha256 = other.fingerprint().unwrap();
-    let mut changed_archive = archive;
-    changed_archive.source_set.authorizations[0].proof_sha256 =
-        changed_grant.fingerprint().unwrap();
+    let changed_grant = grant;
+    let changed_archive = archive;
     changed_archive
         .validate_grants(std::slice::from_ref(&changed_grant))
         .unwrap();

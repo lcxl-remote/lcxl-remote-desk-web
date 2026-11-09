@@ -2064,7 +2064,6 @@ async fn prepare_model_context(
                 let previous_notices = session.context_notices.clone();
                 session.model_context_state = match crate::model_context::apply_floor_reconciliation(
                     &plan,
-                    &session.model_conversation(),
                     &compatible_state,
                 ) {
                     Ok(state) => state,

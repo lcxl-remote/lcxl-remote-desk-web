@@ -159,7 +159,7 @@ impl Fixture {
                 .retrieval_budget
                 .episode_id
                 .clone(),
-            scope_sha256: scope_sha256(&self.session).unwrap(),
+            scope: assistant_scope(&self.session).unwrap(),
             policy_revision: 1,
             control_generation: 1,
             memory_state_generation: 1,

@@ -20,7 +20,6 @@ pub struct Model {
     pub purpose: String,
     pub kind: String,
     pub request_sha256: String,
-    pub scope_sha256: String,
     #[sea_orm(column_type = "Text")]
     pub proof_json: String,
     pub captured_at_ms: i64,

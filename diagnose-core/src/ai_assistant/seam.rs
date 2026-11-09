@@ -76,7 +76,7 @@ pub struct AssistantDataReadUse {
     pub source_envelope_id: String,
     pub purpose: SourceReadPurpose,
     pub retrieval_episode_id: String,
-    pub scope_sha256: String,
+    pub scope: Box<super::data_access::AssistantScope>,
     pub policy_revision: u64,
     pub control_generation: u64,
     pub memory_state_generation: u64,
@@ -158,7 +158,7 @@ impl AssistantDataReadUse {
             source_envelope_id: self.source_envelope_id.clone(),
             purpose: self.purpose,
             retrieval_episode_id: self.retrieval_episode_id.clone(),
-            scope_sha256: self.scope_sha256.clone(),
+            scope: self.scope.clone(),
             policy_revision: self.policy_revision,
             control_generation: self.control_generation,
             memory_state_generation: self.memory_state_generation,
@@ -175,7 +175,7 @@ pub struct AssistantDataProjectionRef {
     pub source_envelope_id: String,
     pub purpose: SourceReadPurpose,
     pub retrieval_episode_id: String,
-    pub scope_sha256: String,
+    pub scope: Box<super::data_access::AssistantScope>,
     pub policy_revision: u64,
     pub control_generation: u64,
     pub memory_state_generation: u64,
@@ -191,11 +191,6 @@ impl AssistantDataProjectionRef {
             || self.policy_revision == 0
             || self.control_generation == 0
             || self.memory_state_generation == 0
-            || self.scope_sha256.len() != 64
-            || !self
-                .scope_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
             || self
                 .expires_at_unix_ms
                 .is_some_and(|until| until == 0 || until > i64::MAX as u64)
@@ -237,7 +232,6 @@ pub struct AssistantModelDataManifest {
     pub actor_input_seq: u64,
     pub retrieval_episode_id: String,
     pub task_id: Option<String>,
-    pub scope_sha256: String,
     pub policy_revision: u64,
 
     pub memory_state_generation: u64,
@@ -307,7 +301,6 @@ impl AssistantModelDataManifest {
             || self.policy_revision == 0
             || self.control_generation != data.control_generation
             || self.memory_state_generation != data.memory_state_generation
-            || self.scope_sha256 != super::data_access::scope_sha256(session)?
         {
             return Err("assistant model manifest does not match its source session");
         }

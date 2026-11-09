@@ -1,7 +1,7 @@
 //! Admit a read exactly once as content owned by the current conversation.
 use super::*;
 use desk_diagnose_core::ai_assistant::{
-    data_access::{AssistantDataToolAccess, scope_sha256},
+    data_access::{AssistantDataToolAccess, assistant_scope},
     read_projection::{ReadProjectionKind, request_sha256},
 };
 
@@ -47,8 +47,8 @@ pub(super) fn prepare_on<'a>(
             || proof.input_revision != session.input_revision
             || proof.task_id != data.retrieval_task_id
             || proof.usage.retrieval_episode_id != data.retrieval_budget.episode_id
-            || proof.usage.scope_sha256
-                != scope_sha256(session).map_err(AssistantStoreError::Invalid)?
+            || proof.usage.scope
+                != assistant_scope(session).map_err(AssistantStoreError::Invalid)?
             || proof.tool_call_id.as_deref() != message.tool_call_id.as_deref()
             || proof
                 .snapshot_envelope()

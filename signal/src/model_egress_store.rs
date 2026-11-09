@@ -215,13 +215,6 @@ impl SignalModelEgressStore {
             .map_err(|_| DbErr::Custom("model egress byte count exceeds i64".into()))?;
         let ordinal = i32::try_from(model_call_ordinal)
             .map_err(|_| DbErr::Custom("model call ordinal exceeds i32".into()))?;
-        let projection_digest_sha256 = projection_digest(
-            &destination_json,
-            &envelope_ids_json,
-            &input_lineage_json,
-            &input_snapshot_json,
-            total_bytes,
-        );
         let now = chrono::Utc::now();
         model_egress_receipt::ActiveModel {
             receipt_id: Set(receipt_id),
@@ -233,7 +226,6 @@ impl SignalModelEgressStore {
             input_snapshot_json: Set(input_snapshot_json),
             assistant_source_set_json: Set(None),
 
-            projection_digest_sha256: Set(projection_digest_sha256),
             total_bytes: Set(total_bytes),
             state: Set(STATE_DISPATCH_INTENT.into()),
             model_output_envelope_id: Set(None),
@@ -432,10 +424,6 @@ impl SignalModelEgressStore {
             .filter(model_egress_receipt::Column::ModelOutputLabelSha256.is_null())
             .filter(model_egress_receipt::Column::InputSnapshotJson.eq(row.input_snapshot_json))
             .filter(model_egress_receipt::Column::InputLineageJson.eq(row.input_lineage_json))
-            .filter(
-                model_egress_receipt::Column::ProjectionDigestSha256
-                    .eq(row.projection_digest_sha256),
-            )
             .filter(model_egress_receipt::Column::DestinationJson.eq(row.destination_json))
             .filter(model_egress_receipt::Column::EnvelopeIdsJson.eq(row.envelope_ids_json))
             .filter(
@@ -936,18 +924,9 @@ fn receipt_inputs_reusing(
     let invalid = || DbErr::Custom("invalid model output lineage".into());
     if let Some(archived) = archived {
         let audit = archived.input_snapshot.audit().map_err(|_| invalid())?;
-        let encode = |value: Result<String, serde_json::Error>| value.map_err(|_| invalid());
         if serde_json::to_string(&audit.destination).ok().as_deref()
             != Some(row.destination_json.as_str())
             || i64::try_from(audit.total_bytes).ok() != Some(row.total_bytes)
-            || row.projection_digest_sha256
-                != projection_digest(
-                    &row.destination_json,
-                    &encode(serde_json::to_string(&audit.envelope_ids))?,
-                    &encode(serde_json::to_string(&archived.inputs))?,
-                    &encode(serde_json::to_string(&archived.input_snapshot))?,
-                    row.total_bytes,
-                )
         {
             return Err(invalid());
         }
@@ -977,17 +956,6 @@ fn receipt_inputs_reusing(
         serde_json::from_str(&row.input_lineage_json).map_err(|_| invalid())?;
     let input_snapshot: desk_diagnose_core::model_egress::NativeModelInputSnapshot =
         serde_json::from_str(&row.input_snapshot_json).map_err(|_| invalid())?;
-    if row.projection_digest_sha256
-        != projection_digest(
-            &row.destination_json,
-            &row.envelope_ids_json,
-            &row.input_lineage_json,
-            &row.input_snapshot_json,
-            row.total_bytes,
-        )
-    {
-        return Err(invalid());
-    }
     desk_diagnose_core::model_egress::validate_model_input_lineage(&audit, &inputs)
         .map_err(|_| invalid())?;
     input_snapshot
@@ -1007,27 +975,6 @@ fn ensure_single_update(rows_affected: u64, operation: &str) -> Result<(), DbErr
             "{operation} expected one dispatch-intent receipt, updated {rows_affected}"
         )))
     }
-}
-
-fn projection_digest(
-    destination_json: &str,
-    envelope_ids_json: &str,
-    input_lineage_json: &str,
-    input_snapshot_json: &str,
-    total_bytes: i64,
-) -> String {
-    let mut hasher = Sha256::new();
-    for part in [
-        destination_json,
-        envelope_ids_json,
-        input_lineage_json,
-        input_snapshot_json,
-    ] {
-        hasher.update((part.len() as u64).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    hasher.update(total_bytes.to_le_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -1300,13 +1247,13 @@ mod tests {
             serde_json::from_str(&row.input_lineage_json).unwrap();
         assert_eq!(entries[1].source_envelope_ids, ["original-tool-result"]);
         assert!(!row.input_lineage_json.contains("test-input"));
-        let original_digest = row.projection_digest_sha256;
+        let original_lineage = row.input_lineage_json.clone();
         inputs[1].provenance.source_envelope_ids = vec!["other-tool-result".into()];
         let changed = store
             .record_dispatch_intent("lineage-other".into(), "export".into(), 2, &audit, &inputs)
             .await
             .unwrap();
-        assert_ne!(changed.projection_digest_sha256, original_digest);
+        assert_ne!(changed.input_lineage_json, original_lineage);
         inputs[1].envelope_id = "unmatched-input".into();
         assert!(
             store

@@ -206,7 +206,7 @@ async fn assert_explicit_read_scope(
         history::AssistantDeviceScope, memory::MemorySearchRequest,
     };
     use desk_diagnose_core::ai_assistant::{
-        data_access::scope_sha256, memory_access::usable_memory_scope,
+        data_access::assistant_scope, memory_access::usable_memory_scope,
     };
     use std::collections::BTreeSet;
 
@@ -231,7 +231,7 @@ async fn assert_explicit_read_scope(
     let authority = MemoryReadAuthorization {
         actor_id: &fixture.session.actor_id,
         current_device_ref: &scope.current_device_ref,
-        scope_sha256: &scope_sha256(&fixture.session).unwrap(),
+        assistant_scope: &assistant_scope(&fixture.session).unwrap(),
         scope,
         access: &fence.access,
         platform: &fence.policy,

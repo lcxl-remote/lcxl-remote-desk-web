@@ -1,5 +1,5 @@
 use super::*;
-use crate::ai_assistant::data_access::scope_sha256;
+use crate::ai_assistant::data_access::assistant_scope;
 use crate::{
     ai_assistant::{
         data_control::CurrentMemoryUse,
@@ -63,7 +63,7 @@ impl Port {
             source_envelope_id: "candidate".into(),
             purpose: SourceReadPurpose::ModelMemory,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-            scope_sha256: scope_sha256(session).unwrap(),
+            scope: assistant_scope(session).unwrap(),
             policy_revision: 1,
             control_generation: data.control_generation,
             memory_state_generation: data.memory_state_generation,

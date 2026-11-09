@@ -26,7 +26,7 @@ use desk_agent_protocol::ai_assistant::{
 };
 use desk_diagnose_core::{
     ai_assistant::{
-        data_access::scope_sha256,
+        data_access::assistant_scope,
         history::validate_search_scope,
         retrieval::query_groups,
         retrieval_query::{PageAnchor, QuerySourceVersion},
@@ -348,7 +348,7 @@ pub(super) fn search_authority<'a>(
     Ok(HistorySearchAuthorization {
         actor_id: &fence.context.session.actor_id,
         current_device_ref: &scope.current_device_ref,
-        scope_sha256: &query.binding.scope_sha256,
+        assistant_scope: &query.binding.scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,
@@ -461,11 +461,12 @@ async fn prepare_query_on(
     let observation = old.map_or(watermark.corpus_generation, |old| {
         old.proof.source_observation_generation
     });
-    let scope_hash = scope_sha256(fence.context.session).map_err(AssistantStoreError::Invalid)?;
+    let current_scope =
+        assistant_scope(fence.context.session).map_err(AssistantStoreError::Invalid)?;
     let authority = HistorySearchAuthorization {
         actor_id: &binding.actor_id,
         current_device_ref: &binding.source_device_ref,
-        scope_sha256: &scope_hash,
+        assistant_scope: &current_scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,

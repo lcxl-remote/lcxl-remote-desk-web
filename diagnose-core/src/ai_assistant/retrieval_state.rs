@@ -31,7 +31,7 @@ pub struct RetrievalQueryBinding {
     pub retrieval_episode_id: String,
     pub source_device_ref: String,
     pub task_id: Option<String>,
-    pub scope_sha256: String,
+    pub scope: Box<super::data_access::AssistantScope>,
     pub history_scope: Option<Box<HistoryAccessScope>>,
     /// Original memory-read upper scope, frozen for automatic tasks. Current
     /// settings must still permit use; enabling later cannot widen an old task.
@@ -90,7 +90,7 @@ impl RetrievalQueryBinding {
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
             source_device_ref: data.source_device_ref.clone(),
             task_id: data.retrieval_task_id.clone(),
-            scope_sha256: super::data_access::scope_sha256(call.session)?,
+            scope: super::data_access::assistant_scope(call.session)?,
             history_scope,
             memory_device_rule,
             request_memory_device_refs: if memory_device_rule.is_some() {
@@ -128,7 +128,6 @@ impl RetrievalQueryBinding {
             .validate()
             .map_err(|_| "invalid retrieval recipient")?;
         if !matches!(self.destination, DestinationIdentity::Model { .. })
-            || !digest(&self.scope_sha256)
             || (self.task_id.is_some() && self.authority_expires_at_unix_ms.is_none())
             || self
                 .authority_expires_at_unix_ms
@@ -148,10 +147,6 @@ impl RetrievalQueryBinding {
             }
         }
         Ok(())
-    }
-    pub fn fingerprint(&self) -> Result<String, &'static str> {
-        self.validate()?;
-        crate::model_egress::sink_metadata_sha256(self)
     }
 }
 
@@ -830,9 +825,6 @@ impl FrozenRetrievalQuery {
 }
 
 use sha2::{Digest, Sha256};
-fn digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
 fn validate_version(value: &QuerySourceVersion) -> Result<(), &'static str> {
     validate_source_id(&value.source_id)?;
     if value.revision == 0 || value.revision > i64::MAX as u64 {

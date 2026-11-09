@@ -22,7 +22,6 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub assistant_source_set_json: Option<String>,
     /// Digest of the actual native model input projection.
-    pub projection_digest_sha256: String,
     pub total_bytes: i64,
     /// `dispatch_intent` is intentionally durable before provider I/O. A crash
     /// in that state means the provider outcome is unknown, never "not sent".

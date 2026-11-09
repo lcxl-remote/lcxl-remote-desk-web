@@ -16,7 +16,7 @@ fn binding() -> RetrievalQueryBinding {
         retrieval_episode_id: "episode".into(),
         source_device_ref: "device-A".into(),
         task_id: None,
-        scope_sha256: "a".repeat(64),
+        scope: Box::default(),
         history_scope: Some(Box::new(HistoryAccessScope {
             actor_id: "actor".into(),
             root_conversation_id: "root".into(),
@@ -259,7 +259,7 @@ fn cursor_locator_never_replaces_actor_root_episode_scope_task_or_recipient_chec
     other.retrieval_episode_id = "other".into();
     alternatives.push(other);
     let mut other = binding();
-    other.scope_sha256 = "d".repeat(64);
+    other.scope.instructions_revision = 9;
     alternatives.push(other);
     let mut other = binding();
     other.source_device_ref = "device-B".into();
@@ -775,8 +775,8 @@ fn tool_binding_uses_the_admitted_session_scope() {
     );
     assert!(binding.history_scope.is_none());
     assert_eq!(
-        binding.scope_sha256,
-        super::super::data_access::scope_sha256(&session).unwrap()
+        binding.scope,
+        super::super::data_access::assistant_scope(&session).unwrap()
     );
     assert!(RetrievalQueryBinding::for_call(&original, SourceReadPurpose::ModelHistory).is_err());
     session.assistant_data.as_mut().unwrap().memory_access_scope = None;

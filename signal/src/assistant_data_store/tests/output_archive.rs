@@ -81,32 +81,18 @@ async fn archived_output_preserves_original_input_and_provenance_without_respons
         .map(|grant| *grant.proof)
         .collect::<Vec<_>>();
     stored.proof.validate_grants(&grants).unwrap();
-    for field in 0..10 {
+    for field in 0..7 {
         let mut changed = stored.proof.as_ref().clone();
         match field {
             0 => changed.actor_input_seq += 1,
             1 => changed.input_revision += 1,
             2 => changed.sources.inputs.clear(),
             3 => changed.output.retention.delete_with_run = false,
-            4 => {
-                changed.sources.input_snapshot.envelopes[0]
-                    .retention
-                    .expires_at_unix_ms = Some(1000)
-            }
-            5 => {
-                changed.sources.input_snapshot.envelopes[0].sensitivity =
-                    desk_agent_protocol::data_lineage::Sensitivity::Secret
-            }
-            6 => {
-                changed.sources.input_snapshot.envelopes[0]
-                    .provenance
-                    .source_object_id = Some("other-source".into())
-            }
-            7 => changed.sources.input_snapshot.envelopes.clear(),
-            8 => changed.input_policies.leaves.clear(),
+            4 => changed.sources.input_snapshot.envelopes.clear(),
+            5 => changed.input_policies.leaves.clear(),
             _ => changed.source_set.context.source_contract_revision += 1,
         }
-        assert!(changed.validate().is_err());
+        assert!(changed.validate().is_err(), "field {field}");
     }
 }
 

@@ -29,7 +29,6 @@ struct Cursor {
     anchor: String,
     tail: String,
     tail_revision: i64,
-    tail_hash: String,
     boundary: String,
     forward: bool,
 }
@@ -208,10 +207,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             exact_on(db, actor, anchor, &cursor.tail, policy, now)
         })
         .await?;
-        if tail.revision != cursor.tail_revision
-            || tail.content_sha256 != cursor.tail_hash
-            || position(&tail) < position(anchor)
-        {
+        if tail.revision != cursor.tail_revision || position(&tail) < position(anchor) {
             return Err(AssistantStoreError::Inaccessible);
         }
         tail
@@ -405,7 +401,6 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             anchor: anchor.source_id.clone(),
             tail: tail.source_id.clone(),
             tail_revision: tail.revision,
-            tail_hash: tail.content_sha256.clone(),
             boundary: boundary.source_id.clone(),
             forward,
         }

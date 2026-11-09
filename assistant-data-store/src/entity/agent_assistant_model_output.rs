@@ -19,7 +19,6 @@ pub struct Model {
     pub output_envelope_id: String,
     pub output_digest_sha256: String,
     pub output_label_sha256: String,
-    pub input_lineage_sha256: String,
     pub actor_input_seq: i64,
     pub input_revision: i64,
     pub input_recorded_at_ms: i64,

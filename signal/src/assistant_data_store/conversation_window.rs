@@ -386,7 +386,7 @@ async fn prepare_query_on(
     let authority = HistorySearchAuthorization {
         actor_id: &binding.actor_id,
         current_device_ref: &binding.source_device_ref,
-        scope_sha256: &binding.scope_sha256,
+        assistant_scope: &binding.scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,

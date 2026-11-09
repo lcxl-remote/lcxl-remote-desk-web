@@ -213,7 +213,6 @@ impl ScheduleStore {
         let digest = super::digest(&super::json(&(
             receipt.receipt_id,
             receipt.export_authorization_id,
-            receipt.projection_digest_sha256,
             receipt.authorized_at,
             usage,
         ))?);

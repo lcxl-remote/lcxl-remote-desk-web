@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::ai_assistant::{
-    data_access::{AssistantDataToolAccess, retained_context_eligible, scope_sha256},
+    data_access::{AssistantDataToolAccess, assistant_scope, retained_context_eligible},
     read_projection::ReadProjectionProof,
 };
 use crate::{chat::ChatRole, seam::ModelRequest};
@@ -74,7 +74,7 @@ impl AssistantModelDataManifest {
         if proofs.len() != selected_ids.len() {
             return Err("assistant manifest read proofs are incomplete");
         }
-        let scope = scope_sha256(session)?;
+        let scope = assistant_scope(session)?;
         let mut seen = BTreeSet::new();
         let mut memories = BTreeMap::new();
         for proof in proofs {
@@ -87,7 +87,7 @@ impl AssistantModelDataManifest {
                 || proof.input_revision != session.input_revision
                 || proof.task_id != data.retrieval_task_id
                 || proof.usage.retrieval_episode_id != data.retrieval_budget.episode_id
-                || proof.usage.scope_sha256 != scope
+                || proof.usage.scope != scope
                 || proof.usage.policy_revision != access.policy_revision
                 || proof.usage.control_generation != access.control_generation
                 || proof.usage.memory_state_generation != access.memory_state_generation
@@ -136,7 +136,6 @@ impl AssistantModelDataManifest {
             actor_input_seq: data.current_actor_input_seq,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
             task_id: data.retrieval_task_id.clone(),
-            scope_sha256: scope,
             policy_revision: access.policy_revision,
 
             memory_state_generation: access.memory_state_generation,

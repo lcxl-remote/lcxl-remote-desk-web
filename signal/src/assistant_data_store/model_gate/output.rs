@@ -94,8 +94,6 @@ pub(crate) fn validate_on<'a>(
         let (audit, inputs, input_snapshot) = crate::model_egress_store::receipt_inputs(native)?;
         if set.model_export_authorization_id != native.export_authorization_id
             || set.destination != audit.destination
-            || set.input_lineage_sha256
-                != input_lineage_sha256(&inputs).map_err(AssistantStoreError::Invalid)?
         {
             return Err(AssistantStoreError::Inaccessible);
         }

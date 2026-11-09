@@ -172,7 +172,7 @@ fn completed_tool_call_and_result_remain_paired_on_next_day_followup() {
     .unwrap()
     .unwrap();
     assert_eq!(repair.notice_kind, ContextNoticeKind::Refreshed);
-    let repaired = apply_floor_reconciliation(&repair, &conversation, &restricted).unwrap();
+    let repaired = apply_floor_reconciliation(&repair, &restricted).unwrap();
     assert!(repaired.entries[0].floor_group_head_message_id.is_none());
     let ContextBuildPlan::Ready(restored) = plan_model_context(
         &conversation,
@@ -463,7 +463,6 @@ fn required_inputs_cannot_be_pruned_rebound_or_mutated_before_compression() {
     let mut forged = plan(&conversation, &ModelContextState::default());
     forged.input.continuation_lens[0].text = "not the frozen lens".into();
     forged.input_canonical_json = canonical_json(&forged.input).unwrap();
-    forged.input_projection_sha256 = sha256_hex(forged.input_canonical_json.as_bytes());
     assert!(authorize_compression_input(&policy(), &forged, &conversation).is_err());
 }
 

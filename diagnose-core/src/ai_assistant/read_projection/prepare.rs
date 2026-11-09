@@ -3,7 +3,7 @@
 
 use super::{ReadProjectionKind, ReadProjectionProof, request_sha256};
 use crate::ai_assistant::{
-    data_access::{AssistantDataToolAccess, scope_sha256},
+    data_access::{AssistantDataToolAccess, assistant_scope},
     data_control::CurrentMemoryUse,
     history::serialized_tool_response_bytes,
     seam::{AssistantDataCall, AssistantDataReadUse},
@@ -80,7 +80,7 @@ impl ReadProjectionProof {
         {
             return Err("read preparation exceeded its original response limit");
         }
-        let scope_hash = scope_sha256(context.session)?;
+        let current_scope = assistant_scope(context.session)?;
         let projection_id = native_ids::stable(
             Kind::AssistantReadProjection,
             &(
@@ -99,7 +99,7 @@ impl ReadProjectionProof {
             source_envelope_id: "pending-read-label".into(),
             purpose,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-            scope_sha256: scope_hash,
+            scope: current_scope,
             policy_revision: access.policy_revision,
             memory_state_generation: access.memory_state_generation,
             control_generation: access.control_generation,
@@ -199,7 +199,7 @@ pub(super) fn aggregate(
     for source in selected {
         if source.purpose != usage.purpose
             || source.retrieval_episode_id != usage.retrieval_episode_id
-            || source.scope_sha256 != usage.scope_sha256
+            || source.scope != usage.scope
             || source.policy_revision != usage.policy_revision
             || source.control_generation != usage.control_generation
             || source.memory_state_generation != usage.memory_state_generation

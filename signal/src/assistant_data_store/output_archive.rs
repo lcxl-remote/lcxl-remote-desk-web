@@ -36,7 +36,7 @@ pub(crate) async fn input_policy_graph_on<C: ConnectionTrait>(
         NativeInputPolicyGraph, NativeInputPolicyGraphBuilder, is_native_output_policy_source,
     };
     let mut graph = NativeInputPolicyGraphBuilder::new(
-        NativeInputPolicyGraph::empty(snapshot, &set.actor_id, &set.consumer_conversation_id)
+        NativeInputPolicyGraph::empty(&set.actor_id, &set.consumer_conversation_id)
             .map_err(AssistantStoreError::Invalid)?,
     )
     .map_err(AssistantStoreError::Invalid)?;
@@ -168,7 +168,6 @@ pub(crate) async fn prepare_on<'a>(
         output_envelope_id: evidence.output_envelope_id.clone(),
         output_digest_sha256: evidence.output_digest_sha256.clone(),
         output_label_sha256: evidence.output_label_sha256.clone(),
-        input_lineage_sha256: evidence.input_lineage_sha256.clone(),
         actor_input_seq: signed(proof.actor_input_seq)?,
         input_revision: signed(proof.input_revision)?,
         input_recorded_at_ms: signed(proof.input_recorded_at_unix_ms)?,
@@ -253,7 +252,6 @@ pub(crate) async fn decode_row_on<C: ConnectionTrait>(
         || row.output_envelope_id != evidence.output_envelope_id
         || row.output_digest_sha256 != evidence.output_digest_sha256
         || row.output_label_sha256 != evidence.output_label_sha256
-        || row.input_lineage_sha256 != evidence.input_lineage_sha256
         || unsigned(row.actor_input_seq)? != proof.actor_input_seq
         || unsigned(row.input_revision)? != proof.input_revision
         || unsigned(row.input_recorded_at_ms)? != proof.input_recorded_at_unix_ms
@@ -276,7 +274,6 @@ pub(crate) fn metadata_bytes(row: &archived::Model) -> Result<i64, AssistantStor
         &row.output_envelope_id,
         &row.output_digest_sha256,
         &row.output_label_sha256,
-        &row.input_lineage_sha256,
         &row.statement_timezone,
         &row.proof_json,
         &row.parent_summary_json,

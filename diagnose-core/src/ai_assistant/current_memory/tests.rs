@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     ai_assistant::{
-        data_access::{AssistantDataToolAccess, scope_sha256},
+        data_access::{AssistantDataToolAccess, assistant_scope},
         data_control::CurrentMemoryUse,
         read_projection::{CurrentMemoryPreparation, ReadProjectionKind, ReadProjectionProof},
         seam::{AssistantDataReadUse, AssistantReadRoot},
@@ -54,7 +54,7 @@ impl Fixture {
             source_envelope_id: "candidate".into(),
             purpose: SourceReadPurpose::ModelMemory,
             retrieval_episode_id: "episode-1".into(),
-            scope_sha256: scope_sha256(&session).unwrap(),
+            scope: assistant_scope(&session).unwrap(),
             policy_revision: 1,
             control_generation: 1,
             memory_state_generation: 1,

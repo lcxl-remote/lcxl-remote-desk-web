@@ -40,7 +40,7 @@ pub struct MemoryReadAuthorization<'a> {
     /// facts are historical references rather than relation targets.
     pub actor_id: &'a str,
     pub current_device_ref: &'a str,
-    pub scope_sha256: &'a str,
+    pub assistant_scope: &'a desk_diagnose_core::ai_assistant::data_access::AssistantScope,
     pub scope: &'a MemoryAccessScope,
     pub access: &'a AssistantDataToolAccess,
     pub platform: &'a AssistantDataPolicy,

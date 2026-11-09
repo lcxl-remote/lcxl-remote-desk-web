@@ -113,7 +113,6 @@ fn native_archive_in_context(
         physical_call_id: id.into(),
         model_export_authorization_id: policy.export_authorization_id.clone(),
         destination: policy.destination.clone(),
-        input_lineage_sha256: crate::model_egress::model_input_lineage_sha256(&inputs).unwrap(),
         authority_expires_at_unix_ms: Some(1000),
     };
     let source_set =
@@ -323,8 +322,7 @@ pub(super) fn a_native_control_still_requires_the_actual_parent_archive() {
         .unwrap()
         .unwrap();
     assert!(policy.history_retention_allowed && !policy.independent_fact_allowed);
-    let missing =
-        NativeInputPolicyGraph::empty(&second.sources.input_snapshot, "owner", "root").unwrap();
+    let missing = NativeInputPolicyGraph::empty("owner", "root").unwrap();
     assert!(
         missing
             .complete_text_policy(&second.sources.input_snapshot, &second.input_policies)
@@ -342,7 +340,7 @@ pub(super) fn a_native_control_still_requires_the_actual_parent_archive() {
 fn missing_parent_or_unknown_original_contract_does_not_receive_current_policy_permission() {
     let first = native_archive("first", vec![owner_message()], &[]);
     let (snapshot, registration) = root(&first, "first");
-    let missing = NativeInputPolicyGraph::empty(&snapshot, "owner", "root").unwrap();
+    let missing = NativeInputPolicyGraph::empty("owner", "root").unwrap();
     assert!(
         missing
             .complete_text_policy(&snapshot, &registration)
@@ -395,9 +393,7 @@ fn normalized_references_reject_wrong_context_labels_duplicates_unrelated_parent
     relabeled.envelopes[0].sensitivity = Sensitivity::Secret;
     let registration =
         NativeInputPolicyRegistration::capture(&relabeled, SOURCE_CONTRACT_REVISION, 1).unwrap();
-    let mut changed = original;
-    changed.input_snapshot_sha256 = relabeled.fingerprint().unwrap();
-    assert!(changed.validate(&relabeled, &registration).is_err());
+    assert!(original.validate(&relabeled, &registration).is_err());
 }
 
 #[test]

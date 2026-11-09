@@ -455,13 +455,6 @@ fn native_snapshot_cannot_replace_a_restrictive_policy_or_rebind_a_full_input_la
         .validate_metadata(&original, SOURCE_CONTRACT_REVISION, 1)
         .unwrap();
     assert!(forged.validate_registered_leaves(&original).is_err());
-    let mut different = original;
-    different.envelopes[0].retention.expires_at_unix_ms = Some(1000);
-    assert!(
-        registration
-            .validate_metadata(&different, SOURCE_CONTRACT_REVISION, 1)
-            .is_err()
-    );
 }
 
 #[test]

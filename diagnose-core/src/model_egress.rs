@@ -35,8 +35,8 @@ pub use lineage::{
     validate_model_output_lineage,
 };
 pub use native_output::{
-    NativeModelOutputEvidence, NativeModelOutputSources, model_input_lineage_sha256,
-    model_output_label_sha256, sink_metadata_sha256, sink_metadata_size,
+    NativeModelOutputEvidence, NativeModelOutputSources, model_output_label_sha256,
+    sink_metadata_sha256, sink_metadata_size,
 };
 
 const MODEL_EXPORT_AUTHORIZATION_TTL_MS: u64 = 5 * 60 * 1000;

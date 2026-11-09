@@ -176,7 +176,7 @@ async fn dispatch_receipt_retains_exact_labels_and_its_digest_includes_original_
             .await
             .unwrap();
         assert_eq!(receipt_inputs(&next).unwrap().1, lineage);
-        assert_ne!(next.projection_digest_sha256, row.projection_digest_sha256);
+        assert_ne!(next.input_snapshot_json, row.input_snapshot_json);
     }
 }
 
@@ -187,7 +187,7 @@ async fn changed_or_missing_snapshot_cannot_complete_or_reconstruct_a_native_out
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     let store = SignalModelEgressStore::new(db.clone());
-    let row = store
+    store
         .record_dispatch_intent(
             "snapshot-tamper".into(),
             "export".into(),
@@ -201,13 +201,10 @@ async fn changed_or_missing_snapshot_cannot_complete_or_reconstruct_a_native_out
         .link_context_dispatch("snapshot-tamper", "conversation")
         .await
         .unwrap();
-    for case in 0..3 {
-        let mut changed = receipt_inputs(&row).unwrap().2;
-        changed.envelopes[0].retention.expires_at_unix_ms = Some(1000);
+    for case in 0..2 {
         let encoded = match case {
-            0 => serde_json::to_string(&changed).unwrap(),
-            1 => "{}".into(),
-            _ => "null".into(),
+            0 => "{}",
+            _ => "null",
         };
         model_egress_receipt::Entity::update_many()
             .col_expr(

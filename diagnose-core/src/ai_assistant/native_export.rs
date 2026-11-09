@@ -30,8 +30,6 @@ pub struct AssistantNativeSourceSet {
     pub physical_call_id: String,
     pub model_export_authorization_id: String,
     pub destination: DestinationIdentity,
-    pub input_lineage_sha256: String,
-    pub frame_sha256: String,
     pub context: AssistantNativeContextFrame,
     pub authorizations: Vec<AssistantNativeAuthorizationRef>,
 }
@@ -40,7 +38,6 @@ pub struct AssistantNativeSourceSet {
 #[serde(deny_unknown_fields)]
 pub struct AssistantNativeAuthorizationRef {
     pub authorization_id: String,
-    pub proof_sha256: String,
 }
 
 impl AssistantNativeSourceSet {
@@ -56,15 +53,12 @@ impl AssistantNativeSourceSet {
             physical_call_id: first.native_call.physical_call_id.clone(),
             model_export_authorization_id: first.native_call.model_export_authorization_id.clone(),
             destination: first.native_call.destination.clone(),
-            input_lineage_sha256: first.native_call.input_lineage_sha256.clone(),
-            frame_sha256: frame_sha256(first)?,
             context: AssistantNativeContextFrame::from_grant(first),
             authorizations: grants
                 .iter()
                 .map(|grant| {
                     Ok(AssistantNativeAuthorizationRef {
                         authorization_id: grant.authorization_id.clone(),
-                        proof_sha256: grant.fingerprint()?,
                     })
                 })
                 .collect::<Result<Vec<_>, &'static str>>()?,
@@ -103,25 +97,16 @@ impl AssistantNativeSourceSet {
             physical_call_id: call.physical_call_id.clone(),
             model_export_authorization_id: call.model_export_authorization_id.clone(),
             destination: call.destination.clone(),
-            input_lineage_sha256: call.input_lineage_sha256.clone(),
-            frame_sha256: String::new(),
             context,
             authorizations: grants
                 .iter()
                 .map(|grant| {
                     Ok(AssistantNativeAuthorizationRef {
                         authorization_id: grant.authorization_id.clone(),
-                        proof_sha256: grant.fingerprint()?,
                     })
                 })
                 .collect::<Result<Vec<_>, &'static str>>()?,
         };
-        value.frame_sha256 = context_sha256(
-            &value.actor_id,
-            &value.consumer_conversation_id,
-            &value.source_device_ref,
-            &value.context,
-        )?;
         value
             .authorizations
             .sort_by(|a, b| a.authorization_id.cmp(&b.authorization_id));
@@ -154,10 +139,7 @@ impl AssistantNativeSourceSet {
         self.destination
             .validate()
             .map_err(|_| "invalid native source-set destination")?;
-        if !matches!(self.destination, DestinationIdentity::Model { .. })
-            || !valid_digest(&self.input_lineage_sha256)
-            || !valid_digest(&self.frame_sha256)
-        {
+        if !matches!(self.destination, DestinationIdentity::Model { .. }) {
             return Err("invalid native assistant source set");
         }
         self.context.validate()?;
@@ -167,23 +149,12 @@ impl AssistantNativeSourceSet {
         {
             return Err("a task definition has no accepted chat input or retrieved-source grants");
         }
-        if self.frame_sha256
-            != context_sha256(
-                &self.actor_id,
-                &self.consumer_conversation_id,
-                &self.source_device_ref,
-                &self.context,
-            )?
-        {
-            return Err("native context frame changed");
-        }
         let mut previous: Option<&str> = None;
         for reference in &self.authorizations {
             if !native_ids::is(
                 Kind::AssistantReadAuthorization,
                 &reference.authorization_id,
-            ) || !valid_digest(&reference.proof_sha256)
-                || previous.is_some_and(|id| id >= reference.authorization_id.as_str())
+            ) || previous.is_some_and(|id| id >= reference.authorization_id.as_str())
             {
                 return Err("invalid native assistant authorization reference");
             }
@@ -224,20 +195,20 @@ impl AssistantNativeSourceSet {
         grant: &AssistantDataExportAuthorization,
     ) -> Result<(), &'static str> {
         self.validate()?;
-        let reference = self
+        if !self
             .authorizations
             .iter()
-            .find(|reference| reference.authorization_id == grant.authorization_id)
-            .ok_or("native assistant use is not sealed by its receipt")?;
-        if reference.proof_sha256 != grant.fingerprint()?
-            || grant.actor_id != self.actor_id
+            .any(|reference| reference.authorization_id == grant.authorization_id)
+        {
+            return Err("native assistant use is not sealed by its receipt");
+        }
+        if grant.actor_id != self.actor_id
             || grant.consumer_conversation_id != self.consumer_conversation_id
             || grant.source_device_ref != self.source_device_ref
             || grant.native_call.physical_call_id != self.physical_call_id
             || grant.native_call.model_export_authorization_id != self.model_export_authorization_id
             || grant.native_call.destination != self.destination
-            || grant.native_call.input_lineage_sha256 != self.input_lineage_sha256
-            || frame_sha256(grant)? != self.frame_sha256
+            || AssistantNativeContextFrame::from_grant(grant) != self.context
         {
             return Err("native assistant source-set binding changed");
         }
@@ -249,9 +220,6 @@ impl AssistantNativeSourceSet {
         inputs: &[crate::model_egress::ModelInputLineage],
     ) -> Result<(), &'static str> {
         self.validate()?;
-        if self.input_lineage_sha256 != input_lineage_sha256(inputs)? {
-            return Err("native source set changed its audited input set");
-        }
         if self.authorizations.is_empty()
             && inputs.iter().any(|input| {
                 input.source_provider_id == "assistant-data-source"
@@ -265,31 +233,6 @@ impl AssistantNativeSourceSet {
     }
 }
 
-fn frame_sha256(grant: &AssistantDataExportAuthorization) -> Result<String, &'static str> {
-    context_sha256(
-        &grant.actor_id,
-        &grant.consumer_conversation_id,
-        &grant.source_device_ref,
-        &AssistantNativeContextFrame::from_grant(grant),
-    )
-}
-
-fn context_sha256(
-    actor: &str,
-    conversation: &str,
-    device: &str,
-    frame: &AssistantNativeContextFrame,
-) -> Result<String, &'static str> {
-    frame.validate()?;
-    crate::model_egress::sink_metadata_sha256(&(
-        "assistant-native-frame-v2",
-        actor,
-        conversation,
-        device,
-        frame,
-    ))
-}
-
 /// Supplied by the native model-receipt transaction after its original dispatch
 /// admission. A call's exact sink audit and receipt identity stay immutable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,7 +241,6 @@ pub struct NativeAssistantModelCall {
     pub physical_call_id: String,
     pub model_export_authorization_id: String,
     pub destination: DestinationIdentity,
-    pub input_lineage_sha256: String,
     pub authority_expires_at_unix_ms: Option<u64>,
 }
 
@@ -310,7 +252,6 @@ impl NativeAssistantModelCall {
             .validate()
             .map_err(|_| "invalid native assistant recipient")?;
         if !matches!(self.destination, DestinationIdentity::Model { .. })
-            || !valid_digest(&self.input_lineage_sha256)
             || self
                 .authority_expires_at_unix_ms
                 .is_some_and(|until| until == 0 || until > i64::MAX as u64)
@@ -339,14 +280,13 @@ pub struct AssistantDataExportAuthorization {
     pub statement_timezone: String,
     pub retrieval_episode_id: String,
     pub task_id: Option<String>,
-    pub scope_sha256: String,
+    pub scope: Box<super::data_access::AssistantScope>,
 
     pub policy_revision: u64,
     pub source_contract_revision: u64,
     pub memory_state_generation: u64,
     pub control_generation: u64,
     pub projection_id: String,
-    pub projection_sha256: String,
     pub source_envelope_id: String,
     pub purpose: SourceReadPurpose,
     pub native_call: NativeAssistantModelCall,
@@ -355,11 +295,6 @@ pub struct AssistantDataExportAuthorization {
 }
 
 impl AssistantDataExportAuthorization {
-    pub fn fingerprint(&self) -> Result<String, &'static str> {
-        self.validate()?;
-        crate::model_egress::sink_metadata_sha256(self)
-    }
-
     /// All live native/session/task/source checks must already have succeeded
     /// in the caller's original receipt transaction. This validates their exact
     /// common bindings; it cannot perform or replace those database checks.
@@ -385,7 +320,6 @@ impl AssistantDataExportAuthorization {
             || manifest.lease_token != session.lease_token
             || manifest.input_revision != session.input_revision
             || manifest.actor_input_seq != data.current_actor_input_seq
-            || manifest.scope_sha256 != super::data_access::scope_sha256(session)?
             || manifest.retrieval_episode_id != data.retrieval_budget.episode_id
             || manifest.task_id != data.retrieval_task_id
             || manifest.memory_state_generation != data.memory_state_generation
@@ -438,14 +372,13 @@ impl AssistantDataExportAuthorization {
             statement_timezone: data.current_input_timezone.clone(),
             retrieval_episode_id: manifest.retrieval_episode_id.clone(),
             task_id: manifest.task_id.clone(),
-            scope_sha256: manifest.scope_sha256.clone(),
+            scope: super::data_access::assistant_scope(session)?,
 
             policy_revision: manifest.policy_revision,
             memory_state_generation: manifest.memory_state_generation,
             source_contract_revision: super::source_registry::SOURCE_CONTRACT_REVISION,
             control_generation: manifest.control_generation,
             projection_id: proof.usage.projection_id.clone(),
-            projection_sha256: proof.fingerprint()?,
             source_envelope_id: proof.source_envelope.envelope_id.clone(),
             purpose: proof.usage.purpose,
             native_call,
@@ -488,8 +421,6 @@ impl AssistantDataExportAuthorization {
         }
         if self.authorization_id != self.expected_id()
             || !native_ids::is(Kind::AssistantReadProjection, &self.projection_id)
-            || !valid_digest(&self.projection_sha256)
-            || !valid_digest(&self.scope_sha256)
             || self.session_version < 0
             || self.lease_token == 0
             || self.lease_token > i64::MAX as u64
@@ -521,8 +452,7 @@ impl AssistantDataExportAuthorization {
 
     pub fn validate_projection(&self, proof: &ReadProjectionProof) -> Result<(), &'static str> {
         self.validate()?;
-        if self.projection_sha256 != proof.fingerprint()?
-            || self.projection_id != proof.usage.projection_id
+        if self.projection_id != proof.usage.projection_id
             || self.actor_id != proof.actor_id
             || self.consumer_conversation_id != proof.root_conversation_id
             || self.source_device_ref != proof.source_device_ref
@@ -530,7 +460,7 @@ impl AssistantDataExportAuthorization {
             || self.actor_input_seq != proof.actor_input_seq
             || self.task_id != proof.task_id
             || self.retrieval_episode_id != proof.usage.retrieval_episode_id
-            || self.scope_sha256 != proof.usage.scope_sha256
+            || self.scope != proof.usage.scope
             || self.policy_revision != proof.usage.policy_revision
             || self.control_generation != proof.usage.control_generation
             || self.memory_state_generation != proof.usage.memory_state_generation
@@ -548,23 +478,13 @@ impl AssistantDataExportAuthorization {
     }
 }
 
-pub fn input_lineage_sha256(
-    lineage: &[crate::model_egress::ModelInputLineage],
-) -> Result<String, &'static str> {
-    crate::model_egress::model_input_lineage_sha256(lineage)
-}
-
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     mod owner_history;
     use crate::{
         ai_assistant::{
-            data_access::scope_sha256,
+            data_access::assistant_scope,
             read_projection::ReadProjectionKind,
             seam::{AssistantDataReadUse, SelectedAssistantEnvelope},
             test_support::personal_session,
@@ -613,7 +533,7 @@ mod tests {
                 source_envelope_id: envelope.envelope_id.clone(),
                 purpose: SourceReadPurpose::ModelMemory,
                 retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
-                scope_sha256: scope_sha256(&session).unwrap(),
+                scope: assistant_scope(&session).unwrap(),
                 policy_revision: 1,
                 control_generation: 1,
                 memory_state_generation: 1,
@@ -639,7 +559,6 @@ mod tests {
             actor_input_seq: data.current_actor_input_seq,
             retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
             task_id: None,
-            scope_sha256: scope_sha256(&session).unwrap(),
             policy_revision: 1,
 
             memory_state_generation: 1,
@@ -654,7 +573,6 @@ mod tests {
             physical_call_id: "native-physical-call-1".into(),
             model_export_authorization_id: "native-export-1".into(),
             destination,
-            input_lineage_sha256: "b".repeat(64),
             authority_expires_at_unix_ms: None,
         };
         (session, manifest, proof, call)
@@ -684,7 +602,6 @@ mod tests {
             std::slice::from_ref(&envelope),
         )
         .unwrap();
-        call.input_lineage_sha256 = input_lineage_sha256(&inputs).unwrap();
         let set =
             AssistantNativeSourceSet::for_request(&session, &manifest, &call, &[], 1001).unwrap();
         assert!(set.authorizations.is_empty());
@@ -706,9 +623,6 @@ mod tests {
         let mut another_input = session.clone();
         another_input.input_revision += 1;
         assert!(set.context.validate_session(&another_input).is_err());
-        let mut another_time = set;
-        another_time.context.input_recorded_at_unix_ms += 1;
-        assert!(another_time.validate().is_err());
     }
 
     #[test]
@@ -753,7 +667,6 @@ mod tests {
                 input.source_provider_id = "assistant-data-result".into();
                 input.source_envelope_ids = vec!["producer".into(), "read".into()];
             }
-            call.input_lineage_sha256 = input_lineage_sha256(std::slice::from_ref(&input)).unwrap();
             let empty =
                 AssistantNativeSourceSet::for_request(&session, &manifest, &call, &[], 1001)
                     .unwrap();
@@ -774,7 +687,6 @@ mod tests {
         session.trigger_origin = TriggerOrigin::WorkCompletion {
             kind: WorkKind::ComputerAction,
         };
-        manifest.scope_sha256 = super::super::data_access::scope_sha256(&session).unwrap();
         let set =
             AssistantNativeSourceSet::for_request(&session, &manifest, &call, &[], 1001).unwrap();
         set.context.validate_session(&session).unwrap();
@@ -801,9 +713,8 @@ mod tests {
 
     #[test]
     fn explicit_subagent_wait_preserves_original_retrieval_grants() {
-        let (mut session, mut manifest, proof, call) = fixture();
+        let (mut session, manifest, proof, call) = fixture();
         session.trigger_origin = crate::session::TriggerOrigin::SubAgentCompletion;
-        manifest.scope_sha256 = super::super::data_access::scope_sha256(&session).unwrap();
         let before = session
             .assistant_data
             .as_ref()
@@ -833,7 +744,7 @@ mod tests {
                 0 => selected.actor_id = "other".into(),
                 1 => selected.input_revision += 1,
                 2 => selected.lease_token += 1,
-                3 => selected.scope_sha256 = "c".repeat(64),
+                3 => selected.session_version += 1,
                 4 => {
                     changed
                         .assistant_data
@@ -895,14 +806,13 @@ mod tests {
             set.validate_grants(&[first.clone(), first.clone()])
                 .is_err()
         );
-        for field in 0..5 {
+        for field in 0..4 {
             let mut changed = second.clone();
             match field {
                 0 => changed.input_revision += 1,
                 1 => changed.control_generation += 1,
                 2 => changed.authorized_at_unix_ms += 1,
-                3 => changed.source_contract_revision += 1,
-                _ => changed.native_call.input_lineage_sha256 = "f".repeat(64),
+                _ => changed.source_contract_revision += 1,
             }
             assert!(
                 set.validate_grants(&[first.clone(), changed.clone()])
@@ -942,9 +852,6 @@ mod tests {
         )
         .unwrap();
         assert_ne!(grant.authorization_id, second.authorization_id);
-        let mut changed_proof = proof.clone();
-        changed_proof.request_sha256 = "c".repeat(64);
-        assert!(grant.validate_projection(&changed_proof).is_err());
         let mut changed_grant = grant.clone();
         changed_grant.native_call.physical_call_id = "another-call".into();
         assert!(changed_grant.validate().is_err());
@@ -963,7 +870,7 @@ mod tests {
                 1 => changed.memory_state_generation += 1,
                 2 => changed.policy_revision += 1,
                 3 => changed.actor_input_seq += 1,
-                4 => changed.scope_sha256 = "d".repeat(64),
+                4 => changed.session_version += 1,
                 _ => changed.lease_token += 1,
             }
             assert!(
@@ -1043,9 +950,8 @@ mod tests {
         let (mut session, mut manifest, mut proof, mut call) = fixture();
         super::super::data_access::bind_opened_task(&mut session, "goal", 9000).unwrap();
         manifest.task_id = Some("goal".into());
-        manifest.scope_sha256 = scope_sha256(&session).unwrap();
         proof.task_id = Some("goal".into());
-        proof.usage.scope_sha256 = manifest.scope_sha256.clone();
+        proof.usage.scope = assistant_scope(&session).unwrap();
         assert!(
             AssistantDataExportAuthorization::for_projection(
                 &session,
@@ -1078,7 +984,7 @@ mod tests {
 
     #[test]
     fn memory_sends_require_the_original_memory_consent_and_its_own_deadline() {
-        let (mut session, mut manifest, mut proof, mut call) = fixture();
+        let (mut session, manifest, mut proof, mut call) = fixture();
         let data = session.assistant_data.as_mut().unwrap();
         data.history_access_scope
             .as_mut()
@@ -1088,8 +994,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .expires_at_unix_ms = Some(2000);
-        manifest.scope_sha256 = scope_sha256(&session).unwrap();
-        proof.usage.scope_sha256 = manifest.scope_sha256.clone();
+        proof.usage.scope = assistant_scope(&session).unwrap();
         call.authority_expires_at_unix_ms = Some(9000);
         let grant = AssistantDataExportAuthorization::for_projection(
             &session,
@@ -1113,8 +1018,7 @@ mod tests {
             .is_err()
         );
         session.assistant_data.as_mut().unwrap().memory_access_scope = None;
-        manifest.scope_sha256 = scope_sha256(&session).unwrap();
-        proof.usage.scope_sha256 = manifest.scope_sha256.clone();
+        proof.usage.scope = assistant_scope(&session).unwrap();
         assert!(
             AssistantDataExportAuthorization::for_projection(
                 &session, &manifest, &proof, call, None, 1001

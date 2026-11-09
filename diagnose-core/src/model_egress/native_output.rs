@@ -23,16 +23,13 @@ pub struct NativeModelOutputSources {
 
 impl NativeModelOutputSources {
     pub fn validate(&self, output: &DataEnvelope) -> Result<(), &'static str> {
-        self.evidence.validate_sources(&self.inputs, output)?;
+        self.evidence.validate_sources(output)?;
         let audit = self.input_snapshot.audit_with_lineage(&self.inputs)?;
         self.input_snapshot
             .validate_export_authorization(&self.evidence.model_export_authorization_id)?;
         validate_model_output_lineage(&audit, &self.inputs, output)
             .map_err(|_| "native output changed its complete original input set")?;
-        if self.evidence.destination != self.input_snapshot.destination
-            || self.evidence.input_snapshot_sha256
-                != super::sink_metadata_sha256(&self.input_snapshot)?
-        {
+        if self.evidence.destination != self.input_snapshot.destination {
             return Err("native output replaced its original full input labels");
         }
         Ok(())
@@ -49,8 +46,6 @@ pub struct NativeModelOutputEvidence {
     pub output_envelope_id: String,
     pub output_digest_sha256: String,
     pub output_label_sha256: String,
-    pub input_lineage_sha256: String,
-    pub input_snapshot_sha256: String,
     pub provider_started_at_unix_ms: u64,
     pub completed_at_unix_ms: u64,
 }
@@ -86,8 +81,6 @@ impl NativeModelOutputEvidence {
             output_envelope_id: output.envelope_id.clone(),
             output_digest_sha256: output.content_sha256().unwrap_or_default().to_owned(),
             output_label_sha256: model_output_label_sha256(output)?,
-            input_lineage_sha256: model_input_lineage_sha256(inputs)?,
-            input_snapshot_sha256: snapshot.fingerprint()?,
             provider_started_at_unix_ms: started,
             completed_at_unix_ms: completed,
         };
@@ -108,14 +101,9 @@ impl NativeModelOutputEvidence {
             .validate()
             .map_err(|_| "invalid native model evidence destination")?;
         if !matches!(self.destination, DestinationIdentity::Model { .. })
-            || [
-                &self.output_digest_sha256,
-                &self.output_label_sha256,
-                &self.input_lineage_sha256,
-                &self.input_snapshot_sha256,
-            ]
-            .iter()
-            .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || [&self.output_digest_sha256, &self.output_label_sha256]
+                .iter()
+                .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
             || self.provider_started_at_unix_ms == 0
             || self.completed_at_unix_ms < self.provider_started_at_unix_ms
             || self.completed_at_unix_ms > i64::MAX as u64
@@ -125,17 +113,12 @@ impl NativeModelOutputEvidence {
         Ok(())
     }
 
-    fn validate_sources(
-        &self,
-        inputs: &[ModelInputLineage],
-        output: &DataEnvelope,
-    ) -> Result<(), &'static str> {
+    fn validate_sources(&self, output: &DataEnvelope) -> Result<(), &'static str> {
         self.validate()?;
         if self.output_envelope_id != output.envelope_id
             || output.content_sha256() != Some(self.output_digest_sha256.as_str())
             || !output.allowed_destinations.contains(&self.destination)
             || self.output_label_sha256 != model_output_label_sha256(output)?
-            || self.input_lineage_sha256 != model_input_lineage_sha256(inputs)?
         {
             return Err("native model output evidence changed");
         }
@@ -148,13 +131,6 @@ pub fn model_output_label_sha256(output: &DataEnvelope) -> Result<String, &'stat
         .validate()
         .map_err(|_| "invalid native model output label")?;
     sink_metadata_sha256(output)
-}
-
-pub fn model_input_lineage_sha256(inputs: &[ModelInputLineage]) -> Result<String, &'static str> {
-    if inputs.is_empty() {
-        return Err("empty native model input lineage");
-    }
-    sink_metadata_sha256(inputs)
 }
 
 /// Hash bounded metadata while serializing; do not allocate an oversized JSON
@@ -293,7 +269,7 @@ mod tests {
             &output,
         )
         .unwrap();
-        evidence.validate_sources(&inputs, &output).unwrap();
+        evidence.validate_sources(&output).unwrap();
         for case in 0..4 {
             let mut changed = output.clone();
             match case {
@@ -311,13 +287,8 @@ mod tests {
             }
             assert_eq!(changed.envelope_id, output.envelope_id);
             assert_eq!(changed.content, output.content);
-            assert!(evidence.validate_sources(&inputs, &changed).is_err());
+            assert!(evidence.validate_sources(&changed).is_err());
         }
-        let mut changed_inputs = inputs.clone();
-        changed_inputs[0]
-            .source_envelope_ids
-            .push("unrecorded-parent".into());
-        assert!(evidence.validate_sources(&changed_inputs, &output).is_err());
         let mut changed = evidence;
         changed.completed_at_unix_ms = 9;
         assert!(changed.validate().is_err());
@@ -344,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn output_evidence_rejects_replaced_original_constraints_even_when_thin_lineage_matches() {
+    fn output_sources_reject_an_omitted_input_snapshot() {
         let (audit, inputs, output, snapshot) = fixture();
         let evidence = NativeModelOutputEvidence::from_receipt(
             "physical",
@@ -364,33 +335,9 @@ mod tests {
             input_snapshot: snapshot,
         };
         original.validate(&output).unwrap();
-        for case in 0..5 {
-            let mut replaced = original.clone();
-            let input = &mut replaced.input_snapshot.envelopes[0];
-            match case {
-                0 => input.sensitivity = Sensitivity::Sensitive,
-                1 => input.retention.expires_at_unix_ms = Some(1000),
-                2 => input.retention.delete_with_run = !input.retention.delete_with_run,
-                3 => input.provenance.source_object_id = Some("other-source-object".into()),
-                _ => input.allowed_destinations.push(DestinationIdentity::Model {
-                    connection_id: "other".into(),
-                    connection_revision: 1,
-                    model_id: "other-model".into(),
-                    profile_revision: 1,
-                }),
-            }
-            assert_eq!(
-                project_model_input_lineage(&audit, &replaced.input_snapshot.envelopes).unwrap(),
-                original.inputs
-            );
-            assert!(replaced.validate(&output).is_err(), "case {case}");
-        }
-        let mut omitted = original.clone();
+        let mut omitted = original;
         omitted.input_snapshot.envelopes.clear();
         assert!(omitted.validate(&output).is_err());
-        let mut wrong_sink = original;
-        wrong_sink.input_snapshot.total_bytes += 1;
-        assert!(wrong_sink.validate(&output).is_err());
     }
 
     #[test]
@@ -398,19 +345,18 @@ mod tests {
         let (audit, inputs, output, _) = fixture();
         let encoded = serde_json::to_vec(&inputs).unwrap();
         assert_eq!(
-            model_input_lineage_sha256(&inputs).unwrap(),
+            sink_metadata_sha256(&inputs).unwrap(),
             format!("{:x}", Sha256::digest(&encoded))
         );
         assert_eq!(
             model_output_label_sha256(&output).unwrap(),
             format!("{:x}", Sha256::digest(serde_json::to_vec(&output).unwrap()))
         );
-        assert!(model_input_lineage_sha256(&[]).is_err());
         assert!(sink_metadata_sha256(&"x".repeat(MAX_SOURCE_LINEAGE_BYTES)).is_err());
         // Repeated transport entries are hashed in full rather than imposing a
         // new message-count limit on an otherwise bounded native audit.
         let repeated = vec![inputs[0].clone(); 300];
-        assert!(model_input_lineage_sha256(&repeated).is_ok());
+        assert!(sink_metadata_sha256(&repeated).is_ok());
         assert!(!audit.envelope_ids.is_empty());
     }
 }

@@ -124,7 +124,7 @@ async fn a_bad_second_grant_fails_before_consuming_or_sealing_the_valid_first_gr
     let before = quota::Entity::find().one(&store.db).await.unwrap().unwrap();
     let txn = store.db.begin().await.unwrap();
     let mut grants = seed_native_batch_on(&txn, &proofs, "physical-invalid-second").await;
-    grants[1].projection_sha256 = "d".repeat(64);
+    grants[1].projection_id = grants[0].projection_id.clone();
     assert!(record_call_on(&txn, &grants, &policy).await.is_err());
     assert!(
         native::Entity::find()

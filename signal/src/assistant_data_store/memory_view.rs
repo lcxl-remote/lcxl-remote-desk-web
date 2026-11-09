@@ -209,7 +209,7 @@ async fn read_proof_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         source_envelope_id: "assistant-memory-candidate".into(),
         purpose: SourceReadPurpose::ModelMemory,
         retrieval_episode_id: context.scope.retrieval_episode_id.clone(),
-        scope_sha256: context.scope_sha256.into(),
+        scope: Box::new(context.assistant_scope.clone()),
         policy_revision: context.access.policy_revision,
         control_generation: context.access.control_generation,
         memory_state_generation: context.access.memory_state_generation,
@@ -359,11 +359,6 @@ async fn validate_context_with_runtime_on<C: ConnectionTrait + crate::config::Co
         || context.observation_generation > context.access.memory_state_generation
         || context.requested_devices.len()
             > context.platform.limits.retrieval.episode.query_devices as usize
-        || context.scope_sha256.len() != 64
-        || !context
-            .scope_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(AssistantStoreError::Inaccessible);
     }

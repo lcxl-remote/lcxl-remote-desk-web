@@ -12,7 +12,7 @@ use desk_agent_protocol::ai_assistant::{
 };
 use desk_diagnose_core::{
     ai_assistant::{
-        data_access::scope_sha256,
+        data_access::assistant_scope,
         data_tools,
         history::serialized_tool_response_bytes,
         retrieval_state::{FrozenRetrievalQuery, RetrievalQueryBinding},
@@ -181,7 +181,7 @@ fn time_calls(session: &PersistedAgentSession, from: u64, until: u64) -> Vec<Too
         retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
         source_device_ref: data.source_device_ref.clone(),
         task_id: None,
-        scope_sha256: scope_sha256(session).unwrap(),
+        scope: assistant_scope(session).unwrap(),
         history_scope: data.history_access_scope.clone(),
         memory_device_rule: None,
         request_memory_device_refs: Vec::new(),

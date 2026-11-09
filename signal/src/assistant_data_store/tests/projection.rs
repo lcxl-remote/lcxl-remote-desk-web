@@ -45,7 +45,7 @@ pub(super) fn proof(content: &str, revision: &str) -> ReadProjectionProof {
             source_envelope_id: envelope.envelope_id.clone(),
             purpose: SourceReadPurpose::ModelMemory,
             retrieval_episode_id: "episode".into(),
-            scope_sha256: "b".repeat(64),
+            scope: Box::default(),
             policy_revision: 1,
             control_generation: 1,
             memory_state_generation: 1,

@@ -19,7 +19,6 @@ pub struct Model {
     pub consumer_conversation_id: String,
     #[sea_orm(indexed)]
     pub projection_id: String,
-    pub projection_sha256: String,
     pub purpose: String,
     #[sea_orm(column_type = "Text")]
     pub proof_json: String,

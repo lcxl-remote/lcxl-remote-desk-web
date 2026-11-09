@@ -317,10 +317,6 @@ fn to_row(
         purpose: purpose(proof.snapshot.purpose)?.into(),
         kind: proof.request.kind().into(),
         request_sha256: proof.snapshot.request_sha256.clone(),
-        scope_sha256: proof
-            .binding
-            .fingerprint()
-            .map_err(AssistantStoreError::Invalid)?,
         proof_json,
         captured_at_ms: signed(proof.snapshot.captured_at_unix_ms)?,
         expires_at_ms: signed(proof.snapshot.expires_at_unix_ms)?,
@@ -340,11 +336,6 @@ pub fn decode_row(row: query::Model) -> Result<StoredQuery, AssistantStoreError>
         || row.purpose != purpose(proof.snapshot.purpose)?
         || row.kind != proof.request.kind()
         || row.request_sha256 != proof.snapshot.request_sha256
-        || row.scope_sha256
-            != proof
-                .binding
-                .fingerprint()
-                .map_err(AssistantStoreError::Invalid)?
         || row.proof_json != proof.encode().map_err(AssistantStoreError::Invalid)?
         || unsigned(row.captured_at_ms)? != proof.snapshot.captured_at_unix_ms
         || unsigned(row.expires_at_ms)? != proof.snapshot.expires_at_unix_ms
@@ -363,7 +354,6 @@ pub fn metadata_bytes(row: &query::Model) -> Result<i64, AssistantStoreError> {
         &row.purpose,
         &row.kind,
         &row.request_sha256,
-        &row.scope_sha256,
         &row.proof_json,
     ];
     let bytes = fields

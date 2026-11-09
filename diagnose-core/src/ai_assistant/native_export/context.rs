@@ -14,7 +14,6 @@ pub struct AssistantNativeContextFrame {
     pub statement_timezone: String,
     pub retrieval_episode_id: String,
     pub task_id: Option<String>,
-    pub scope_sha256: String,
 
     pub policy_revision: u64,
     pub source_contract_revision: u64,
@@ -34,7 +33,6 @@ impl AssistantNativeContextFrame {
             statement_timezone: grant.statement_timezone.clone(),
             retrieval_episode_id: grant.retrieval_episode_id.clone(),
             task_id: grant.task_id.clone(),
-            scope_sha256: grant.scope_sha256.clone(),
 
             policy_revision: grant.policy_revision,
             source_contract_revision: grant.source_contract_revision,
@@ -68,7 +66,6 @@ impl AssistantNativeContextFrame {
             statement_timezone: data.current_input_timezone.clone(),
             retrieval_episode_id: manifest.retrieval_episode_id.clone(),
             task_id: manifest.task_id.clone(),
-            scope_sha256: manifest.scope_sha256.clone(),
 
             policy_revision: manifest.policy_revision,
             source_contract_revision: super::super::source_registry::SOURCE_CONTRACT_REVISION,
@@ -100,7 +97,6 @@ impl AssistantNativeContextFrame {
             || self.authorized_at_unix_ms < self.input_recorded_at_unix_ms
             || self.authorized_at_unix_ms > i64::MAX as u64
             || !super::super::source::valid_statement_timezone(&self.statement_timezone)
-            || !valid_digest(&self.scope_sha256)
             || self.policy_revision == 0
             || self.source_contract_revision == 0
             || self.memory_state_generation == 0
@@ -135,7 +131,6 @@ impl AssistantNativeContextFrame {
             || self.statement_timezone != data.current_input_timezone
             || self.retrieval_episode_id != data.retrieval_budget.episode_id
             || self.task_id != data.retrieval_task_id
-            || self.scope_sha256 != super::super::data_access::scope_sha256(session)?
         {
             return Err("original native context session changed");
         }

@@ -15,7 +15,6 @@ use desk_diagnose_core::{
         data_control::CurrentMemoryUse,
         native_export::{
             AssistantDataExportAuthorization, MAX_NATIVE_EXPORT_TTL_MS, NativeAssistantModelCall,
-            input_lineage_sha256,
         },
         read_projection::ReadProjectionProof,
     },
@@ -83,7 +82,7 @@ fn grant(
         statement_timezone: "UTC".into(),
         retrieval_episode_id: proof.usage.retrieval_episode_id.clone(),
         task_id: None,
-        scope_sha256: proof.usage.scope_sha256.clone(),
+        scope: proof.usage.scope.clone(),
 
         policy_revision: 1,
         source_contract_revision:
@@ -91,7 +90,6 @@ fn grant(
         memory_state_generation: 1,
         control_generation: 1,
         projection_id: proof.usage.projection_id.clone(),
-        projection_sha256: proof.fingerprint().unwrap(),
         source_envelope_id: proof.source_envelope.envelope_id.clone(),
         purpose,
         native_call: call,
@@ -151,12 +149,11 @@ async fn seed_native_batch_on(
     )
     .await
     .unwrap();
-    let (_, inputs, _) = crate::model_egress_store::receipt_inputs(&row).unwrap();
+    crate::model_egress_store::receipt_inputs(&row).unwrap();
     let call = NativeAssistantModelCall {
         physical_call_id: physical.into(),
         model_export_authorization_id: "export-1".into(),
         destination: sink.destination,
-        input_lineage_sha256: input_lineage_sha256(&inputs).unwrap(),
         authority_expires_at_unix_ms: None,
     };
     proofs
@@ -378,7 +375,7 @@ async fn a_prepared_result_or_mismatched_native_audit_never_counts_as_an_actual_
     for case in 0..4 {
         let mut changed = accepted.clone();
         match case {
-            0 => changed.native_call.input_lineage_sha256 = "c".repeat(64),
+            0 => changed.native_call.physical_call_id = "different-call".into(),
             1 => changed.native_call.model_export_authorization_id = "different-export".into(),
             2 => {
                 changed.native_call.destination =

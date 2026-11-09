@@ -18,7 +18,6 @@ pub struct NativeInputLeafPolicy {
 pub struct NativeInputPolicyRegistration {
     pub source_contract_revision: u64,
     pub policy_revision: u64,
-    pub input_snapshot_sha256: String,
     /// Ordered one-to-one with the complete original snapshot. Equal policies
     /// share one entry; actual inputs are never deduplicated.
     pub leaves: Vec<Option<NativeInputLeafPolicy>>,
@@ -40,7 +39,6 @@ impl NativeInputPolicyRegistration {
         if source_contract_revision == 0 || policy_revision == 0 {
             return Err("missing original input policy revision");
         }
-        let input_snapshot_sha256 = snapshot.fingerprint()?;
         let mut policies: Vec<SourceUsePolicy> = Vec::new();
         let mut leaves = Vec::with_capacity(snapshot.envelopes.len());
         for registration in registered_inputs(snapshot, source_contract_revision, policy_revision)?
@@ -66,7 +64,6 @@ impl NativeInputPolicyRegistration {
         let value = Self {
             source_contract_revision,
             policy_revision,
-            input_snapshot_sha256,
             leaves,
             policies,
         };
@@ -86,7 +83,6 @@ impl NativeInputPolicyRegistration {
             || self.policy_revision == 0
             || self.source_contract_revision != original_contract_revision
             || self.policy_revision != original_policy_revision
-            || self.input_snapshot_sha256 != snapshot.fingerprint()?
             || self.leaves.len() != snapshot.envelopes.len()
         {
             return Err("native policy registration changed its original snapshot");

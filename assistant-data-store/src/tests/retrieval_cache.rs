@@ -37,7 +37,7 @@ fn fixture(logical: &str, captured: u64) -> FrozenRetrievalQuery {
         retrieval_episode_id: "episode".into(),
         source_device_ref: "device".into(),
         task_id: None,
-        scope_sha256: "a".repeat(64),
+        scope: Box::default(),
         history_scope: owner_history_scope(
             "1",
             "root",
@@ -492,16 +492,12 @@ fn corrupted_denormalized_query_bindings_are_rejected_even_with_a_valid_json_dig
         purpose: "model_history".into(),
         kind: proof.request.kind().into(),
         request_sha256: proof.snapshot.request_sha256.clone(),
-        scope_sha256: proof.binding.fingerprint().unwrap(),
         proof_json: raw,
         captured_at_ms: proof.snapshot.captured_at_unix_ms as i64,
         expires_at_ms: proof.snapshot.expires_at_unix_ms as i64,
         revision: 1,
     };
     assert!(cache::decode_row(row.clone()).is_ok());
-    let mut changed = row.clone();
-    changed.scope_sha256 = "f".repeat(64);
-    assert!(cache::decode_row(changed).is_err());
     let mut changed = row.clone();
     changed.actor_id = "2".into();
     assert!(cache::decode_row(changed).is_err());

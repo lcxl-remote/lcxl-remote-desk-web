@@ -125,7 +125,7 @@ async fn search_on(
     let query_devices = query.snapshot.device_refs.iter().cloned().collect();
     let authority = read_authority(
         &fence,
-        &query.binding.scope_sha256,
+        &query.binding.scope,
         &query_devices,
         query.source_observation_generation,
         now,
@@ -290,7 +290,7 @@ async fn prepare_query_on(
         old.proof.source_observation_generation
     });
     let allowed_set = allowed.iter().cloned().collect();
-    let authority = read_authority(fence, &binding.scope_sha256, &allowed_set, observation, now)?;
+    let authority = read_authority(fence, &binding.scope, &allowed_set, observation, now)?;
     let candidates = desk_diagnose_core::future::boxed(|| {
         super::memory_keyword::relevance_on(db, &authority, request)
     })
@@ -335,7 +335,7 @@ async fn prepare_query_on(
 
 fn read_authority<'a>(
     fence: &'a NativeAssistantDataFence<'_>,
-    scope_hash: &'a str,
+    assistant_scope: &'a desk_diagnose_core::ai_assistant::data_access::AssistantScope,
     devices: &'a BTreeSet<String>,
     observation: u64,
     now: u64,
@@ -345,7 +345,7 @@ fn read_authority<'a>(
     Ok(MemoryReadAuthorization {
         actor_id: &fence.context.session.actor_id,
         current_device_ref: &scope.current_device_ref,
-        scope_sha256: scope_hash,
+        assistant_scope,
         scope,
         access: &fence.access,
         platform: &fence.policy,

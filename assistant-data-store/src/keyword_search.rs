@@ -58,7 +58,7 @@ const POSTING_PAGE: u64 = 128;
 pub struct HistorySearchAuthorization<'a> {
     pub actor_id: &'a str,
     pub current_device_ref: &'a str,
-    pub scope_sha256: &'a str,
+    pub assistant_scope: &'a desk_diagnose_core::ai_assistant::data_access::AssistantScope,
     pub scope: &'a HistoryAccessScope,
     pub access: &'a AssistantDataToolAccess,
     pub platform: &'a AssistantDataPolicy,

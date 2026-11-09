@@ -12,7 +12,7 @@ use desk_diagnose_core::ai_assistant::retrieval_query::QuerySourceVersion;
 use desk_diagnose_core::{
     ai_assistant::{
         assistant_data_admission::OriginalAssistantDataCall,
-        data_access::{AssistantDataToolAccess, scope_sha256},
+        data_access::{AssistantDataToolAccess, assistant_scope},
         seam::AssistantDataCall,
     },
     model_egress::NativeModelOutputSources,
@@ -643,7 +643,7 @@ async fn producer_on(
     {
         return Err(AssistantStoreError::Inaccessible);
     }
-    let scope = scope_sha256(context.session).map_err(AssistantStoreError::Invalid)?;
+    let scope = assistant_scope(context.session).map_err(AssistantStoreError::Invalid)?;
     let mut deadline = context
         .producer_output_envelope
         .retention
@@ -698,7 +698,7 @@ async fn producer_on(
             || grant.actor_input_seq != data.current_actor_input_seq
             || grant.retrieval_episode_id != data.retrieval_budget.episode_id
             || grant.task_id != data.retrieval_task_id
-            || grant.scope_sha256 != scope
+            || grant.scope != scope
             || grant.policy_revision
                 != if metadata_only {
                     archive.proof.source_set.context.policy_revision

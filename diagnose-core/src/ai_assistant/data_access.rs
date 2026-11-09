@@ -7,6 +7,7 @@ use desk_agent_protocol::ai_assistant::{
     source::AssistantSourceKind,
     user_instructions::AssistantDataSettings,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantDataToolAccess {
@@ -29,26 +30,40 @@ impl AssistantDataToolAccess {
     }
 }
 
-pub fn scope_sha256(session: &PersistedAgentSession) -> Result<String, &'static str> {
-    use sha2::Digest;
+/// The retrieval scope a cached read, query or export was admitted under.
+/// Compared by value; any component change prevents reuse.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantScope {
+    pub actor_id: String,
+    pub conversation_id: String,
+    pub source_device_ref: String,
+    pub source_instance_id: Option<String>,
+    pub retrieval_episode_id: String,
+    pub retrieval_task_id: Option<String>,
+    pub history_access_scope: Option<Box<HistoryAccessScope>>,
+    pub memory_access_scope: Option<Box<super::memory_access::MemoryAccessScope>>,
+    pub instructions_revision: u64,
+}
+
+pub fn assistant_scope(
+    session: &PersistedAgentSession,
+) -> Result<Box<AssistantScope>, &'static str> {
     let data = session
         .assistant_data
         .as_ref()
         .ok_or("missing assistant scope state")?;
-    let bytes = serde_json::to_vec(&(
-        "assistant-scope-v1",
-        &session.actor_id,
-        &session.conversation_id,
-        &data.source_device_ref,
-        &data.source_instance_id,
-        &data.retrieval_budget.episode_id,
-        &data.retrieval_task_id,
-        &data.history_access_scope,
-        &data.memory_access_scope,
-        data.instructions.revision,
-    ))
-    .map_err(|_| "invalid assistant scope fingerprint")?;
-    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+    Ok(Box::new(AssistantScope {
+        actor_id: session.actor_id.clone(),
+        conversation_id: session.conversation_id.clone(),
+        source_device_ref: data.source_device_ref.clone(),
+        source_instance_id: data.source_instance_id.clone(),
+        retrieval_episode_id: data.retrieval_budget.episode_id.clone(),
+        retrieval_task_id: data.retrieval_task_id.clone(),
+        history_access_scope: data.history_access_scope.clone(),
+        memory_access_scope: data.memory_access_scope.clone(),
+        instructions_revision: data.instructions.revision,
+    }))
 }
 
 /// A new owner input permits searches of that owner's personal data under the
@@ -353,6 +368,45 @@ pub fn preserve_active_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_scope_component_change_prevents_reuse() {
+        let mut session = super::super::test_support::personal_session("owner", "root", "device");
+        session.assistant_data.as_mut().unwrap().memory_access_scope =
+            super::super::memory_access::owner_memory_scope(
+                "owner",
+                "root",
+                "",
+                1,
+                1000,
+                "episode",
+                1,
+                &AssistantDataSettings::default(),
+                false,
+            )
+            .unwrap();
+        let original = assistant_scope(&session).unwrap();
+        assert!(original.memory_access_scope.is_some());
+        for case in 0..8 {
+            let mut changed = session.clone();
+            let data = changed.assistant_data.as_mut().unwrap();
+            match case {
+                0 => changed.actor_id = "another-owner".into(),
+                1 => changed.conversation_id = "another-root".into(),
+                2 => data.source_device_ref = "another-device".into(),
+                3 => data.source_instance_id = Some("another-instance".into()),
+                4 => data.retrieval_budget.episode_id = "another-episode".into(),
+                5 => data.retrieval_task_id = Some("another-task".into()),
+                6 => data.instructions.revision += 1,
+                _ => super::super::memory_access::bind_request_memory_devices(
+                    &mut changed,
+                    ["another-device".to_string()],
+                )
+                .unwrap(),
+            }
+            assert_ne!(assistant_scope(&changed).unwrap(), original, "case {case}");
+        }
+    }
 
     #[test]
     fn owner_correction_preserves_original_task_budget_scope_and_earlier_deadline() {

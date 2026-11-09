@@ -105,7 +105,6 @@ impl NativeDerivedInputPolicy {
 pub struct NativeInputPolicyGraph {
     pub actor_id: String,
     pub conversation_id: String,
-    pub input_snapshot_sha256: String,
     /// Direct parents only. Native ancestors are followed through shared,
     /// immutable archive rows under current owner/source controls.
     pub parents: Vec<NativeDerivedInputPolicy>,
@@ -175,8 +174,7 @@ impl NativeInputPolicyGraph {
         conversation: &str,
         parents: &[&ArchivedAssistantOutput],
     ) -> Result<Self, &'static str> {
-        let mut value =
-            NativeInputPolicyGraphBuilder::new(Self::empty(snapshot, actor, conversation)?)?;
+        let mut value = NativeInputPolicyGraphBuilder::new(Self::empty(actor, conversation)?)?;
         for parent in parents {
             value.include(NativeDerivedInputPolicy::from_archive(parent)?)?;
         }
@@ -185,11 +183,7 @@ impl NativeInputPolicyGraph {
         Ok(value)
     }
 
-    pub fn empty(
-        snapshot: &NativeModelInputSnapshot,
-        actor: &str,
-        conversation: &str,
-    ) -> Result<Self, &'static str> {
+    pub fn empty(actor: &str, conversation: &str) -> Result<Self, &'static str> {
         if [actor, conversation]
             .iter()
             .any(|id| id.trim().is_empty() || id.len() > 256)
@@ -199,7 +193,6 @@ impl NativeInputPolicyGraph {
         Ok(Self {
             actor_id: actor.into(),
             conversation_id: conversation.into(),
-            input_snapshot_sha256: snapshot.fingerprint()?,
             parents: Vec::new(),
         })
     }
@@ -219,9 +212,6 @@ impl NativeInputPolicyGraph {
         &self,
         snapshot: &NativeModelInputSnapshot,
     ) -> Result<(), &'static str> {
-        if self.input_snapshot_sha256 != snapshot.fingerprint()? {
-            return Err("native adjacency changed its input snapshot");
-        }
         let parents = self.parent_index()?;
         for source in snapshot.policy_sources() {
             if is_native_output_policy_source(source)
@@ -247,7 +237,6 @@ impl NativeInputPolicyGraph {
         if [&self.actor_id, &self.conversation_id]
             .iter()
             .any(|id| id.trim().is_empty() || id.len() > 256)
-            || self.input_snapshot_sha256 != snapshot.fingerprint()?
         {
             return Err("native policy changed its root snapshot");
         }
