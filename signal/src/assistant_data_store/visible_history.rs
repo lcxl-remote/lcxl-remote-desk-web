@@ -198,7 +198,6 @@ impl PreparedVisibleHistory<'_> {
                 &self.expected.actor_id,
                 &self.expected.conversation_id,
                 &draft.native_id,
-                &draft.content,
                 &draft.envelope.envelope_id,
                 &draft.citations,
                 draft.recorded_at,

@@ -93,7 +93,7 @@ async fn forget_on(
         if project_receipt(&previous, false)? != bound_receipt
             || previous.tool_group_id.as_deref() != Some(group.assistant_message_id.as_str())
             || group.assistant_message_id != call.producer_message_id
-            || previous.tool_group_sha256.as_deref() != Some(group.group_sha256.as_str())
+            || !previous.tool_group_bound
         {
             return Err(AssistantStoreError::Inaccessible);
         }
@@ -218,7 +218,7 @@ async fn commit_on(
     )
     .map_err(AssistantStoreError::Invalid)?;
     pending
-        .bind_tool_group_on(db, &group.assistant_message_id, &group.group_sha256)
+        .bind_tool_group_on(db, &group.assistant_message_id)
         .await?;
     #[cfg(test)]
     eprintln!("memory forget: exact group bound");

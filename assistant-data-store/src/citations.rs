@@ -13,7 +13,6 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect,
 };
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[allow(clippy::too_many_arguments)]
@@ -21,7 +20,6 @@ pub fn new_row(
     actor: &str,
     conversation: &str,
     answer: &str,
-    content: &str,
     output: &str,
     projection: &AnswerCitations,
     recorded: u64,
@@ -34,7 +32,6 @@ pub fn new_row(
         answer_revision: 1,
         answer_conversation_id: conversation.into(),
         output_envelope_id: output.into(),
-        answer_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
         citations_json: serde_json::to_string(&projection.citations)
             .map_err(|_| AssistantStoreError::Invalid("invalid citation projection"))?,
         incomplete: projection.incomplete,
@@ -54,14 +51,7 @@ fn validate(row: &citation::Model) -> Result<Vec<AssistantCitation>, AssistantSt
     ] {
         validate_source_id(id).map_err(AssistantStoreError::Invalid)?;
     }
-    if row.answer_revision != 1
-        || row.created_at_ms <= 0
-        || row.expires_at_ms <= row.created_at_ms
-        || row.answer_sha256.len() != 64
-        || !row
-            .answer_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+    if row.answer_revision != 1 || row.created_at_ms <= 0 || row.expires_at_ms <= row.created_at_ms
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -88,7 +78,6 @@ fn charge(row: &citation::Model) -> Result<i64, AssistantStoreError> {
             + row.answer_conversation_id.len()
             + row.answer_message_id.len()
             + row.output_envelope_id.len()
-            + row.answer_sha256.len()
             + row.citations_json.len()
             + 6 * 8,
     )
@@ -127,7 +116,7 @@ pub async fn write_on<C: ConnectionTrait>(
     Ok(())
 }
 
-/// Owner snapshot supplies the actual page's immutable answer IDs and text.
+/// Owner snapshot supplies the actual page's answer IDs and output envelope IDs.
 /// Current source access is resolved on click, never granted by this projection.
 pub async fn load_on<C: ConnectionTrait>(
     db: &C,
@@ -153,11 +142,11 @@ pub async fn load_on<C: ConnectionTrait>(
             .all(db)
             .await?;
         for row in rows {
-            let Some((_, text)) = answers.iter().find(|(id, _)| *id == row.answer_message_id)
+            let Some((_, envelope)) = answers.iter().find(|(id, _)| *id == row.answer_message_id)
             else {
                 return Err(AssistantStoreError::Inaccessible);
             };
-            if row.answer_sha256 != format!("{:x}", Sha256::digest(text.as_bytes())) {
+            if row.output_envelope_id != *envelope {
                 continue;
             }
             let Ok(values) = validate(&row) else {
@@ -219,7 +208,6 @@ pub async fn collect_expired_on<C: ConnectionTrait>(
             .filter(citation::Column::AnswerMessageId.eq(&row.answer_message_id))
             .filter(citation::Column::AnswerRevision.eq(row.answer_revision))
             .filter(citation::Column::OutputEnvelopeId.eq(&row.output_envelope_id))
-            .filter(citation::Column::AnswerSha256.eq(&row.answer_sha256))
             .filter(citation::Column::CitationsJson.eq(&row.citations_json))
             .filter(citation::Column::Incomplete.eq(row.incomplete))
             .filter(citation::Column::CreatedAtMs.eq(row.created_at_ms))

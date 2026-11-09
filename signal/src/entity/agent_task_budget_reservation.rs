@@ -21,13 +21,15 @@ pub struct Model {
     pub exception_grant_id: Option<String>,
     pub utc_day: i64,
     pub logical_key: String,
-    pub input_sha256: String,
-    pub authority_sha256: String,
+    /// Model-submitted call input or model request digest; absent for the run row.
+    pub input_sha256: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub authority_json: String,
     pub reserved_units: i64,
     pub charged_units: i64,
     /// reserved | settled | overrun. Unknown outcomes remain fully reserved.
     pub state: String,
-    pub receipt_sha256: Option<String>,
+    pub settled_receipt_id: Option<String>,
     pub version: i64,
     pub created_at: i64,
     pub settled_at: Option<i64>,

@@ -210,21 +210,19 @@ impl PendingControl {
         &mut self,
         db: &C,
         producer_message_id: &str,
-        group_sha256: &str,
     ) -> Result<(), AssistantStoreError> {
         if self.row.tool_group_id.as_deref() != Some(producer_message_id)
-            || self.row.tool_group_sha256.is_some()
-            || !digest(group_sha256)
+            || self.row.tool_group_bound
         {
             return Err(AssistantStoreError::Inaccessible);
         }
         self.validate_owned_on(db).await?;
         let old_bytes = receipt_metadata_bytes(&self.row)?;
         let mut expected = self.row.clone();
-        expected.tool_group_sha256 = Some(group_sha256.into());
+        expected.tool_group_bound = true;
 
         let mut active: receipt::ActiveModel = self.row.clone().into();
-        active.tool_group_sha256 = Set(expected.tool_group_sha256.clone());
+        active.tool_group_bound = Set(true);
 
         if active.update(db).await? != expected {
             return Err(AssistantStoreError::Inaccessible);
@@ -306,7 +304,7 @@ impl PendingControl {
         self,
         db: &C,
     ) -> Result<AssistantDataControlReceipt, AssistantStoreError> {
-        if self.row.tool_group_id.is_some() != self.row.tool_group_sha256.is_some() {
+        if self.row.tool_group_id.is_some() != self.row.tool_group_bound {
             return Err(AssistantStoreError::Inaccessible);
         }
         self.validate_owned_on(db).await?;
@@ -344,12 +342,6 @@ pub(super) async fn revisions_on<C: ConnectionTrait>(
         .order_by_asc(revision::Column::Id)
         .all(db)
         .await?)
-}
-fn digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 use crate::entity::agent_assistant_source_suppression as source_suppression;

@@ -7,7 +7,7 @@ pub(crate) fn load_on<'a, C: ConnectionTrait>(
     db: &'a C,
     actor: &'a str,
     conversation: &'a str,
-    answers: &'a [(String, String)],
+    answers: &'a [(String, String, Option<String>)],
     now: u64,
     policy: &'a AssistantDataPolicy,
 ) -> impl std::future::Future<
@@ -18,18 +18,22 @@ pub(crate) fn load_on<'a, C: ConnectionTrait>(
 > + Send
 + 'a {
     desk_diagnose_core::future::send_phase(|| async move {
+        let labeled = answers
+            .iter()
+            .filter_map(|(id, _, output)| output.clone().map(|output| (id.clone(), output)))
+            .collect::<Vec<_>>();
         let mut result = super::super::citations::load_on(
             db,
             actor,
             conversation,
-            answers,
+            &labeled,
             now,
             policy.limits.conversation.citation_page_answers,
         )
         .await?;
         let missing = answers
             .iter()
-            .filter(|(id, text)| !result.contains_key(id) && text.contains("〔来源:"))
+            .filter(|(id, text, _)| !result.contains_key(id) && text.contains("〔来源:"))
             .collect::<Vec<_>>();
         if missing.is_empty() {
             return Ok(result);
@@ -59,7 +63,7 @@ pub(crate) fn load_on<'a, C: ConnectionTrait>(
         if session.actor_id != actor || session.conversation_id != conversation {
             return Err(AssistantStoreError::Inaccessible);
         }
-        for (id, text) in missing {
+        for (id, text, _) in missing {
             let Some(message) = session.conversation.iter().find(|message| {
                 message.message_id == *id
                     && message.text == *text

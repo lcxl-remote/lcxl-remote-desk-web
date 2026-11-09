@@ -514,6 +514,17 @@ pub async fn get_ai_assistant_session(
             );
             let assistant_policy = crate::assistant_data_config::policy(crate::db::get_db()).await;
             let conversation_limits = assistant_policy.limits.conversation.clone();
+            // Citation rows bind the answer's output envelope, collected before the DTO projection drops it.
+            let answer_outputs = snapshot
+                .messages
+                .iter()
+                .filter_map(|message| {
+                    message
+                        .data_envelope
+                        .as_ref()
+                        .map(|output| (message.message_id.clone(), output.envelope_id.clone()))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
             let mut message_page = project_snapshot_message_window(
                 snapshot.messages,
                 query.message_before.as_deref(),
@@ -528,7 +539,13 @@ pub async fn get_ai_assistant_session(
                 .messages
                 .iter()
                 .filter(|message| message.role == "assistant")
-                .map(|message| (message.id.clone(), message.text.clone()))
+                .map(|message| {
+                    (
+                        message.id.clone(),
+                        message.text.clone(),
+                        answer_outputs.get(&message.id).cloned(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let citations = match crate::assistant_data_store::load_citations_on(
                 crate::db::get_db(),

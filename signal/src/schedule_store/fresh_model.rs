@@ -210,13 +210,14 @@ impl ScheduleStore {
         .map_err(|_| ScheduleStoreError::Invalid)?;
         let units = desk_diagnose_core::schedule::model_usage::terminal_token_units(&usage)
             .ok_or(ScheduleStoreError::Invalid)?;
-        let digest = super::digest(&super::json(&(
-            receipt.receipt_id,
-            receipt.export_authorization_id,
-            receipt.authorized_at,
-            usage,
-        ))?);
-        Self::settle_task_model_budget(txn, owner, run_id, &budget.reservation_id, units, &digest)
-            .await
+        Self::settle_task_model_budget(
+            txn,
+            owner,
+            run_id,
+            &budget.reservation_id,
+            units,
+            &receipt.receipt_id,
+        )
+        .await
     }
 }

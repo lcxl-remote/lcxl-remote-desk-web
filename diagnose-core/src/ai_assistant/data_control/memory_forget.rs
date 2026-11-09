@@ -181,14 +181,8 @@ pub fn commit_memory_forget_group(
         .map_err(|_| "invalid original memory control result label")?;
         results.push(result);
     }
-    let group_sha256 = tool_group_sha256(
-        &std::iter::once(producer)
-            .chain(&results)
-            .collect::<Vec<_>>(),
-    )?;
     let committed = CommittedMemoryForgetGroup {
         assistant_message_id: producer.message_id.clone(),
-        group_sha256,
         receipt: receipt.clone(),
     };
     let version = session
@@ -259,7 +253,6 @@ pub fn read_memory_forget_group(
     }
     Ok(CommittedMemoryForgetGroup {
         assistant_message_id: producer.message_id.clone(),
-        group_sha256: tool_group_sha256(messages)?,
         receipt,
     })
 }

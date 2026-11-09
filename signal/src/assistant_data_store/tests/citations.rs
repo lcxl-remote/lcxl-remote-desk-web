@@ -22,7 +22,6 @@ async fn citations_owner_projection_pins_body_and_scope_and_expired_gc_refunds_o
         "1",
         "root",
         "answer",
-        &text,
         "original-output",
         &projection,
         100,
@@ -47,7 +46,7 @@ async fn citations_owner_projection_pins_body_and_scope_and_expired_gc_refunds_o
         .unwrap()
         .metadata_bytes;
     assert!(after > before);
-    let answers = vec![("answer".into(), text.clone())];
+    let answers = vec![("answer".into(), "original-output".to_string())];
     assert_eq!(
         citations::load_on(
             &store.db,
@@ -64,18 +63,19 @@ async fn citations_owner_projection_pins_body_and_scope_and_expired_gc_refunds_o
             .len(),
         1
     );
-    for (actor, conversation, text, time) in [
-        ("2", "root", text.clone(), 150),
-        ("1", "other", text.clone(), 150),
-        ("1", "root", "changed answer".into(), 150),
-        ("1", "root", text.clone(), 200),
+    for (actor, conversation, envelope, time) in [
+        ("2", "root", "original-output", 150),
+        ("1", "other", "original-output", 150),
+        // The same message id with another output envelope is a different answer.
+        ("1", "root", "other-output", 150),
+        ("1", "root", "original-output", 200),
     ] {
         assert!(
             citations::load_on(
                 &store.db,
                 actor,
                 conversation,
-                &[("answer".into(), text)],
+                &[("answer".into(), envelope.to_string())],
                 time,
                 desk_agent_protocol::ai_assistant::limits::AssistantConversationLimits::default()
                     .citation_page_answers
@@ -126,17 +126,7 @@ async fn citations_quota_failure_and_outer_rollback_do_not_publish_partial_metad
     };
     let text = format!("〔来源:{}〕", root.source_id);
     let projection = for_answer("answer", &text, &[root], &Default::default());
-    let row = citations::new_row(
-        "1",
-        "root",
-        "answer",
-        &text,
-        "output",
-        &projection,
-        100,
-        200,
-    )
-    .unwrap();
+    let row = citations::new_row("1", "root", "answer", "output", &projection, 100, 200).unwrap();
     let before = quota::Entity::find().one(&store.db).await.unwrap().unwrap();
     policy.max_metadata_bytes = before.metadata_bytes as u64 + 1;
     let txn = store.db.begin().await.unwrap();
@@ -190,7 +180,6 @@ async fn citations_corrupt_optional_metadata_stays_inert_without_refunds_or_imme
         "1",
         "root",
         "answer",
-        &text,
         "output",
         &for_answer("answer", &text, &[root], &Default::default()),
         100,
@@ -216,7 +205,7 @@ async fn citations_corrupt_optional_metadata_stays_inert_without_refunds_or_imme
             &store.db,
             "1",
             "root",
-            &[("answer".into(), text)],
+            &[("answer".into(), "output".to_string())],
             150,
             desk_agent_protocol::ai_assistant::limits::AssistantConversationLimits::default()
                 .citation_page_answers
@@ -270,7 +259,6 @@ async fn larger_citations_survive_lower_projection_limits_and_configured_load_ba
                 "1",
                 "root",
                 &answer,
-                &text,
                 &format!("output-{index}"),
                 &projection,
                 100,
@@ -278,7 +266,7 @@ async fn larger_citations_survive_lower_projection_limits_and_configured_load_ba
             )
             .unwrap(),
         );
-        answers.push((answer, text.clone()));
+        answers.push((answer, format!("output-{index}")));
     }
     let txn = store.db.begin().await.unwrap();
     citations::write_on(&txn, "1", rows, &policy).await.unwrap();

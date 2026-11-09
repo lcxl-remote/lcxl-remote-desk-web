@@ -169,15 +169,12 @@ fn ordinary_tool_protection_follows_the_latest_model_batch() {
 }
 
 #[test]
-fn changed_results_cannot_reuse_the_committed_group_digest() {
-    for case in 0..7 {
+fn changed_results_cannot_reuse_the_committed_group() {
+    for case in 1..7 {
         let (mut session, receipt, hash) = fixture();
         let group =
             commit_memory_forget_group(&mut session, "producer", &hash, &receipt, NOW).unwrap();
         match case {
-            0 => session.conversation[1].tool_calls[0]
-                .arguments_json
-                .push(' '),
             1 => session.conversation[2].text.push(' '),
             2 => session.conversation.swap(2, 3),
             3 => session.conversation[2].tool_ok = Some(false),

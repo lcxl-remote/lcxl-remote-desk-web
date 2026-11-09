@@ -39,12 +39,13 @@ async fn states_for(
     provenance: &desk_agent_protocol::capability_grant::TaskGrantProvenance,
     budgets: &[ledger::Model],
 ) -> Result<BTreeMap<String, TaskStepStatus>, DbErr> {
-    let parent_json = serde_json::to_string(provenance).map_err(|_| invalid())?;
-    let parent_digest = format!("{:x}", Sha256::digest(parent_json.as_bytes()));
     if budgets.iter().any(|budget| {
         budget.run_id != run_id
             || budget.kind != "tool_call"
-            || budget.authority_sha256 != parent_digest
+            || crate::schedule_store::budget::authority_of(budget)
+                .ok()
+                .as_ref()
+                != Some(provenance)
             || budget.reserved_units != 1
             || !contract
                 .contract()
@@ -75,7 +76,7 @@ async fn states_for(
                 let [work] = matching.as_slice() else {
                     return Err(invalid());
                 };
-                if work.draft_hash != budget.input_sha256 {
+                if budget.input_sha256.as_deref() != Some(work.draft_hash.as_str()) {
                     return Err(invalid());
                 }
                 let dispatch = agent_capability_dispatch_outbox::Entity::find()

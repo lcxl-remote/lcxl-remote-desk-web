@@ -21,7 +21,8 @@ pub struct Model {
     pub affected_count: i32,
     pub cleanup_pending: bool,
     pub tool_group_id: Option<String>,
-    pub tool_group_sha256: Option<String>,
+    /// Set once the exact tool group was written back to the conversation.
+    pub tool_group_bound: bool,
 
     pub created_at_ms: i64,
 }

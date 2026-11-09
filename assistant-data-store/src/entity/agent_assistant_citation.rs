@@ -17,7 +17,6 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub answer_conversation_id: String,
     pub output_envelope_id: String,
-    pub answer_sha256: String,
     #[sea_orm(column_type = "Text")]
     pub citations_json: String,
     pub incomplete: bool,

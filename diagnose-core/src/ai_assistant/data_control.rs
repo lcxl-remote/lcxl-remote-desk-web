@@ -23,7 +23,6 @@ pub struct CurrentMemoryUse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedMemoryForgetGroup {
     pub assistant_message_id: String,
-    pub group_sha256: String,
     pub receipt: AssistantDataControlReceipt,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

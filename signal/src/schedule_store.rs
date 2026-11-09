@@ -43,7 +43,7 @@ pub use fresh_admission::{ClaimedFreshTask, FreshTaskClaim};
 pub use fresh_model::FreshModelDispatch;
 mod materializer;
 pub use materializer::ScheduleScanReport;
-mod budget;
+pub(crate) mod budget;
 pub(crate) use authority::CurrentDelegationSourceAuthority;
 pub use authority::CurrentTaskAuthority;
 pub use budget::{TaskBudgetKind, TaskBudgetRequest};

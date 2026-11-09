@@ -1,7 +1,7 @@
 //! Task quotas are reserved with current authority in the caller's dispatch transaction.
 use super::authority::authority_now;
 use super::publication::{key, valid_digest};
-use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, digest, entity, json};
+use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, entity, json};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_task_budget_reservation as ledger;
 use sea_orm::{
@@ -52,7 +52,7 @@ async fn insert(
     authority: &CurrentTaskAuthority,
     kind: &str,
     logical_key: &str,
-    input: &str,
+    input: Option<&str>,
     units: i64,
     rule_id: Option<&str>,
 ) -> Result<ledger::Model, ScheduleStoreError> {
@@ -67,12 +67,12 @@ async fn insert(
         exception_grant_id: Set(None),
         utc_day: Set(authority.verified_at().div_euclid(86_400_000)),
         logical_key: Set(logical_key.into()),
-        input_sha256: Set(input.into()),
-        authority_sha256: Set(digest(&json(authority.provenance())?)),
+        input_sha256: Set(input.map(str::to_owned)),
+        authority_json: Set(json(authority.provenance())?),
         reserved_units: Set(units),
         charged_units: Set(units),
         state: Set("reserved".into()),
-        receipt_sha256: Set(None),
+        settled_receipt_id: Set(None),
         version: Set(1),
         created_at: Set(authority.verified_at()),
         settled_at: Set(None),
@@ -85,6 +85,12 @@ async fn insert(
         .one(txn)
         .await?
         .ok_or(ScheduleStoreError::NotFound)
+}
+
+pub(crate) fn authority_of(
+    row: &ledger::Model,
+) -> Result<desk_agent_protocol::capability_grant::TaskGrantProvenance, ScheduleStoreError> {
+    serde_json::from_str(&row.authority_json).map_err(|_| ScheduleStoreError::Invalid)
 }
 
 fn validate_row(row: &ledger::Model) -> Result<(), ScheduleStoreError> {
@@ -100,8 +106,12 @@ fn validate_row(row: &ledger::Model) -> Result<(), ScheduleStoreError> {
         key(grant)?;
     }
     if row.reservation_id != reservation_id(&row.run_id, &row.kind, &row.logical_key)?
-        || !valid_digest(&row.input_sha256)
-        || !valid_digest(&row.authority_sha256)
+        || (row.kind == "run") != row.input_sha256.is_none()
+        || row
+            .input_sha256
+            .as_deref()
+            .is_some_and(|value| !valid_digest(value))
+        || authority_of(row).is_err()
         || row.reserved_units <= 0
         || row.charged_units < 0
         || !matches!(row.kind.as_str(), "run" | "tool_call" | "model_tokens")
@@ -112,13 +122,16 @@ fn validate_row(row: &ledger::Model) -> Result<(), ScheduleStoreError> {
         "reserved" => {
             row.version == 1
                 && row.charged_units == row.reserved_units
-                && row.receipt_sha256.is_none()
+                && row.settled_receipt_id.is_none()
                 && row.settled_at.is_none()
         }
         "settled" | "overrun" => {
             row.kind == "model_tokens"
                 && row.version == 2
-                && row.receipt_sha256.as_deref().is_some_and(valid_digest)
+                && row
+                    .settled_receipt_id
+                    .as_deref()
+                    .is_some_and(|id| !id.is_empty())
                 && row.settled_at.is_some_and(|at| at >= row.created_at)
                 && ((row.state == "settled" && row.charged_units <= row.reserved_units)
                     || (row.state == "overrun" && row.charged_units > row.reserved_units))
@@ -137,7 +150,6 @@ pub(super) async fn reserve_run_budget(
     txn: &DatabaseTransaction,
     authority: &CurrentTaskAuthority,
 ) -> Result<(), ScheduleStoreError> {
-    let parent_digest = digest(&json(authority.provenance())?);
     let base = ledger::Entity::find()
         .filter(ledger::Column::RunId.eq(&authority.run().run_id))
         .filter(ledger::Column::OwnerUserId.eq(authority.run().owner_user_id));
@@ -150,8 +162,8 @@ pub(super) async fn reserve_run_budget(
     {
         validate_row(&existing)?;
         if existing.schedule_id != authority.provenance().schedule_id
-            || existing.input_sha256 != parent_digest
-            || existing.authority_sha256 != parent_digest
+            || existing.input_sha256.is_some()
+            || authority_of(&existing)? != *authority.provenance()
         {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -168,7 +180,7 @@ pub(super) async fn reserve_run_budget(
         if count >= u64::from(authority.contract().contract().budget.max_runs_per_utc_day) {
             return Err(ScheduleStoreError::BudgetExceeded);
         }
-        insert(txn, authority, "run", "run", &parent_digest, 1, None).await?;
+        insert(txn, authority, "run", "run", None, 1, None).await?;
     }
     Ok(())
 }
@@ -255,7 +267,6 @@ impl ScheduleStore {
                     .ok_or(ScheduleStoreError::Invalid)
             })
             .transpose()?;
-        let parent_digest = digest(&json(authority.provenance())?);
         let base = ledger::Entity::find()
             .filter(ledger::Column::RunId.eq(request.run_id))
             .filter(ledger::Column::OwnerUserId.eq(request.owner));
@@ -278,10 +289,10 @@ impl ScheduleStore {
         if let Some(existing) = existing_call {
             validate_row(&existing)?;
             if existing.schedule_id != authority.provenance().schedule_id
-                || existing.input_sha256 != request.input_sha256
+                || existing.input_sha256.as_deref() != Some(request.input_sha256)
                 || existing.rule_id.as_deref() != request.rule_id
                 || existing.reserved_units != units
-                || existing.authority_sha256 != parent_digest
+                || authority_of(&existing)? != *authority.provenance()
             {
                 return Err(ScheduleStoreError::Conflict);
             }
@@ -357,7 +368,7 @@ impl ScheduleStore {
             authority,
             request.kind.name(),
             request.logical_key,
-            request.input_sha256,
+            Some(request.input_sha256),
             units,
             request.rule_id,
         )
@@ -372,9 +383,9 @@ impl ScheduleStore {
         run_id: &str,
         id: &str,
         actual_units: u64,
-        receipt_sha256: &str,
+        receipt_id: &str,
     ) -> Result<ledger::Model, ScheduleStoreError> {
-        if !valid_digest(receipt_sha256) {
+        if receipt_id.is_empty() {
             return Err(ScheduleStoreError::Invalid);
         }
         let actual = i64::try_from(actual_units).map_err(|_| ScheduleStoreError::Invalid)?;
@@ -390,7 +401,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         if row.state != "reserved" {
-            if row.charged_units == actual && row.receipt_sha256.as_deref() == Some(receipt_sha256)
+            if row.charged_units == actual && row.settled_receipt_id.as_deref() == Some(receipt_id)
             {
                 return Ok(row);
             }
@@ -426,7 +437,7 @@ impl ScheduleStore {
                     "settled"
                 }
                 .into()),
-                receipt_sha256: Set(Some(receipt_sha256.into())),
+                settled_receipt_id: Set(Some(receipt_id.into())),
                 version: Set(2),
                 settled_at: Set(Some(authority_now(txn).await?)),
                 ..Default::default()

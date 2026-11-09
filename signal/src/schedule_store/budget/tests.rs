@@ -282,6 +282,11 @@ async fn model_upper_bounds_stay_reserved_until_an_exact_usage_receipt_settles_o
         settle(&store, &work, &first, 399, &receipt).await,
         Err(ScheduleStoreError::Conflict)
     ));
+    // A different receipt cannot reuse the settled reservation.
+    assert!(matches!(
+        settle(&store, &work, &first, 400, "another-receipt").await,
+        Err(ScheduleStoreError::Conflict)
+    ));
     reserve(
         &store,
         &task,
@@ -612,7 +617,7 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
             .await
             .unwrap();
         let txn = store.db.begin().await.unwrap();
-        let canonical = digest("{}");
+        let canonical = super::super::digest("{}");
         let budget = ScheduleStore::reserve_task_budget(
             &txn,
             &TaskBudgetRequest {

@@ -290,7 +290,7 @@ async fn prepare_apply_on<C: ConnectionTrait>(
         affected_count: count,
         cleanup_pending: count > 0,
         tool_group_id: group.map(|group| group.producer_message_id.clone()),
-        tool_group_sha256: None,
+        tool_group_bound: false,
 
         created_at_ms: now,
     };
@@ -463,7 +463,6 @@ pub fn receipt_metadata_bytes(row: &receipt::Model) -> Result<i64, AssistantStor
             &row.reason,
             &row.outcome,
             row.tool_group_id.as_deref().unwrap_or(""),
-            row.tool_group_sha256.as_deref().unwrap_or(""),
         ],
     )
 }

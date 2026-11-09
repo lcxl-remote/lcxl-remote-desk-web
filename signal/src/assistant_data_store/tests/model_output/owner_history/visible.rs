@@ -264,13 +264,20 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
                 .iter()
                 .any(|message| message.message_id == answer_id && message.text == text)
         );
+        let output = PersistedAgentSession::decode_json(&saved.state_json)
+            .unwrap()
+            .conversation
+            .iter()
+            .find(|message| message.message_id == answer_id)
+            .and_then(|message| message.data_envelope.as_ref())
+            .map(|envelope| envelope.envelope_id.clone());
         let rows = citation::Entity::find().all(&store.db).await.unwrap();
         assert_eq!(rows.len(), usize::from(!fail_storage));
         let bindings = crate::assistant_data_store::load_citations_on(
             &store.db,
             "1",
             &session.conversation_id,
-            &[(answer_id.clone(), text.clone())],
+            &[(answer_id.clone(), text.clone(), output.clone())],
             chrono::Utc::now().timestamp_millis() as u64,
             &AssistantDataPolicy::default(),
         )
@@ -280,7 +287,7 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
             for stack_bytes in [1024 * 1024, 2 * 1024 * 1024] {
                 let db = store.db.clone();
                 let conversation = session.conversation_id.clone();
-                let answers = vec![(answer_id.clone(), text.clone())];
+                let answers = vec![(answer_id.clone(), text.clone(), output.clone())];
                 let handle = tokio::runtime::Handle::current();
                 let (done, completed) = tokio::sync::oneshot::channel();
                 let thread = std::thread::Builder::new()
@@ -313,17 +320,22 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
             rows.iter()
                 .all(|row| !row.citations_json.contains(&unknown))
         );
-        for (actor, conversation, body) in [
-            ("2", "root", text.clone()),
-            ("1", "other", text.clone()),
-            ("1", "root", format!("changed {text}")),
+        for (actor, conversation, body, envelope) in [
+            ("2", "root", text.clone(), output.clone()),
+            ("1", "other", text.clone(), output.clone()),
+            (
+                "1",
+                "root",
+                format!("changed {text}"),
+                Some("other-output".to_string()),
+            ),
         ] {
             assert!(
                 crate::assistant_data_store::load_citations_on(
                     &store.db,
                     actor,
                     conversation,
-                    &[(answer_id.clone(), body)],
+                    &[(answer_id.clone(), body, envelope)],
                     chrono::Utc::now().timestamp_millis() as u64,
                     &AssistantDataPolicy::default(),
                 )

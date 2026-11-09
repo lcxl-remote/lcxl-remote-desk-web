@@ -100,7 +100,7 @@ async fn memory_control_group_stages_all_targets_and_charges_once_only_after_exa
     );
     assert_eq!(pending.receipt().unwrap().affected_count, 2);
     pending
-        .bind_tool_group_on(&txn, &request.producer_message_id, &"c".repeat(64))
+        .bind_tool_group_on(&txn, &request.producer_message_id)
         .await
         .unwrap();
     let result = pending.finalize_on(&txn).await.unwrap();
@@ -221,23 +221,17 @@ async fn memory_control_group_cannot_commit_without_a_matching_closed_group_or_b
     };
     assert!(
         pending
-            .bind_tool_group_on(&txn, "other-producer", &"c".repeat(64))
-            .await
-            .is_err()
-    );
-    assert!(
-        pending
-            .bind_tool_group_on(&txn, &request.producer_message_id, "invalid-digest")
+            .bind_tool_group_on(&txn, "other-producer")
             .await
             .is_err()
     );
     pending
-        .bind_tool_group_on(&txn, &request.producer_message_id, &"c".repeat(64))
+        .bind_tool_group_on(&txn, &request.producer_message_id)
         .await
         .unwrap();
     assert!(
         pending
-            .bind_tool_group_on(&txn, &request.producer_message_id, &"c".repeat(64))
+            .bind_tool_group_on(&txn, &request.producer_message_id)
             .await
             .is_err()
     );
@@ -294,7 +288,7 @@ async fn memory_control_group_rolls_back_all_members_and_metadata_on_late_change
         let txn = begin(&store).await;
         let result = match control::prepare_forget_group_on(&txn, "1", &request, 100).await {
             Ok(ControlPreparation::Prepared(mut pending)) => match pending
-                .bind_tool_group_on(&txn, &request.producer_message_id, &"c".repeat(64))
+                .bind_tool_group_on(&txn, &request.producer_message_id)
                 .await
             {
                 Ok(()) => pending.finalize_on(&txn).await.map(|_| ()),
@@ -342,7 +336,7 @@ async fn a_delayed_forget_keeps_its_original_input_cutoff_without_rewinding_the_
         request.owner_input_seq
     );
     pending
-        .bind_tool_group_on(&txn, &request.producer_message_id, &"c".repeat(64))
+        .bind_tool_group_on(&txn, &request.producer_message_id)
         .await
         .unwrap();
     pending.finalize_on(&txn).await.unwrap();

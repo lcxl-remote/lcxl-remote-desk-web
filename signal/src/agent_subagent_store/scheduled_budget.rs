@@ -8,7 +8,6 @@ use desk_diagnose_core::subagent::{
     reservation::{DelegationCallKind, DelegationCallReservation},
 };
 use sea_orm::sea_query::Expr;
-use sha2::{Digest, Sha256};
 
 fn key(reservation: &DelegationCallReservation) -> String {
     format!("delegated-model:{}", reservation.reservation_id)
@@ -116,7 +115,7 @@ async fn linked_on(
         || allocation.rule_id.is_some()
         || allocation.exception_grant_id.is_some()
         || allocation.logical_key != key(reservation)
-        || allocation.input_sha256 != reservation.arguments_sha256
+        || allocation.input_sha256.as_deref() != Some(reservation.arguments_sha256.as_str())
         || u64::try_from(allocation.reserved_units).ok() != Some(reservation.upper.tokens)
     {
         return Err(invalid());
@@ -180,18 +179,9 @@ pub(super) async fn settle_on(
     let allocation = linked_on(txn, group, row, reservation).await?;
     if let (Some(allocation), Some(actual)) = (allocation, actual) {
         let receipt = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(
-                    "delegated-model-settlement",
-                    &reservation.reservation_id,
-                    &row.provider_receipt_kind,
-                    &row.provider_receipt_id,
-                    row.provider_started_at_ms,
-                    actual,
-                ))
-                .map_err(|_| invalid())?
-            )
+            "{}:{}",
+            row.provider_receipt_kind.as_deref().unwrap_or_default(),
+            row.provider_receipt_id.as_deref().unwrap_or_default()
         );
         crate::schedule_store::ScheduleStore::settle_task_model_budget(
             txn,
