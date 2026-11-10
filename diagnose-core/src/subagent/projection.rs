@@ -272,7 +272,6 @@ mod tests {
                 restorable: true,
                 template: None,
                 slots: vec![],
-                sha256: projected.content_sha256().unwrap_or_default().to_owned(),
                 envelope: Some(projected),
             },
         ));

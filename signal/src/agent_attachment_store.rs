@@ -158,8 +158,12 @@ pub async fn store_batch(
                 .find(|row| row.id == part.metadata.attachment_id)
                 .ok_or_else(invalid)?;
             let meta = decode(row)?;
-            meta.verify(&read_content(&root, row.content_key.as_deref()).await?)
-                .map_err(|_| invalid())?;
+            let content = read_content(&root, row.content_key.as_deref()).await?;
+            // An attachment id is reused only for the same bytes.
+            if content != part.content {
+                return Err(invalid());
+            }
+            meta.verify(&content).map_err(|_| invalid())?;
             saved.push(meta);
             continue;
         }

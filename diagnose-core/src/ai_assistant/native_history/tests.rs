@@ -62,7 +62,6 @@ fn source_navigation_uses_only_unique_original_result_envelopes_including_extern
         restorable: true,
         template: None,
         slots: Vec::new(),
-        sha256: "a".repeat(64),
         envelope: None,
     }));
     result.data_envelope = None;

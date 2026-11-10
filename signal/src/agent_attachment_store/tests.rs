@@ -100,6 +100,10 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
         .await
         .unwrap();
     assert_eq!(retry, saved);
+    // Reusing an attachment id for other bytes of the same size is rejected.
+    let mut changed = prepared.attachments.clone();
+    changed[0].content = vec![b'y'; 5000];
+    assert!(store_batch(&db, &session, &changed).await.is_err());
     let mut stale = session.clone();
     stale.version += 1;
     assert!(

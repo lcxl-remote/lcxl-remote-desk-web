@@ -112,10 +112,14 @@ pub fn read_page_observed(
     let (selected, hits) = select_lines(&lines, &request.selection).inspect_err(|error| {
         observation.input_error(error);
     })?;
+    // A model page of JSON is a reference view that is regenerated when its
+    // aliases change, so its cursor also binds the paged bytes. Text bytes
+    // never change for one attachment id.
+    let view = (metadata.kind == ContentKind::Json).then(|| digest(bytes));
     let binding = digest(
         &serde_json::to_vec(&(
             &metadata.attachment_id,
-            &metadata.sha256,
+            view,
             &request.selection,
             request.limit,
         ))

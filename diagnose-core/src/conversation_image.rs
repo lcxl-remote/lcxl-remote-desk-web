@@ -33,9 +33,7 @@ impl ImageAttachment {
         session: &PersistedAgentSession,
         pixels: &[u8],
     ) -> Result<crate::conversation_attachment::batch::PreparedAttachment, AgentError> {
-        use crate::conversation_attachment::{
-            AttachmentMetadata, Availability, ContentKind, digest,
-        };
+        use crate::conversation_attachment::{AttachmentMetadata, Availability, ContentKind};
         if self.frame.conversation_id != session.conversation_id
             || !self.matches_device_scope(&session.device_id)
             || (session.device_id.is_empty()
@@ -43,7 +41,6 @@ impl ImageAttachment {
         {
             return Err(error("Screenshot belongs to another conversation"));
         }
-        let hash = digest(pixels);
         let metadata = AttachmentMetadata {
             attachment_id: self.frame.evidence_id.clone(),
             conversation_id: session.conversation_id.clone(),
@@ -60,8 +57,6 @@ impl ImageAttachment {
                 .ok_or_else(|| error("Screenshot media type is missing"))?,
             original_bytes: pixels.len() as u64,
             size_bytes: pixels.len() as u64,
-            original_sha256: hash.clone(),
-            sha256: hash,
             source_truncated: false,
             storage_truncated: false,
             created_at_unix_ms: self.frame.captured_at_unix_ms,

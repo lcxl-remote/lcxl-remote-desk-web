@@ -48,8 +48,6 @@ pub struct AttachmentMetadata {
     pub media_type: String,
     pub original_bytes: u64,
     pub size_bytes: u64,
-    pub original_sha256: String,
-    pub sha256: String,
     pub source_truncated: bool,
     pub storage_truncated: bool,
     pub created_at_unix_ms: u64,
@@ -93,7 +91,7 @@ impl AttachmentMetadata {
                 ));
             }
         }
-        if self.size_bytes != content.len() as u64 || self.sha256 != digest(content) {
+        if self.size_bytes != content.len() as u64 {
             return Err(invalid("Attachment integrity check failed"));
         }
         let limit = match self.kind {
@@ -105,12 +103,6 @@ impl AttachmentMetadata {
             || self.original_bytes < self.size_bytes
             || (self.kind != ContentKind::Text && self.storage_truncated)
             || self.storage_truncated != (self.original_bytes > self.size_bytes)
-            || (!self.storage_truncated && self.original_sha256 != self.sha256)
-            || self.original_sha256.len() != 64
-            || !self
-                .original_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(invalid("Attachment metadata violates its content budget"));
         }
@@ -167,8 +159,6 @@ pub struct PreparedText {
     pub kind: ContentKind,
     pub content: String,
     pub original_bytes: usize,
-    pub original_sha256: String,
-    pub sha256: String,
     pub storage_truncated: bool,
     pub external: bool,
 }
@@ -198,7 +188,6 @@ pub fn prepare_text(kind: ContentKind, content: String) -> Result<PreparedText, 
         ContentKind::Image => return Err(invalid("Images require the image validation path")),
     }
     let original_bytes = content.len();
-    let original_sha256 = digest(content.as_bytes());
     let mut content = content;
     let storage_truncated = kind == ContentKind::Text && content.len() > MAX_TEXT_BYTES;
     if storage_truncated {
@@ -208,10 +197,8 @@ pub fn prepare_text(kind: ContentKind, content: String) -> Result<PreparedText, 
     Ok(PreparedText {
         kind,
         external: content.len() > INLINE_BYTES,
-        sha256: digest(content.as_bytes()),
         content,
         original_bytes,
-        original_sha256,
         storage_truncated,
     })
 }

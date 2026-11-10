@@ -1705,9 +1705,6 @@ impl UiReferenceState {
             && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
             && let Some(receipt) = value.get_mut("attachment_read")
         {
-            if let Some(object) = receipt.as_object_mut() {
-                object.remove("page_sha256");
-            }
             for path in ["/attachment_id", "/selection/attachment_id"] {
                 if let Some(id) = receipt.pointer_mut(path)
                     && let Some(alias) =
@@ -2634,9 +2631,7 @@ mod record_tests {
                     slots: vec![crate::conversation_attachment::delivery::RawSlot {
                         path: String::new(),
                         attachment_id: native.into(),
-                        sha256: "b".repeat(64),
                     }],
-                    sha256: "c".repeat(64),
                     envelope: None,
                 },
             ));

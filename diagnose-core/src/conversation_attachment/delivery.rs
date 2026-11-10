@@ -16,30 +16,31 @@ use serde_json::{Value, json};
 pub struct RawSlot {
     pub path: String,
     pub attachment_id: String,
-    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawResult {
+    /// Content key for comparing distinct fully externalized results.
     pub original_sha256: String,
     pub original_envelope: Option<DataEnvelope>,
     pub restorable: bool,
     /// None means the entire original text/JSON is in one attachment.
     pub template: Option<Value>,
     pub slots: Vec<RawSlot>,
-    pub sha256: String,
     pub envelope: Option<DataEnvelope>,
 }
 
 /// Correlate a durable completion with its original receipt after externalization.
-/// This is only an identity check; action authorization still needs live sources.
+/// The receipt label identifies the receipt; the externalized body is in trusted
+/// storage. This is only an identity check; action authorization still needs
+/// live sources.
 pub fn matches_original(
     message: &ChatMessage,
     text: &str,
     envelope: Option<&DataEnvelope>,
 ) -> bool {
     if let Some(raw) = &message.raw_result {
-        raw.original_sha256 == digest(text.as_bytes()) && raw.original_envelope.as_ref() == envelope
+        raw.original_envelope.as_ref() == envelope
     } else {
         message.text == text && message.data_envelope.as_ref() == envelope
     }
@@ -55,7 +56,6 @@ pub fn failed_delivery(
         restorable: false,
         template: None,
         slots: vec![],
-        sha256: digest(original.text.as_bytes()),
         envelope: None,
     };
     let content = crate::model_input::describe_error("result_delivery", &error.message);
@@ -349,7 +349,6 @@ pub async fn externalize_with(
             .any(|part| part.metadata.storage_truncated),
         template: prepared.template.clone(),
         slots: vec![],
-        sha256: digest(canonical.as_bytes()),
         envelope: if prepared.template.is_some() {
             projection_envelope(
                 source.data_envelope.as_ref(),
@@ -363,11 +362,6 @@ pub async fn externalize_with(
     };
     for (index, part) in delivery.parts.iter().enumerate() {
         if let DeliveredContent::Attachment { reference } = &part.content {
-            let stored = delivery
-                .attachments
-                .iter()
-                .find(|a| a.metadata.attachment_id == reference.attachment_id)
-                .unwrap();
             let path = prepared.paths.get(index).cloned().unwrap_or_default();
             if let Some(template) = &mut raw.template {
                 *template
@@ -377,7 +371,6 @@ pub async fn externalize_with(
             raw.slots.push(RawSlot {
                 path,
                 attachment_id: reference.attachment_id.clone(),
-                sha256: stored.metadata.sha256.clone(),
             });
         }
     }
@@ -480,9 +473,7 @@ where
                     break;
                 }
             };
-            if part.metadata.message_id != session.conversation[index].message_id
-                || part.metadata.sha256 != slot.sha256
-            {
+            if part.metadata.message_id != session.conversation[index].message_id {
                 return Err(invalid("Raw result attachment binding changed"));
             }
             part.metadata.verify(&part.content)?;
@@ -503,9 +494,13 @@ where
             .map(|value| value.to_string())
             .or(whole)
             .ok_or_else(|| invalid("Raw result body missing"))?;
-        if digest(text.as_bytes()) != raw.sha256 {
+        if raw
+            .envelope
+            .as_ref()
+            .is_some_and(|envelope| envelope.content.size_bytes() != text.len() as u64)
+        {
             return Err(invalid(
-                "Raw result reconstruction failed integrity verification",
+                "Raw result reconstruction does not match its label",
             ));
         }
         let mut resolved = session.conversation[index].clone();
@@ -573,19 +568,20 @@ pub(crate) mod tests {
             "now",
         )
     }
-    #[test]
-    fn projections_are_named_by_their_carrier_without_a_digest() {
-        use desk_agent_protocol::data_lineage::{
-            ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
-            DestinationIdentity, RetentionBoundary, Sensitivity,
-        };
-        let destination = DestinationIdentity::Model {
+    fn gateway() -> desk_agent_protocol::data_lineage::DestinationIdentity {
+        desk_agent_protocol::data_lineage::DestinationIdentity::Model {
             connection_id: "gateway".into(),
             connection_revision: 1,
             model_id: "model".into(),
             profile_revision: 1,
+        }
+    }
+
+    fn tool_label() -> DataEnvelope {
+        use desk_agent_protocol::data_lineage::{
+            DATA_ENVELOPE_SCHEMA_VERSION, DataProvenance, RetentionBoundary, Sensitivity,
         };
-        let parent = DataEnvelope {
+        DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: "tool-result".into(),
             content: ContentRef::Message {
@@ -600,12 +596,18 @@ pub(crate) mod tests {
                 source_envelope_ids: Vec::new(),
             },
             sensitivity: Sensitivity::Sensitive,
-            allowed_destinations: vec![destination.clone()],
+            allowed_destinations: vec![gateway()],
             retention: RetentionBoundary {
                 expires_at_unix_ms: None,
                 delete_with_run: true,
             },
-        };
+        }
+    }
+
+    #[test]
+    fn projections_are_named_by_their_carrier_without_a_digest() {
+        let destination = gateway();
+        let parent = tool_label();
         let first = projection_envelope(Some(&parent), b"same", "reference", "message-1")
             .unwrap()
             .unwrap();
@@ -788,7 +790,8 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert!(matches_original(&message, &original, None));
-        assert!(!matches_original(&message, "different result", None));
+        // The receipt label identifies the original result.
+        assert!(!matches_original(&message, &original, Some(&tool_label())));
         assert!(!message.text.contains("private-id"));
         assert!(message.text.contains(READ_ATTACHMENT_TOOL));
         assert_eq!(message.trusted_tool_result().text, original);
@@ -801,6 +804,14 @@ pub(crate) mod tests {
             restored.conversation[0].trusted_tool_result().text,
             original
         );
+        // A reconstruction must match the size its label declares.
+        let mut mislabelled = restored.clone();
+        mislabelled.conversation[0]
+            .raw_result
+            .as_mut()
+            .unwrap()
+            .envelope = Some(tool_label());
+        assert!(resolve_session(&store, &mut mislabelled).await.is_err());
         store.0.borrow_mut().clear();
         resolve_session(&store, &mut restored).await.unwrap();
         assert!(

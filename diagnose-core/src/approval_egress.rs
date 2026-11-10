@@ -693,9 +693,7 @@ mod tests {
             slots: vec![delivery::RawSlot {
                 path: "result".into(),
                 attachment_id: "ui-result".into(),
-                sha256: original_envelope.content_sha256().unwrap().to_owned(),
             }],
-            sha256: original_envelope.content_sha256().unwrap().to_owned(),
             envelope: Some(original_envelope.clone()),
         }));
 
@@ -723,9 +721,7 @@ mod tests {
                 after_context: 0,
                 max_bytes: None,
             },
-            source_sha256: original_envelope.content_sha256().unwrap().to_owned(),
             projection_version: 1,
-            page_sha256: format!("{:x}", Sha256::digest(page.text.as_bytes())),
             body_bytes: "current-ui-evidence".len(),
             original_envelope: Some(original_envelope),
             consumed: true,

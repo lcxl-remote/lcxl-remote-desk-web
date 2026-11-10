@@ -225,8 +225,10 @@ fn remove_image(message: &mut ChatMessage) {
             return;
         };
         let source_id = envelope.envelope_id.clone();
-        // One history label per source label keeps ids distinct within a request.
-        envelope.envelope_id = format!("image-history-{source_id}");
+        // Several messages can carry one screenshot label (the capture and each
+        // later read of its attachment); the message id keeps their history
+        // labels distinct within a request.
+        envelope.envelope_id = format!("image-history-{}", message.message_id);
         if envelope.envelope_id.len() > MAX_LINEAGE_ID_BYTES {
             return;
         }
@@ -350,15 +352,9 @@ mod tests {
             },
         });
         let original = message.data_envelope.clone().unwrap();
-        // A source label too long to prefix loses its label instead of failing egress later.
+        // A message id too long to prefix loses its label instead of failing egress later.
         let mut oversized = message.clone();
-        oversized.data_envelope.as_mut().unwrap().envelope_id = "s".repeat(250);
-        oversized
-            .data_envelope
-            .as_ref()
-            .unwrap()
-            .validate()
-            .unwrap();
+        oversized.message_id = "s".repeat(250);
         strip_session_images(std::slice::from_mut(&mut oversized));
         assert_eq!(oversized.data_envelope, None);
         let mut tampered = message.clone();
@@ -370,7 +366,7 @@ mod tests {
         let projected = message.data_envelope.as_ref().unwrap();
         assert_eq!(
             projected.envelope_id,
-            format!("image-history-{}", original.envelope_id)
+            format!("image-history-{}", message.message_id)
         );
         assert_eq!(
             projected.allowed_destinations,
@@ -404,6 +400,81 @@ mod tests {
         let once = message.clone();
         strip_session_images(std::slice::from_mut(&mut message));
         assert_eq!(message, once);
+    }
+
+    #[test]
+    fn repeated_reads_of_one_screenshot_keep_distinct_history_labels() {
+        use desk_agent_protocol::data_lineage::*;
+        let destination = DestinationIdentity::Model {
+            connection_id: "model".into(),
+            connection_revision: 1,
+            model_id: "visual".into(),
+            profile_revision: 1,
+        };
+        let shot = |message_id: &str, call: &str| {
+            let mut message = ChatMessage::tool_result(message_id, call, "capture metadata")
+                .with_image(data_url(&[1, 2, 3]));
+            let bytes = crate::model_egress::message_content_bytes(&message).unwrap();
+            // The capture and each restored attachment read carry the same label.
+            message.data_envelope = Some(DataEnvelope {
+                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+                envelope_id: "screen-label".into(),
+                content: ContentRef::EphemeralObservation {
+                    observation_id: "pixels".into(),
+                    size_bytes: bytes.len() as u64,
+                    expires_at_unix_ms: 123456,
+                },
+                provenance: DataProvenance {
+                    source_provider_id: "screen.current".into(),
+                    source_tool_name: "read_current_screen".into(),
+                    source_object_id: None,
+                    source_envelope_ids: vec![],
+                },
+                sensitivity: Sensitivity::Sensitive,
+                allowed_destinations: vec![destination.clone()],
+                retention: RetentionBoundary {
+                    expires_at_unix_ms: None,
+                    delete_with_run: true,
+                },
+            });
+            message
+        };
+        let mut messages = vec![
+            shot("capture", "capture-call"),
+            shot("read-1", "read-call-1"),
+            shot("read-2", "read-call-2"),
+        ];
+        retain_latest_session_image(&mut messages).unwrap();
+        let older = &messages[..2];
+        let labels = older
+            .iter()
+            .map(|message| message.data_envelope.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels[0].envelope_id, "image-history-capture");
+        assert_eq!(labels[1].envelope_id, "image-history-read-1");
+        assert!(labels.iter().all(|label| {
+            label.provenance.source_envelope_ids == vec!["screen-label".to_string()]
+        }));
+        let bytes = older
+            .iter()
+            .map(|message| crate::model_egress::message_content_bytes(message).unwrap())
+            .collect::<Vec<_>>();
+        crate::sink_authorizer::authorize_model_history(
+            &destination,
+            &[
+                crate::sink_authorizer::SinkInput {
+                    envelope: &labels[0],
+                    bytes: &bytes[0],
+                },
+                crate::sink_authorizer::SinkInput {
+                    envelope: &labels[1],
+                    bytes: &bytes[1],
+                },
+            ],
+            2,
+            crate::sink_authorizer::MAX_SINK_BYTES,
+        )
+        .unwrap();
     }
 
     #[test]

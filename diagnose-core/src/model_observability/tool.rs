@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn attachment_paging_distinguishes_bad_selection_expired_cursor_and_unavailable_source() {
         use crate::conversation_attachment::{
-            AttachmentMetadata, Availability, ContentKind, digest,
+            AttachmentMetadata, Availability, ContentKind,
             read::{ReadMode, ReadRequest, read_page_observed},
         };
         let content = "private-source-line-one\nprivate-source-line-two\n";
@@ -862,8 +862,6 @@ mod tests {
             media_type: "text/plain".into(),
             original_bytes: content.len() as u64,
             size_bytes: content.len() as u64,
-            original_sha256: digest(content.as_bytes()),
-            sha256: digest(content.as_bytes()),
             source_truncated: false,
             storage_truncated: false,
             created_at_unix_ms: 1,

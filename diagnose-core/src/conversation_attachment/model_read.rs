@@ -1,5 +1,5 @@
 //! Model reads retain their body until an accepted response and a completed turn.
-use super::{ContentKind, MAX_PAGE_BYTES, batch::PreparedAttachment, digest, invalid, read::*};
+use super::{ContentKind, MAX_PAGE_BYTES, batch::PreparedAttachment, invalid, read::*};
 use crate::chat::ChatMessage;
 use desk_agent_protocol::AgentError;
 use serde::{Deserialize, Serialize};
@@ -73,9 +73,7 @@ impl Input {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadReceipt {
     pub input: Input,
-    pub source_sha256: String,
     pub projection_version: u32,
-    pub page_sha256: String,
     pub body_bytes: usize,
     pub original_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
     pub consumed: bool,
@@ -165,9 +163,7 @@ fn text_page_impl(
                 content.clone(),
                 ReadReceipt {
                     input: selected,
-                    source_sha256: part.metadata.sha256.clone(),
                     projection_version: if projected.is_some() { 2 } else { 1 },
-                    page_sha256: digest(content.as_bytes()),
                     body_bytes: page.body_bytes,
                     original_envelope: None,
                     consumed: false,
@@ -209,8 +205,6 @@ fn project_json_part(
     }
     let mut projected = part.clone();
     projected.content = message.text.into_bytes();
-    projected.metadata.sha256 = digest(&projected.content);
-    projected.metadata.original_sha256 = projected.metadata.sha256.clone();
     projected.metadata.size_bytes = projected.content.len() as u64;
     projected.metadata.original_bytes = projected.metadata.size_bytes;
     projected.metadata.storage_truncated = false;
@@ -225,20 +219,18 @@ fn receipt_content(receipt: &ReadReceipt) -> String {
             "attachment_id": receipt.input.attachment_id,
             "selection": receipt.input,
             "body_bytes": receipt.body_bytes,
-            "page_sha256": receipt.page_sha256,
             "notice": "This page was consumed in a completed turn. Read the attachment again if its body is needed."
         }}).to_string()
 }
 
 /// Stable identity for summary proofs across consumption and body release.
-/// The page digest still binds the exact body seen by the model.
+/// It binds the attachment, selection and body size, not the rendered page
+/// body: the page comes from the same immutable attachment in trusted storage.
 pub fn canonical_source(message: &ChatMessage) -> Result<ChatMessage, AgentError> {
     let Some(receipt) = &message.attachment_read else {
         return Ok(message.clone());
     };
-    if (receipt.released && message.text != receipt_content(receipt))
-        || (!receipt.released && digest(message.text.as_bytes()) != receipt.page_sha256)
-    {
+    if receipt.released && message.text != receipt_content(receipt) {
         return Err(invalid("Attachment read proof does not match its body"));
     }
     let mut canonical = message.clone();
@@ -268,9 +260,7 @@ pub async fn validate_pending_reads(
             .read_attachment(session, &receipt.input.attachment_id, false)
             .await?;
         part.metadata.verify(&part.content)?;
-        if part.metadata.sha256 != receipt.source_sha256
-            || !matches!(receipt.projection_version, 1 | 2)
-        {
+        if !matches!(receipt.projection_version, 1 | 2) {
             return Err(invalid(
                 "Attachment source or page representation changed; the unfinished read cannot be replayed",
             ));
@@ -297,11 +287,6 @@ pub fn release_consumed(messages: &mut [ChatMessage]) -> Result<(), AgentError> 
         };
         if !receipt.consumed || receipt.released {
             continue;
-        }
-        if digest(message.text.as_bytes()) != receipt.page_sha256 {
-            return Err(invalid(
-                "Attachment page changed before its receipt was committed",
-            ));
         }
         let content = receipt_content(receipt);
         message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
@@ -352,7 +337,6 @@ mod tests {
         let mut part = delivery.attachments.remove(0);
         part.metadata.source_envelope = result.data_envelope.clone();
         let original = part.content.clone();
-        let original_digest = part.metadata.sha256.clone();
         let input = Input {
             attachment_id: part.metadata.attachment_id.clone(),
             cursor: None,
@@ -375,7 +359,6 @@ mod tests {
         assert!(content.contains("search_result_id"));
         assert!(content.contains("source_id"));
         assert_eq!(receipt.projection_version, 2);
-        assert_eq!(receipt.source_sha256, original_digest);
         assert_eq!(part.content, original);
         part.metadata.verify(&part.content).unwrap();
         let (again, proof) = text_page(
@@ -387,14 +370,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again, content);
-        assert_eq!(proof.page_sha256, receipt.page_sha256);
+        assert_eq!(proof, receipt);
     }
     #[test]
-    fn short_page_cursor_survives_unrelated_registration_and_proves_exact_wire_body() {
+    fn short_page_cursor_survives_unrelated_registration() {
         let (part, mut input) = fixture();
         input.max_bytes = Some(1024);
         let mut references = crate::ui_references::UiReferenceState::default();
-        let (first, receipt) = text_page_with_references(
+        let (first, _) = text_page_with_references(
             &part,
             &input,
             "first",
@@ -406,7 +389,6 @@ mod tests {
         let page: ReadPage = serde_json::from_str(&first).unwrap();
         let cursor = page.cursor.unwrap();
         assert_eq!(cursor, "c1");
-        assert_eq!(receipt.page_sha256, digest(first.as_bytes()));
         references
             .register_attachment_cursor("other", "other-message", "unrelated-query")
             .unwrap();
@@ -432,7 +414,6 @@ mod tests {
         .unwrap();
         let second_page: ReadPage = serde_json::from_str(&second).unwrap();
         assert_ne!(page.lines[0].line, second_page.lines[0].line);
-        assert_eq!(proof.page_sha256, digest(second.as_bytes()));
         let mut message = ChatMessage::tool_result("page", "second", &second);
         message.attachment_read = Some(Box::new(proof));
         canonical_source(&message).unwrap();
@@ -442,8 +423,6 @@ mod tests {
                 crate::prompt::ResponseFormatSpec::None,
             ));
         assert_eq!(projected.messages[0].text, second);
-        message.text.push(' ');
-        assert!(canonical_source(&message).is_err());
     }
 
     #[test]
@@ -474,7 +453,6 @@ mod tests {
         let page: ReadPage = serde_json::from_str(&content).unwrap();
         assert_eq!(page.attachment_id, "att1");
         assert!(!content.contains(&native));
-        assert_eq!(receipt.page_sha256, digest(content.as_bytes()));
         assert_eq!(receipt.input.attachment_id, native);
 
         receipt.consumed = true;

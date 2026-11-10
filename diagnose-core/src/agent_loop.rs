@@ -4514,7 +4514,6 @@ async fn read_conversation_attachment(
             observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
         })?;
         let source_envelope = envelope.clone();
-        let original_attachment_sha256 = part.metadata.sha256.clone();
         if session.ui_references.observe_attachment(&part)? {
             deps.session_seam.save(session).await?;
         }
@@ -4535,7 +4534,6 @@ async fn read_conversation_attachment(
             crate::conversation_attachment::READ_ATTACHMENT_TOOL,
         )?;
         receipt.original_envelope = message.data_envelope.clone();
-        receipt.source_sha256 = original_attachment_sha256;
         message.attachment_read = Some(Box::new(receipt));
         message
     };

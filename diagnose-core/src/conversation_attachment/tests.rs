@@ -14,8 +14,6 @@ fn metadata(id: &str, kind: ContentKind, content: &str) -> AttachmentMetadata {
         media_type: "text/plain".into(),
         original_bytes: content.len() as u64,
         size_bytes: content.len() as u64,
-        original_sha256: digest(content.as_bytes()),
-        sha256: digest(content.as_bytes()),
         source_truncated: false,
         storage_truncated: false,
         created_at_unix_ms: 1,
@@ -70,8 +68,6 @@ fn text_prefix_preserves_utf8_and_original_digest() {
     assert_eq!(prepared.original_bytes, input.len());
     assert!(prepared.content.len() <= MAX_TEXT_BYTES);
     assert_eq!(prepared.content.len(), 399_999);
-    assert_eq!(prepared.original_sha256, digest(input.as_bytes()));
-    assert_ne!(prepared.sha256, prepared.original_sha256);
 }
 
 #[test]
@@ -425,4 +421,22 @@ fn many_short_lines_keep_metadata_bounded_and_can_be_fully_read() {
         }
     }
     assert_eq!(recovered, content);
+}
+
+#[test]
+fn json_cursor_continues_on_the_same_view_and_expires_when_the_view_is_regenerated() {
+    let content = "[\n\"alpha-1\",\n\"bravo-2\",\n\"delta-3\"\n]";
+    let meta = metadata("a", ContentKind::Json, content);
+    let mut req = request();
+    req.max_bytes = 12;
+    let first = read_page(&meta, content.as_bytes(), &req).unwrap();
+    assert!(first.has_more);
+    req.cursor = first.cursor;
+    // Unchanged bytes, such as an owner REST read of the stored attachment.
+    let second = read_page(&meta, content.as_bytes(), &req).unwrap();
+    assert_ne!(first.lines[0].line, second.lines[0].line);
+    // A model view regenerated with other aliases keeps the attachment id and size.
+    let regenerated = content.replace("bravo-2", "bravo-9");
+    assert_eq!(regenerated.len(), content.len());
+    assert!(read_page(&meta, regenerated.as_bytes(), &req).is_err());
 }

@@ -707,8 +707,7 @@ fn attachment_pages_share_inline_projection_and_keep_original_proof_on_small_sta
             let mut body=String::new();let mut pages=0;
             loop {
                 let (wire,proof)=model_read::text_page_with_references(&part,&input,"read",100000,&crate::model_observability::tool::ToolObservation::default(),&mut refs).unwrap();
-                assert_eq!(proof.source_sha256,original.metadata.sha256);
-                assert_eq!(proof.page_sha256,crate::conversation_attachment::digest(wire.as_bytes()));
+                assert_eq!(proof.projection_version,2);
                 let page:ReadPage=serde_json::from_str(&wire).unwrap();
                 for line in page.lines { body.push_str(&line.text); }
                 pages+=1;

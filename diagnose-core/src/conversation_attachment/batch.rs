@@ -1,6 +1,6 @@
 //! Prepare a whole tool delivery before either runtime changes storage or LRU.
 use super::{
-    AttachmentMetadata, Availability, ContentKind, MAX_SESSION_BYTES, digest, invalid, prepare_text,
+    AttachmentMetadata, Availability, ContentKind, MAX_SESSION_BYTES, invalid, prepare_text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
@@ -152,12 +152,14 @@ pub fn plan_batch_protecting(
                     "Attachment was deleted or evicted; delivery cannot restore it",
                 ));
             }
+            // Metadata equality only; the host compares the stored bytes with
+            // the incoming bytes before reusing an existing attachment.
             let mut compared = part.metadata.clone();
             compared.created_at_unix_ms = stored.created_at_unix_ms;
             compared.last_accessed_at_unix_ms = stored.last_accessed_at_unix_ms;
             if &compared != stored {
                 return Err(invalid(
-                    "Attachment identity was reused with different content or metadata",
+                    "Attachment identity was reused with different metadata",
                 ));
             }
         } else {
@@ -253,15 +255,9 @@ pub fn prepare_delivery(
         {
             return Err(invalid("Attachment parts must have distinct bounded names"));
         }
-        let (
-            kind,
-            content,
-            original_bytes,
-            original_sha256,
-            storage_truncated,
-            external,
-            media_type,
-        ) = match part.content {
+        let (kind, content, original_bytes, storage_truncated, external, media_type) = match part
+            .content
+        {
             PartContent::Json(text) => prepare_body(ContentKind::Json, text, "application/json")?,
             PartContent::Text(text) => prepare_body(ContentKind::Text, text, "text/plain")?,
             PartContent::ImageDataUrl(url) => {
@@ -275,12 +271,10 @@ pub fn prepare_delivery(
                     )
                     .map_err(|_| invalid("Invalid image attachment encoding"))?;
                 let size = bytes.len() as u64;
-                let hash = digest(&bytes);
                 (
                     ContentKind::Image,
                     bytes,
                     size,
-                    hash,
                     false,
                     true,
                     info.media_type,
@@ -311,8 +305,6 @@ pub fn prepare_delivery(
                 media_type,
                 original_bytes,
                 size_bytes: content.len() as u64,
-                original_sha256,
-                sha256: digest(&content),
                 source_truncated: part.source_truncated,
                 storage_truncated,
                 created_at_unix_ms,
@@ -354,7 +346,7 @@ pub fn prepare_delivery(
     Ok(result)
 }
 
-type PreparedBody = (ContentKind, Vec<u8>, u64, String, bool, bool, String);
+type PreparedBody = (ContentKind, Vec<u8>, u64, bool, bool, String);
 
 fn prepare_body(
     kind: ContentKind,
@@ -366,7 +358,6 @@ fn prepare_body(
         kind,
         prepared.content.into_bytes(),
         prepared.original_bytes as u64,
-        prepared.original_sha256,
         prepared.storage_truncated,
         prepared.external,
         media_type.into(),

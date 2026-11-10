@@ -61,7 +61,6 @@ fn goal_progress_uses_original_result_digest_and_ignores_skipped_calls() {
                 restorable: true,
                 template: None,
                 slots: vec![],
-                sha256: original_sha256.clone(),
                 envelope: None,
             },
         ));
