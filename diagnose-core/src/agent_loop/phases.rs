@@ -2879,7 +2879,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         issue: crate::model_observability::InputIssue::InvalidJson,
                                         schema_path: None,
                                     })
-                                    .and_then(|input| {
+                                    .and_then(|mut input| {
+                                        // Resolution verifies and drops an implied device selector.
+                                        if crate::request_devices::implies_target(&call.name, session)
+                                            && let Some(input) = input.as_object_mut()
+                                        {
+                                            input.remove("target_ref");
+                                        }
                                         crate::model_input::validate_format_reported(
                                             &call.name,
                                             &spec.parameters_schema,
@@ -2889,21 +2895,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             && let Some(registry) = deps.provider_registry
                                             && let Some(items) = input["items"].as_array()
                                         {
-                                            for item in items {
-                                                if let Some(name) = item["tool_name"].as_str()
-                                                    && let Some(exact) = item.get("exact_input")
-                                                    && let Some(capability) =
-                                                        registry.capability_for_tool(name)
-                                                {
-                                                    let mut target = capability.tool_spec.clone();
-                                                    crate::ui_model_ids::project_tool(&mut target);
-                                                    crate::model_input::validate_format_reported(
-                                                        name,
-                                                        &target.parameters_schema,
-                                                        exact,
-                                                    )?;
-                                                }
-                                            }
+                                            crate::model_input::validate_permission_items(
+                                                items,
+                                                |name| {
+                                                    registry.capability_for_tool(name).map(|capability| {
+                                                        let mut target = capability.tool_spec.clone();
+                                                        crate::ui_model_ids::project_tool(&mut target);
+                                                        target.parameters_schema
+                                                    })
+                                                },
+                                            )?;
                                         }
                                         Ok(())
                                     })

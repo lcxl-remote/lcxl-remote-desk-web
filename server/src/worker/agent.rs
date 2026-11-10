@@ -467,7 +467,10 @@ async fn dispatch_read_context(
                 .await
                 .map_err(|reason| AgentError {
                     kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
-                    message: format!("application launch preflight failed: {reason:?}"),
+                    message: format!(
+                        "application launch preflight failed at {}: {}",
+                        reason.diagnostic.operation, reason.diagnostic.message
+                    ),
                     retryable: false,
                     safe_for_model: true,
                     error_code: None,

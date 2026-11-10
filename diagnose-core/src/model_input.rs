@@ -599,6 +599,38 @@ pub fn validate_format(name: &str, input: &Value) -> Result<(), String> {
     check(&tool.parameters_schema, input, "$", 0)
         .map_err(|reason| describe_error(name, &reason.message))
 }
+/// Check every permission item's exact input and report all failures at
+/// once, so one correction can fix the whole batch.
+pub fn validate_permission_items(
+    items: &[Value],
+    schema_for: impl Fn(&str) -> Option<Value>,
+) -> Result<(), FormatError> {
+    let mut errors = items
+        .iter()
+        .filter_map(|item| {
+            let name = item["tool_name"].as_str()?;
+            let exact = item.get("exact_input")?;
+            validate_format_reported(name, &schema_for(name)?, exact).err()
+        })
+        .collect::<Vec<_>>();
+    match errors.len() {
+        0 => Ok(()),
+        1 => Err(errors.remove(0)),
+        count => Err(FormatError {
+            message: format!(
+                "{count} permission items have invalid exact_input; no approval card was created. Correct all of them in one request:\n{}",
+                errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            issue: errors[0].issue,
+            schema_path: None,
+        }),
+    }
+}
+
 pub fn validate_format_with_schema(
     name: &str,
     schema: &Value,
@@ -963,6 +995,64 @@ pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_feedback_points_to_the_listed_target_instead_of_a_fixed_kind() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let schema = registry
+            .capability_for_tool("launch_application")
+            .unwrap()
+            .tool_spec
+            .parameters_schema
+            .clone();
+        let error = validate_format_with_schema(
+            "launch_application",
+            &schema,
+            &json!({"queries":["Calculator"]}),
+        )
+        .unwrap_err();
+        assert!(error.contains("copied from list_applications"), "{error}");
+        assert!(!error.contains(r#""kind":"executable""#), "{error}");
+    }
+
+    #[test]
+    fn every_malformed_permission_item_is_reported_together() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let schema_for = |name: &str| {
+            registry.capability_for_tool(name).map(|capability| {
+                let mut target = capability.tool_spec.clone();
+                crate::ui_model_ids::project_tool(&mut target);
+                target.parameters_schema
+            })
+        };
+        // The batch from a real session: each attempt used to surface one item.
+        let items = [
+            json!({"tool_name":"list_applications","exact_input":{}}),
+            json!({"tool_name":"inspect_desktop_ui","exact_input":{"limit":20}}),
+            json!({"tool_name":"launch_application","exact_input":{"queries":["Calculator"]}}),
+            json!({"tool_name":"inspect_desktop_session","exact_input":{}}),
+        ];
+        let error = validate_permission_items(&items, schema_for).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("3 permission items have invalid exact_input"),
+            "{}",
+            error.message
+        );
+        for tool in [
+            "list_applications",
+            "inspect_desktop_ui",
+            "launch_application",
+        ] {
+            assert!(error.message.contains(&format!("Tool: {tool}")), "{tool}");
+        }
+        // One failure keeps its focused feedback and schema path.
+        let single = validate_permission_items(&items[..1], schema_for).unwrap_err();
+        assert!(!single.message.contains("permission items have invalid"));
+        assert!(single.schema_path.is_some());
+        assert!(validate_permission_items(&items[3..], schema_for).is_ok());
+    }
 
     #[test]
     fn bounds_feedback_reports_observed_size_instead_of_input_contents() {

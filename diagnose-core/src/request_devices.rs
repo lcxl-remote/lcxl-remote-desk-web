@@ -142,6 +142,54 @@ pub(crate) fn has_single_target(session: &PersistedAgentSession) -> bool {
     matches!(session.assistant_request_targets(), Some([_]))
 }
 
+/// Native UI tools take their device from the observed application. A
+/// target_ref copied from the device tools is dropped before resolution and
+/// must then name the device that observed the resolved application.
+pub(crate) fn implies_target(name: &str, session: &PersistedAgentSession) -> bool {
+    session.uses_request_device_tools() && crate::application_ui::supports(name)
+}
+
+pub(crate) fn strip_implied_target(
+    call: &ToolCall,
+    session: &PersistedAgentSession,
+) -> Result<Option<(ToolCall, String)>, AgentError> {
+    if !implies_target(&call.name, session) {
+        return Ok(None);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| crate::subagent::invalid("Tool arguments must be valid JSON"))?;
+    let Some(reference) = value
+        .as_object_mut()
+        .and_then(|input| input.remove("target_ref"))
+    else {
+        return Ok(None);
+    };
+    let target = reference
+        .as_str()
+        .and_then(|reference| session.assistant_request_device(reference))
+        .ok_or_else(|| crate::subagent::invalid("The device is outside the original request"))?;
+    Ok(Some((
+        ToolCall {
+            arguments_json: value.to_string(),
+            ..call.clone()
+        },
+        target.device_id.clone(),
+    )))
+}
+
+/// The resolved application and controls must come from the named device.
+pub(crate) fn confirm_implied_target(
+    session: &PersistedAgentSession,
+    device: &str,
+    input: &serde_json::Value,
+) -> Result<(), AgentError> {
+    action::require_desktop_action_target(session, device, input).map_err(|_| {
+        crate::subagent::invalid(
+            "target_ref differs from the device of the observed application; omit target_ref",
+        )
+    })
+}
+
 pub(crate) fn infer_single_target(
     call: &ToolCall,
     session: &PersistedAgentSession,

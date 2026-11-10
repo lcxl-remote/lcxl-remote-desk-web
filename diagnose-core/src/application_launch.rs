@@ -25,6 +25,8 @@ pub fn tool() -> crate::registry::RegisteredTool {
                 "type": "object", "additionalProperties": false,
                 "properties": {
                     "target": {"type":"object", "additionalProperties":false,
+                        "description":"Copy the target of a list_applications entry when available. executable is an absolute executable file (not supported on macOS); macos_bundle is an absolute .app bundle path; windows_app_id is a Windows packaged application ID.",
+                        "examples":[{"kind":"macos_bundle","value":"<target.value copied from list_applications>"}],
                         "properties": {"kind":{"type":"string","enum":["executable","macos_bundle","windows_app_id"]},
                             "value":{"type":"string","minLength":1,"maxLength":4096}},
                         "required":["kind","value"]},

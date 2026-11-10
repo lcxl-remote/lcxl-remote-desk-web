@@ -194,12 +194,17 @@ async fn run_desktop_history_case(
         replies[3] = replies[3].replace("call-request_permissions", "call-ui-permission");
         replies.insert(
             4,
-            tool_reply(
-                "execute_ui_actions",
-                serde_json::json!({
+            tool_reply("execute_ui_actions", {
+                let mut input = serde_json::json!({
                     "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"select"}}]
-                }),
-            ),
+                });
+                // A model in a multi-device conversation copies the device
+                // selector from the device tools; it must name the same device.
+                if selectable {
+                    input["target_ref"] = serde_json::json!("device");
+                }
+                input
+            }),
         );
     }
     if goal_route {

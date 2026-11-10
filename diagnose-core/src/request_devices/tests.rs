@@ -1306,3 +1306,73 @@ fn native_canonical_input_excludes_the_model_device_selector() {
     assert!(!expected.contains("target_ref"));
     assert!(native_canonical_input("inspect_desktop_ui", "[]").is_none());
 }
+
+#[test]
+fn a_copied_device_selector_on_a_native_ui_action_must_match_the_observed_application() {
+    use crate::chat::{ChatMessage, ChatRole};
+    use crate::model_message_labels::{ReadResultLabel, read_result_envelope};
+    use crate::seam::ToolOutputFormat;
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let mut session = session();
+    let app = json!({"token":"observed-app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-11-06T00:10:00Z"});
+    let text = json!({"ReadContext":{"DesktopSessionInspect":{
+        "session":{"token":"session","snapshot_id":"apps","object_kind":"desktop_session","expires_at":"2026-11-06T00:10:00Z"},
+        "os":"macos","interactive_session_incarnation":"worker","active_application":app,"active_application_name":"Calendar"
+    }}}).to_string();
+    let observe = tool("inspect_desktop_session", json!({}));
+    let mut message = ChatMessage::text("observed", ChatRole::Tool, text.clone());
+    message.tool_call_id = Some(observe.id.clone());
+    message.tool_ok = Some(true);
+    message.data_envelope = Some(
+        read_result_envelope(
+            registry,
+            &observe,
+            &ToolRunOutput {
+                format: ToolOutputFormat::Json,
+                content: text,
+                image_data_url: None,
+                document_preview: None,
+            },
+            ReadResultLabel {
+                envelope_id: "observed-device-a".into(),
+                observation_id: "desktop-a".into(),
+                source_object_id: Some(format!("a:{}", observe.id)),
+                observed_at_unix_ms: 1,
+            },
+        )
+        .unwrap(),
+    );
+    session.conversation.extend([
+        ChatMessage::assistant_tool_calls("observation", "", vec![observe.to_ref()]),
+        message,
+    ]);
+    let action = |target: Option<&str>| {
+        let mut input =
+            json!({"application":app,"steps":[{"action":{"kind":"invoke"},"element_id":"e1"}]});
+        if let Some(target) = target {
+            input["target_ref"] = json!(target);
+        }
+        tool("execute_ui_actions", input)
+    };
+    assert!(implies_target("execute_ui_actions", &session));
+    let (stripped, device) = strip_implied_target(&action(Some("a")), &session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stripped, action(None));
+    let input: Value = serde_json::from_str(&stripped.arguments_json).unwrap();
+    confirm_implied_target(&session, &device, &input).unwrap();
+    assert!(
+        strip_implied_target(&action(None), &session)
+            .unwrap()
+            .is_none()
+    );
+    // Another admitted device did not observe the application.
+    let (_, other) = strip_implied_target(&action(Some("b")), &session)
+        .unwrap()
+        .unwrap();
+    assert!(confirm_implied_target(&session, &other, &input).is_err());
+    // A device outside the request is refused outright.
+    assert!(strip_implied_target(&action(Some("z")), &session).is_err());
+    // Device tools keep their own selector.
+    assert!(!implies_target("inspect_desktop_ui", &session));
+}

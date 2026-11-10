@@ -150,6 +150,10 @@ pub(crate) fn resolve(
     )
 }
 
+/// macOS launches only application bundles, without a working directory or
+/// elevation.
+pub(crate) const MACOS_LAUNCH_OPTIONS: &str = "macOS launches only application bundles: use target.kind macos_bundle with the absolute .app path (as returned by list_applications); cwd and run_as_admin are not supported.";
+
 /// This preflight is independent of catalog lookup and executes no application.
 #[allow(
     clippy::result_large_err,
@@ -163,7 +167,16 @@ pub(crate) fn preflight(request: &LaunchApplicationRequest) -> Result<(), Launch
         || request.cwd.is_some()
         || request.target.kind != ApplicationTargetKind::MacosBundle
     {
-        return Err(LaunchFailureReason::Unsupported.into());
+        return Err(LaunchError {
+            reason: LaunchFailureReason::Unsupported,
+            diagnostic: NativeDiagnostic::new(
+                DiagnosticStage::TargetResolution,
+                "validate launch options",
+                "application",
+                None,
+                MACOS_LAUNCH_OPTIONS,
+            ),
+        });
     }
     super::unix_catalog_host::current().map_err(|message| LaunchError {
         reason: LaunchFailureReason::SessionUnavailable,
@@ -303,4 +316,26 @@ pub(crate) fn invoke(
     // Another instance can appear between preflight and activation. AppKit may
     // ignore argv for that instance, so delivery remains unknown without evidence.
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desk_agent_protocol::application_launch::{ApplicationTarget, LaunchApplicationRequest};
+
+    #[test]
+    fn a_bundle_launched_as_an_executable_names_the_supported_kind() {
+        let error = preflight(&LaunchApplicationRequest {
+            target: ApplicationTarget {
+                kind: ApplicationTargetKind::Executable,
+                value: "/System/Applications/Calculator.app".into(),
+            },
+            args: Vec::new(),
+            cwd: None,
+            run_as_admin: false,
+        })
+        .unwrap_err();
+        assert_eq!(error.reason, LaunchFailureReason::Unsupported);
+        assert_eq!(error.diagnostic.message, MACOS_LAUNCH_OPTIONS);
+    }
 }

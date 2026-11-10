@@ -217,6 +217,10 @@ pub fn resolve_session_call_with_context(
     {
         return Ok(call.clone());
     }
+    // Drop a model-copied selector first; inference then derives the device
+    // from the observed application as it does without the selector.
+    let implied = crate::request_devices::strip_implied_target(call, session)?;
+    let call = implied.as_ref().map_or(call, |(call, _)| call);
     let inferred = crate::request_devices::infer_single_target(call, session)?;
     let call = inferred.as_ref().unwrap_or(call);
     if call.name == crate::command_confirmation::COMMAND_TOOL
@@ -269,6 +273,9 @@ pub fn resolve_session_call_with_context(
     }
     if let Some((reference, _)) = route {
         value["target_ref"] = json!(reference);
+    }
+    if let Some((_, device)) = &implied {
+        crate::request_devices::confirm_implied_target(session, device, &value)?;
     }
     resolved.arguments_json = value.to_string();
     crate::request_devices::selected_action_device(session, &resolved)?;
