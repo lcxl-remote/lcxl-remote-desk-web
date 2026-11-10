@@ -1274,6 +1274,12 @@ export function useAiAssistantChat({
             const selected = conversationId.current;
             queuedSession.current = { conversation: selected, sessionId: event.main_request_session_id };
             rememberQueueStream(event.main_request_id);
+            // The intake status may have bound the submission stream. A queued
+            // input runs under its durable request id, so release it.
+            if (activeRequest.current === event.request_id) {
+                activeRequest.current = null;
+                activeRequestAck.current = null;
+            }
             acknowledgeDelivery();
             if (!activeRequest.current && !snapshotActiveRequest.current) setStatus('queued');
             void loadRequestQueue(selected);

@@ -2155,6 +2155,41 @@ describe('useAiAssistantChat', () => {
         expect(result.current.messages.at(-1)).toMatchObject({ id: 'saved-report', text: 'Disk report ready' });
     });
 
+    it('follows the durable request after the intake status of a queued submission', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
+            ok: true, json: async () => ({ success: true, data: url.includes('/requests?')
+                ? { sessionId: 'root', items: [] }
+                : { ...snapshotFields, sessionId: 'root', seq: 1, active: false, messages: [] } }),
+        })));
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            targetRefs: ['mac', 'linux'], subscribe: handler => { subscriber = handler; return () => { subscriber = null; }; }, sendMessage }));
+        const deliver = (id: string, event: Record<string, unknown>) => subscriber?.({
+            request_id: id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { request_id: id, ...event },
+        });
+        try {
+            act(() => { expect(result.current.start('Check both devices')).toBe(true); });
+            const submission = sendMessage.mock.calls[0][3]!;
+            // The server reports intake under the submission id before queueing.
+            await act(async () => {
+                deliver(submission, { kind: 'status', status: 'accepting', seq: 0 });
+                deliver(submission, { kind: 'status', status: 'queued', seq: 1,
+                    main_request_id: 'parent', main_request_session_id: 'root' });
+                deliver('parent', { kind: 'status', status: 'accepting', seq: 0 });
+                deliver('parent', { kind: 'status', status: 'accepted', seq: 1 });
+                deliver('parent', { kind: 'partial', seq: 2, partial_summary: 'Checking' });
+            });
+            expect(result.current.turnRunning).toBe(true);
+            expect(result.current.partial).toBe('Checking');
+            await act(async () => deliver('parent', { kind: 'answer', seq: 3, answer: 'Both checks complete' }));
+            expect(result.current.turnRunning).toBe(false);
+            expect(result.current.canStop).toBe(false);
+            expect(result.current.running).toBe(false);
+        } finally { unmount(); }
+    });
+
     it('recovers a completed approval continuation when only the queued turn start arrived', async () => {
         vi.useFakeTimers();
         let subscriber: SignalingSubscriber | null = null;
