@@ -19,6 +19,7 @@ pub mod terminal;
 pub mod terminal_completion;
 pub mod turn_usage;
 pub mod usage_retention;
+pub mod web_research_policy;
 pub mod web_search;
 
 pub mod file_recovery;

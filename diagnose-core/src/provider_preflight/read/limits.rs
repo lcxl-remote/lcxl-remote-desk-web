@@ -207,6 +207,17 @@ struct FetchOutput {
     content_type: String,
     body_bytes: usize,
     sha256: String,
+    // The remaining fields are part of the strict result shape; the encoded
+    // result length already bounds the excerpt.
+    /// Absent in results written before reads could be truncated.
+    #[serde(default)]
+    #[allow(dead_code)]
+    truncated: bool,
+    /// The server's declared length, reported only.
+    #[serde(default)]
+    #[allow(dead_code)]
+    content_length: Option<u64>,
+    #[allow(dead_code)]
     excerpt: String,
 }
 
@@ -276,9 +287,10 @@ fn validate_web_output(
                     value.content_type.as_str(),
                     "text/html" | "text/plain" | "application/xhtml+xml"
                 )
-                || value.body_bytes > 128 * 1024
+                || value.body_bytes
+                    > desk_agent_protocol::ai_assistant::web_research_policy::MAX_MAX_FETCH_BYTES
+                        as usize
                 || !is_sha256(&value.sha256)
-                || value.excerpt.chars().count() > 24_000
                 || limits.max_items_per_call < 1
             {
                 return Err(unavailable());

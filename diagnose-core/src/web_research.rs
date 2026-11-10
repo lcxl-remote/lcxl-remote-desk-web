@@ -8,6 +8,9 @@ use crate::chat::ToolCall;
 pub const WEB_FETCH_TOOL_NAME: &str = "fetch_public_web_page";
 pub const WEB_SEARCH_TOOL_NAME: &str = "search_public_web";
 pub const CENTRAL_WEB_READINESS_REVISION: u64 = 1;
+/// Encoded page read results stay below the shared per-call output limit of
+/// central capabilities, with room for the result envelope.
+pub const MAX_FETCH_RESULT_BYTES: usize = 240 * 1024;
 
 pub fn is_web_tool(name: &str) -> bool {
     matches!(name, WEB_FETCH_TOOL_NAME | WEB_SEARCH_TOOL_NAME)

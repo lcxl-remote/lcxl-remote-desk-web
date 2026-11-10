@@ -48,6 +48,10 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
             value(&config.automation_policy)?,
         ),
         (
+            "web_research_policy".into(),
+            value(&config.web_research_policy)?,
+        ),
+        (
             "terminal_completion".into(),
             value(&config.terminal_completion)?,
         ),
@@ -236,6 +240,8 @@ impl<'de> Deserialize<'de> for GlobalConfig {
                 .map_err(serde::de::Error::custom)?,
             automation_policy: decode(take("automation_policy"), "automation_policy")
                 .map_err(serde::de::Error::custom)?,
+            web_research_policy: decode(take("web_research_policy"), "web_research_policy")
+                .map_err(serde::de::Error::custom)?,
             goal_budget_policy: decode(take("goal_budget_policy"), "goal_budget_policy")
                 .map_err(serde::de::Error::custom)?,
             schedule_budget_policy: decode(
@@ -368,6 +374,7 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
         "terminal_completion" => config.terminal_completion.revision.to_string(),
         "subagent_policy" => config.subagent_policy.revision.to_string(),
         "automation_policy" => config.automation_policy.revision.to_string(),
+        "web_research_policy" => config.web_research_policy.revision.to_string(),
         "goal_budget_policy" => config.goal_budget_policy.revision.to_string(),
         "schedule_budget_policy" => config.schedule_budget_policy.revision.to_string(),
         "model_metrics" => config.model_metrics.revision.clone(),
@@ -439,6 +446,7 @@ pub(super) fn advance_revision(
             "terminal_completion" => config.terminal_completion.revision = next,
             "subagent_policy" => config.subagent_policy.revision = next,
             "automation_policy" => config.automation_policy.revision = next,
+            "web_research_policy" => config.web_research_policy.revision = next,
             "goal_budget_policy" => config.goal_budget_policy.revision = next,
             "schedule_budget_policy" => config.schedule_budget_policy.revision = next,
             _ => unreachable!("known policy revision"),

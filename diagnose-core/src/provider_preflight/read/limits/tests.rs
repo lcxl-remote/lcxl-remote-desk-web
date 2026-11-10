@@ -259,4 +259,33 @@ fn central_web_output_is_schema_checked_and_narrowed_by_the_grant() {
         document_preview: None,
     };
     validate_output(&registry, &fetch_call, &fetch, &limit(4096, 1)).unwrap();
+
+    // A truncated read of a large page with a long excerpt is a valid result.
+    let mut value: serde_json::Value = serde_json::from_str(&fetch.content).unwrap();
+    value["body_bytes"] = serde_json::json!(512 * 1024);
+    value["truncated"] = serde_json::json!(true);
+    value["content_length"] = serde_json::json!(4 * 1024 * 1024);
+    value["excerpt"] = serde_json::json!("界".repeat(30_000));
+    let truncated = ToolRunOutput {
+        content: value.to_string(),
+        ..fetch.clone()
+    };
+    validate_output(&registry, &fetch_call, &truncated, &limit(256 * 1024, 1)).unwrap();
+    // The body read stays within the configurable ceiling.
+    value["body_bytes"] = serde_json::json!(
+        desk_agent_protocol::ai_assistant::web_research_policy::MAX_MAX_FETCH_BYTES + 1
+    );
+    let oversized = ToolRunOutput {
+        content: value.to_string(),
+        ..fetch.clone()
+    };
+    assert!(validate_output(&registry, &fetch_call, &oversized, &limit(256 * 1024, 1)).is_err());
+    // Unknown fields are still rejected.
+    value["body_bytes"] = serde_json::json!(100);
+    value["forged"] = serde_json::json!(true);
+    let forged = ToolRunOutput {
+        content: value.to_string(),
+        ..fetch
+    };
+    assert!(validate_output(&registry, &fetch_call, &forged, &limit(256 * 1024, 1)).is_err());
 }

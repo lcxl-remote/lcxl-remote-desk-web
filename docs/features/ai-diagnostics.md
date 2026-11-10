@@ -391,7 +391,7 @@ The assistant continues using objects and results returned by its tools. Expand 
 
 AI can choose public HTTP or HTTPS URLs for your task, including links from search results or earlier messages. The URL does not need to appear in your current message. The first permission card authorizes the complete hostname, such as `example.com`.
 
-Within that conversation and the approved expiry, other paths, query parameters, HTTP/HTTPS schemes and ports on the same host can be accessed repeatedly without consuming uses. Other subdomains, such as `docs.example.com`, require separate authorization. Hostname case, internationalized names and trailing dots are normalized. Revoked or expired grants require fresh authorization.
+Within that conversation and the approved expiry, other paths, query parameters, HTTP/HTTPS schemes and ports on the same host can be accessed repeatedly without consuming uses. Other subdomains, such as `docs.example.com`, require separate authorization. Hostname case, internationalized names and trailing dots are normalized. Revoked or expired grants require fresh authorization. Each page read takes at most the configured amount of data (128 KiB by default; an administrator can set it from 16 KiB to 1 MiB under **Web page read limit**). A longer page is read only up to the limit and marked as truncated.
 
 The fetcher reads bounded public text and checks connection addresses and redirects. Redirects within the approved host are allowed; redirects to another host return an error. Local/private addresses, URL credentials and other schemes are unavailable. Returned content is treated as external source material.
 

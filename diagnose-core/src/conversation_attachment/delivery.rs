@@ -147,7 +147,8 @@ fn prepare(
         ToolOutputFormat::WebDocument => {
             let value: Value =
                 serde_json::from_str(text).map_err(|_| invalid("Invalid web document result"))?;
-            field(&value, "/excerpt".into(), "body".into(), false)?;
+            let truncated = value["truncated"].as_bool().unwrap_or(false);
+            field(&value, "/excerpt".into(), "body".into(), truncated)?;
             template = Some(value);
         }
         ToolOutputFormat::Operation => {

@@ -346,6 +346,42 @@ async fn automation_limit_is_file_owned_bounded_and_revisioned() {
     assert!(encoded.contains("maxAutoTurnsPerChain = 8"));
 }
 
+#[tokio::test]
+async fn web_page_read_limit_is_file_owned_bounded_and_revisioned() {
+    use desk_agent_protocol::ai_assistant::web_research_policy::UpdateWebResearchPolicy;
+    let db = test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::web_research_policy::max_fetch_bytes(&db).await,
+        128 * 1024
+    );
+    let initial = crate::web_research_policy::read(&db).await;
+    let update = |expected_revision, max_fetch_bytes| UpdateWebResearchPolicy {
+        expected_revision,
+        max_fetch_bytes,
+    };
+    assert!(matches!(
+        crate::web_research_policy::update(&db, &update(initial.revision, 1)).await,
+        Err(crate::web_research_policy::WriteError::Invalid)
+    ));
+    crate::web_research_policy::update(&db, &update(initial.revision, 512 * 1024))
+        .await
+        .unwrap();
+    assert!(matches!(
+        crate::web_research_policy::update(&db, &update(initial.revision, 256 * 1024)).await,
+        Err(crate::web_research_policy::WriteError::Conflict)
+    ));
+    assert_eq!(
+        crate::web_research_policy::max_fetch_bytes(&db).await,
+        512 * 1024
+    );
+    let config: GlobalConfig = (**db.config_read().await).clone();
+    let encoded = toml::to_string(&config).unwrap();
+    assert!(encoded.contains("[web_research_policy]"));
+    assert!(encoded.contains("maxFetchBytes = 524288"));
+}
+
 struct FailingFile;
 #[async_trait]
 impl ConfigPersistence for FailingFile {

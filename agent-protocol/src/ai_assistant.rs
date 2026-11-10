@@ -27,6 +27,7 @@ pub mod source_ref;
 pub mod subagent;
 pub mod subagent_policy;
 pub mod user_instructions;
+pub mod web_research_policy;
 pub mod workbench;
 
 /// Owner-visible queue state. Native turn and approval state live in the session.

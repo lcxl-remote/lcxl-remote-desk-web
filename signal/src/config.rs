@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use desk_agent_protocol::{
     ai_assistant::{
         automation_policy::AutomationPolicy, goal_budget::GoalBudgetPolicy,
-        subagent_policy::SubAgentPolicy,
+        subagent_policy::SubAgentPolicy, web_research_policy::WebResearchPolicy,
     },
     schedule::policy::ScheduleBudgetPolicy,
 };
@@ -28,7 +28,7 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 20] = [
+pub const SECTION_NAMES: [&str; 21] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
@@ -44,6 +44,7 @@ pub const SECTION_NAMES: [&str; 20] = [
     "access_code_protection",
     "subagent_policy",
     "automation_policy",
+    "web_research_policy",
     "goal_budget_policy",
     "schedule_budget_policy",
     "usage_retention",
@@ -81,6 +82,7 @@ pub struct GlobalConfig {
         desk_diagnose_core::terminal_completion_policy::TerminalCompletionPolicy,
     pub subagent_policy: SubAgentPolicy,
     pub automation_policy: AutomationPolicy,
+    pub web_research_policy: WebResearchPolicy,
     pub goal_budget_policy: GoalBudgetPolicy,
     pub schedule_budget_policy: ScheduleBudgetPolicy,
     pub usage_retention: UsageRetentionConfig,
@@ -110,6 +112,7 @@ impl Default for GlobalConfig {
             terminal_completion: Default::default(),
             subagent_policy: desk_diagnose_core::subagent::policy::initial(),
             automation_policy: AutomationPolicy::default(),
+            web_research_policy: WebResearchPolicy::default(),
             goal_budget_policy: desk_diagnose_core::goal_budget::initial(),
             schedule_budget_policy: desk_diagnose_core::schedule::policy::initial(),
             usage_retention: UsageRetentionConfig::default(),
@@ -195,6 +198,9 @@ impl GlobalConfig {
         self.automation_policy
             .validate()
             .map_err(|_| invalid("automation_policy"))?;
+        self.web_research_policy
+            .validate()
+            .map_err(|_| invalid("web_research_policy"))?;
         desk_diagnose_core::goal_budget::validate(&self.goal_budget_policy)
             .map_err(|_| invalid("goal_budget_policy"))?;
         desk_diagnose_core::schedule::policy::validate(&self.schedule_budget_policy)

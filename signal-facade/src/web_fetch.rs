@@ -6,10 +6,15 @@ use sha2::{Digest, Sha256};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::{seam::ToolRunOutput, web_research::ValidatedFetch};
 
-const MAX_BODY_BYTES: usize = 128 * 1024;
 const MAX_REDIRECTS: usize = 3;
+use desk_diagnose_core::web_research::MAX_FETCH_RESULT_BYTES as MAX_RESULT_BYTES;
 
-pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunOutput, AgentError> {
+/// Read at most `max_body_bytes` of the page. A longer page is truncated, not
+/// rejected, and the result says so.
+pub async fn fetch_public_web_page(
+    validated: ValidatedFetch,
+    max_body_bytes: usize,
+) -> Result<ToolRunOutput, AgentError> {
     let requested_url = validated.initial_url().as_str().to_string();
     let mut current = validated.initial_url().clone();
     for redirect_count in 0..=MAX_REDIRECTS {
@@ -68,50 +73,137 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
                 "Web Research response is not supported textual content",
             ));
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_BODY_BYTES as u64)
-        {
-            return Err(invalid("Web Research response exceeds the byte limit"));
-        }
-        let mut body = Vec::new();
+        // The server's declared length is reported only; it decides nothing.
+        let content_length = response.content_length();
+        let mut body = BoundedBody::new(max_body_bytes);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| transport("Web Research response body failed"))?;
-            if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
-                return Err(invalid("Web Research response exceeds the byte limit"));
+            if !body.push(&chunk) {
+                break;
             }
-            body.extend_from_slice(&chunk);
         }
-        let source = std::str::from_utf8(&body)
-            .map_err(|_| invalid("Web Research response is not UTF-8 text"))?;
-        let (title, published_at, excerpt) = if content_type == "text/plain" {
-            (None, None, collapse_text(source))
-        } else {
-            extract_html(source)
-        };
-        let result = serde_json::json!({
-            "schema_version": 1,
-            "untrusted_external_content": true,
-            "requested_url": requested_url,
-            "final_url": current.as_str(),
-            "title": title,
-            "published_at": published_at,
-            "fetched_at": chrono::Utc::now().to_rfc3339(),
-            "content_type": content_type,
-            "body_bytes": body.len(),
-            "sha256": format!("{:x}", Sha256::digest(&body)),
-            "excerpt": excerpt,
-        });
+        let final_url = current.as_str().to_owned();
+        let fetched_at = chrono::Utc::now().to_rfc3339();
+        let content = tokio::task::spawn_blocking(move || {
+            page_result(PageInput {
+                requested_url,
+                final_url,
+                fetched_at,
+                content_type,
+                content_length,
+                body,
+            })
+        })
+        .await
+        .map_err(|_| internal("Web Research extraction failed"))??;
         return Ok(ToolRunOutput {
             format: desk_diagnose_core::seam::ToolOutputFormat::WebDocument,
-            content: serde_json::to_string(&result)
-                .map_err(|_| internal("failed to encode Web Research result"))?,
+            content,
             image_data_url: None,
             document_preview: None,
         });
     }
     unreachable!("bounded redirect loop returns or continues")
+}
+
+/// Response bytes read up to a limit; the remainder of the stream is dropped.
+struct BoundedBody {
+    bytes: Vec<u8>,
+    limit: usize,
+    truncated: bool,
+}
+
+impl BoundedBody {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            truncated: false,
+        }
+    }
+
+    /// Append a chunk; false once the limit is reached and reading should stop.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        let room = self.limit.saturating_sub(self.bytes.len());
+        if chunk.len() > room {
+            self.bytes.extend_from_slice(&chunk[..room]);
+            self.truncated = true;
+            return false;
+        }
+        self.bytes.extend_from_slice(chunk);
+        true
+    }
+}
+
+/// UTF-8 text of the read bytes. Only a truncated body may end inside a
+/// character; that incomplete tail is dropped. Invalid bytes are rejected.
+fn decode_body(bytes: &[u8], truncated: bool) -> Result<&str, AgentError> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if truncated && error.error_len().is_none() => {
+            Ok(std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("valid prefix"))
+        }
+        Err(_) => Err(invalid("Web Research response is not UTF-8 text")),
+    }
+}
+
+struct PageInput {
+    requested_url: String,
+    final_url: String,
+    fetched_at: String,
+    content_type: String,
+    content_length: Option<u64>,
+    body: BoundedBody,
+}
+
+/// Build the model-facing result, shortening the excerpt so the encoded
+/// result stays within the per-call output limit.
+fn page_result(input: PageInput) -> Result<String, AgentError> {
+    let source = decode_body(&input.body.bytes, input.body.truncated)?;
+    let (title, published_at, mut excerpt) = if input.content_type == "text/plain" {
+        (None, None, collapse_text(source))
+    } else {
+        extract_html(source)
+    };
+    let mut truncated = input.body.truncated;
+    loop {
+        let mut result = serde_json::json!({
+            "schema_version": 1,
+            "untrusted_external_content": true,
+            "requested_url": input.requested_url,
+            "final_url": input.final_url,
+            "title": title,
+            "published_at": published_at,
+            "fetched_at": input.fetched_at,
+            "content_type": input.content_type,
+            "body_bytes": input.body.bytes.len(),
+            // Digest of the bytes actually read, which is a prefix when truncated.
+            "sha256": format!("{:x}", Sha256::digest(&input.body.bytes)),
+            "truncated": truncated,
+            "excerpt": excerpt,
+        });
+        if let Some(length) = input.content_length {
+            result["content_length"] = serde_json::json!(length);
+        }
+        let encoded = serde_json::to_string(&result)
+            .map_err(|_| internal("failed to encode Web Research result"))?;
+        let over = encoded.len().saturating_sub(MAX_RESULT_BYTES);
+        if over == 0 {
+            return Ok(encoded);
+        }
+        if excerpt.is_empty() {
+            return Err(invalid("Web Research result exceeds the output limit"));
+        }
+        // Escaping can only make the encoded excerpt longer than its text, so
+        // removing the excess from the text fits within one more encoding.
+        let mut end = excerpt.len().saturating_sub(over);
+        while !excerpt.is_char_boundary(end) {
+            end -= 1;
+        }
+        excerpt.truncate(end);
+        truncated = true;
+    }
 }
 
 fn validated_redirect(
@@ -311,6 +403,68 @@ fn internal(message: impl Into<String>) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read(chunks: &[&[u8]], limit: usize) -> BoundedBody {
+        let mut body = BoundedBody::new(limit);
+        for chunk in chunks {
+            if !body.push(chunk) {
+                break;
+            }
+        }
+        body
+    }
+
+    fn page(content_type: &str, body: BoundedBody) -> serde_json::Value {
+        let encoded = page_result(PageInput {
+            requested_url: "https://example.com/".into(),
+            final_url: "https://example.com/".into(),
+            fetched_at: "2026-11-10T00:00:00Z".into(),
+            content_type: content_type.into(),
+            content_length: Some(9_999_999),
+            body,
+        })
+        .unwrap();
+        assert!(encoded.len() <= MAX_RESULT_BYTES);
+        serde_json::from_str(&encoded).unwrap()
+    }
+
+    #[test]
+    fn a_long_page_is_truncated_at_the_limit_instead_of_failing() {
+        let whole = read(&[b"hello ", b"world"], 64);
+        assert!(!whole.truncated);
+        let value = page("text/plain", whole);
+        assert_eq!(value["excerpt"], "hello world");
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["content_length"], 9_999_999);
+
+        let cut = read(&[b"hello ", b"world", b"never read"], 8);
+        assert!(cut.truncated);
+        assert_eq!(cut.bytes, b"hello wo");
+        let value = page("text/plain", cut);
+        assert_eq!(value["excerpt"], "hello wo");
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["body_bytes"], 8);
+    }
+
+    #[test]
+    fn truncation_drops_only_an_incomplete_trailing_character() {
+        // "界" is three bytes; the limit splits it.
+        let cut = read(&["ab界".as_bytes()], 4);
+        assert_eq!(decode_body(&cut.bytes, cut.truncated).unwrap(), "ab");
+        // A whole body must be valid UTF-8, and invalid bytes are never trimmed away.
+        assert!(decode_body(&cut.bytes, false).is_err());
+        assert!(decode_body(b"a\xffb\xe7", true).is_err());
+    }
+
+    #[test]
+    fn an_oversized_excerpt_is_shortened_to_the_result_limit() {
+        let text = "\"quoted\" ".repeat(60_000);
+        let body = read(&[text.as_bytes()], 1024 * 1024);
+        assert!(!body.truncated);
+        let value = page("text/plain", body);
+        assert_eq!(value["truncated"], true);
+        assert!(value["excerpt"].as_str().unwrap().len() < text.len());
+    }
 
     #[test]
     fn redirects_allow_same_host_protocols_and_ports_but_reject_other_authority() {

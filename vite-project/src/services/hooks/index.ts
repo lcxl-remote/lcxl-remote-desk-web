@@ -273,6 +273,9 @@ export type { QueryVirtualDisplaySettingsQueryKey } from "./virtualDisplayContro
 export type { QueryVirtualDisplaySettingsSuspenseQueryKey } from "./virtualDisplayController/useQueryVirtualDisplaySettingsSuspense.ts";
 export type { UninstallDriverMutationKey } from "./virtualDisplayController/useUninstallDriver.ts";
 export type { UpdateVirtualDisplaySettingsMutationKey } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
+export type { GetWebResearchPolicyQueryKey } from "./webResearchAdminController/useGetWebResearchPolicy.ts";
+export type { GetWebResearchPolicySuspenseQueryKey } from "./webResearchAdminController/useGetWebResearchPolicySuspense.ts";
+export type { UpdateWebResearchPolicyMutationKey } from "./webResearchAdminController/useUpdateWebResearchPolicy.ts";
 export type { GetWebSearchQueryKey } from "./webSearchController/useGetWebSearch.ts";
 export type { GetWebSearchSuspenseQueryKey } from "./webSearchController/useGetWebSearchSuspense.ts";
 export type { TestWebSearchMutationKey } from "./webSearchController/useTestWebSearch.ts";
@@ -1102,6 +1105,15 @@ export { useUninstallDriver } from "./virtualDisplayController/useUninstallDrive
 export { updateVirtualDisplaySettingsMutationKey } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { updateVirtualDisplaySettingsMutationOptions } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { useUpdateVirtualDisplaySettings } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
+export { getWebResearchPolicyQueryKey } from "./webResearchAdminController/useGetWebResearchPolicy.ts";
+export { getWebResearchPolicyQueryOptions } from "./webResearchAdminController/useGetWebResearchPolicy.ts";
+export { useGetWebResearchPolicy } from "./webResearchAdminController/useGetWebResearchPolicy.ts";
+export { getWebResearchPolicySuspenseQueryKey } from "./webResearchAdminController/useGetWebResearchPolicySuspense.ts";
+export { getWebResearchPolicySuspenseQueryOptions } from "./webResearchAdminController/useGetWebResearchPolicySuspense.ts";
+export { useGetWebResearchPolicySuspense } from "./webResearchAdminController/useGetWebResearchPolicySuspense.ts";
+export { updateWebResearchPolicyMutationKey } from "./webResearchAdminController/useUpdateWebResearchPolicy.ts";
+export { updateWebResearchPolicyMutationOptions } from "./webResearchAdminController/useUpdateWebResearchPolicy.ts";
+export { useUpdateWebResearchPolicy } from "./webResearchAdminController/useUpdateWebResearchPolicy.ts";
 export { getWebSearchQueryKey } from "./webSearchController/useGetWebSearch.ts";
 export { getWebSearchQueryOptions } from "./webSearchController/useGetWebSearch.ts";
 export { useGetWebSearch } from "./webSearchController/useGetWebSearch.ts";

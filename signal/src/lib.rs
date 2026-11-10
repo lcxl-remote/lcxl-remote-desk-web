@@ -68,6 +68,7 @@ pub mod usage_query;
 pub mod usage_retention;
 pub mod version;
 pub mod web_research;
+pub mod web_research_policy;
 pub mod web_search_config;
 
 pub mod schedule_management;

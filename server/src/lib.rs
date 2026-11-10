@@ -482,6 +482,8 @@ pub fn configure_api_surface(
                 .service(desk_signal::controller::subagent_policy::update_subagent_policy)
                     .service(desk_signal::controller::automation_policy::get_automation_policy)
                     .service(desk_signal::controller::automation_policy::update_automation_policy)
+                    .service(desk_signal::controller::web_research_policy::get_web_research_policy)
+                    .service(desk_signal::controller::web_research_policy::update_web_research_policy)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
                     .service(desk_signal::controller::issue_connections::get_issue_connections)

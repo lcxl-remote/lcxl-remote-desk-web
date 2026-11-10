@@ -10,8 +10,9 @@ use desk_signal_facade::web_search::SearchConfig;
 
 pub(crate) async fn fetch_public_web_page(
     validated: ValidatedFetch,
+    max_body_bytes: usize,
 ) -> Result<ToolRunOutput, AgentError> {
-    desk_signal_facade::web_fetch::fetch_public_web_page(validated).await
+    desk_signal_facade::web_fetch::fetch_public_web_page(validated, max_body_bytes).await
 }
 
 pub(crate) async fn search_public_web(

@@ -16826,6 +16826,41 @@ export type RestResponseVirtualDisplaySettings = {
     success: boolean;
 };
 
+export type RestResponseWebResearchPolicy = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        maxFetchBytes: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schemaVersion: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseBool = {
     /**
      * @type integer, int32
@@ -19589,6 +19624,19 @@ export type UpdateTerminalCompletionRequest = {
     maxOutputTokens: number;
 };
 
+export type UpdateWebResearchPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxFetchBytes: number;
+};
+
 /**
  * @description Usage-retention windows, one per rollup family, in whole days.
 */
@@ -19701,6 +19749,24 @@ export type VirtualDisplaySettings = {
      * @type integer | undefined, int32
     */
     prompt_ms?: number;
+};
+
+export type WebResearchPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxFetchBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
 };
 
 export type GetApprovalRuntimeSettings200 = RestResponseApprovalRuntimeSettings;
@@ -19969,6 +20035,27 @@ export type UpdateTerminalCompletionMutationResponse = UpdateTerminalCompletion2
 export type UpdateTerminalCompletionMutation = {
     Response: UpdateTerminalCompletion200;
     Request: UpdateTerminalCompletionMutationRequest;
+    Errors: any;
+};
+
+export type GetWebResearchPolicy200 = RestResponseWebResearchPolicy;
+
+export type GetWebResearchPolicyQueryResponse = GetWebResearchPolicy200;
+
+export type GetWebResearchPolicyQuery = {
+    Response: GetWebResearchPolicy200;
+    Errors: any;
+};
+
+export type UpdateWebResearchPolicy200 = RestResponseWebResearchPolicy;
+
+export type UpdateWebResearchPolicyMutationRequest = UpdateWebResearchPolicy;
+
+export type UpdateWebResearchPolicyMutationResponse = UpdateWebResearchPolicy200;
+
+export type UpdateWebResearchPolicyMutation = {
+    Response: UpdateWebResearchPolicy200;
+    Request: UpdateWebResearchPolicyMutationRequest;
     Errors: any;
 };
 

@@ -1,0 +1,1 @@
+{"type":"object","required":["expectedRevision","maxFetchBytes"],"properties":{"expectedRevision":{"type":"integer","format":"int64","minimum":0},"maxFetchBytes":{"type":"integer","format":"int32","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"UpdateWebResearchPolicy"}

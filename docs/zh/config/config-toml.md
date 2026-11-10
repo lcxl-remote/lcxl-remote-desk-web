@@ -157,6 +157,7 @@ OSS 的 AI 网关、审批网关、搜索和策略配置与主机设置保存在
 | `[context_management]` | `schema_version`、`strategy`（`window` / `checkpoint_summary`） |
 | `[subagent_policy.limits]` | `maxUnfinishedPerRoot` 为每个主会话未结束子任务数上限。 `maxTaskDurationMinutes` 为新任务的最长时长，默认 120 分钟，接受正整数 |
 | `[automation_policy]` | `schemaVersion`、`revision`、`maxAutoTurnsPerChain`（一次请求最多自动继续的次数，`1–50`，默认 20）。可在 **设置 → 自动续跑上限** 修改 |
+| `[web_research_policy]` | `schemaVersion`、`revision`、`maxFetchBytes`（单次网页读取最多读取的字节数，16 KiB–1 MiB，默认 128 KiB；超过时截断）。可在 **设置 → 网页读取上限** 修改 |
 | `[goal_budget_policy]` | `schemaVersion`、`deviceUnavailableMaxMs`（毫秒，不可禁用）；`[goal_budget_policy.limits]` 包含 `activeTimeMs`、`deadlineMs`（毫秒）、`modelTokens`、`modelCalls`、`toolCalls`、`slices`、`stalledSlices` |
 | `[schedule_budget_policy.maximum]` | `max_runs_per_utc_day`、`max_calls_per_run`、`max_model_tokens_per_run`、`max_runtime_seconds`（秒） |
 | `[usage_retention]` | `turn_days`、`agent_session_days`（天） |
