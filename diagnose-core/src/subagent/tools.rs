@@ -356,7 +356,7 @@ pub fn registry() -> Vec<RegisteredTool> {
         }
     }
     let id = json!({"type":"string","minLength":1,"maxLength":256});
-    let task_id = json!({"type":"string","minLength":1,"maxLength":256,"description":"The native task_id returned by send_subagent_request, list_subagents or get_subagent_status in this conversation. Copy it unchanged; do not use a child-session ID."});
+    let task_id = json!({"type":"string","minLength":1,"maxLength":256,"description":"The task_id returned by send_subagent_request, list_subagents or get_subagent_status in this conversation. Copy it unchanged; do not use a child-session ID."});
     vec![
         tool(
             SPAWN,

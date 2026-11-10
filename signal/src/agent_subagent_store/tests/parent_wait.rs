@@ -707,4 +707,51 @@ async fn report_wait_matches_cursors_without_consuming_and_can_reply_on_the_resu
         .unwrap();
     assert_eq!(answer.payload["state"], "queued");
     assert_eq!(load(&db, &task_id).await.binding, run.binding);
+
+    // The model copies the report alias shown in a projected report result.
+    resumed
+        .ui_references
+        .observe(&resumed.conversation)
+        .unwrap();
+    let mut request = desk_diagnose_core::seam::ModelRequest::text_only(
+        resumed.conversation.clone(),
+        desk_diagnose_core::prompt::ResponseFormatSpec::None,
+    );
+    request.ui_references = Some(resumed.ui_references.clone());
+    let projected = desk_diagnose_core::ui_model_ids::project_request(&request);
+    let shown = projected
+        .messages
+        .iter()
+        .find(|message| message.message_id == history.result_message_id)
+        .unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&shown.text).unwrap();
+    let first_id = pending[0]["report_id"].as_str().unwrap();
+    let index = history.payload["reports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|report| report["report_id"] == first_id)
+        .unwrap();
+    let alias = shown["reports"][index]["report_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(alias.starts_with('q') && alias != first_id, "{alias}");
+    let ack = super::main_tools::committed_call(
+        &db,
+        &mut resumed,
+        "ack-by-alias",
+        tools::ACK_REPORTS,
+        serde_json::json!({"report_ids":[alias]}),
+    )
+    .await;
+    let operation = tools::parse(&resumed, &ack).unwrap();
+    let receipt = store
+        .execute_main_tool(&mut resumed, &ack, operation, "ack-by-alias-receipt")
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.payload["acknowledged_report_ids"],
+        serde_json::json!([first_id])
+    );
 }

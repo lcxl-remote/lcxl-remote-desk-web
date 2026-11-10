@@ -208,14 +208,35 @@ fn visit_result_selectors(value: &mut Value, visitor: &mut impl FnMut(&mut Value
 }
 
 /// Server-issued selectors the model copies by field name, with the alias
-/// prefixes each field accepts.
-const SELECTOR_FIELDS: [(&str, &[&str]); 5] = [
+/// prefixes each field accepts. A field holds one id or an array of ids.
+const SELECTOR_FIELDS: [(&str, &[&str]); 9] = [
     ("worker_id", &["wk"]),
     ("request_id", &["task"]),
     ("task_id", &["task", "j"]),
+    ("background_task_id", &["j"]),
     ("question_id", &["q"]),
+    ("report_id", &["q"]),
+    ("report_ids", &["q"]),
+    ("acknowledged_report_ids", &["q"]),
     ("preview_id", &["v"]),
 ];
+
+/// The id strings of a selector field value: one string or an array of them.
+fn selector_ids(value: &Value) -> Vec<&str> {
+    match value {
+        Value::String(id) => vec![id.as_str()],
+        Value::Array(ids) => ids.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn selector_ids_mut(value: &mut Value) -> Vec<&mut Value> {
+    match value {
+        Value::String(_) => vec![value],
+        Value::Array(ids) => ids.iter_mut().filter(|id| id.is_string()).collect(),
+        _ => Vec::new(),
+    }
+}
 
 fn selector_prefix(native: &str) -> Option<&'static str> {
     use crate::native_ids::{Kind, is};
@@ -330,10 +351,13 @@ fn visit_selector_values(value: &Value, visitor: &mut impl FnMut(&str)) {
     match value {
         Value::Object(object) => {
             for (field, child) in object {
-                if SELECTOR_FIELDS.iter().any(|(name, _)| name == field)
-                    && let Some(native) = child.as_str()
-                {
-                    visitor(native);
+                let ids = if SELECTOR_FIELDS.iter().any(|(name, _)| name == field) {
+                    selector_ids(child)
+                } else {
+                    Vec::new()
+                };
+                if !ids.is_empty() {
+                    ids.into_iter().for_each(&mut *visitor);
                 } else if !is_business_content(field) {
                     visit_selector_values(child, visitor);
                 }
@@ -553,29 +577,29 @@ impl UiReferenceState {
             return Ok(());
         };
         for (field, prefixes) in SELECTOR_FIELDS {
-            let Some(id) = object.get_mut(field) else {
+            let Some(value) = object.get_mut(field) else {
                 continue;
             };
-            let Some(selected) = id.as_str() else {
-                continue;
-            };
-            // Server-issued selectors stay valid after their result leaves
-            // the conversation; the native id names a durable record.
-            match self.entries.get(selected) {
-                Some(entry) if prefixes.contains(&entry.prefix.as_str()) => {
-                    *id = Value::String(entry.native_id.clone());
+            for id in selector_ids_mut(value) {
+                let selected = id.as_str().unwrap_or_default();
+                // Server-issued selectors stay valid after their result leaves
+                // the conversation; the native id names a durable record.
+                match self.entries.get(selected) {
+                    Some(entry) if prefixes.contains(&entry.prefix.as_str()) => {
+                        *id = Value::String(entry.native_id.clone());
+                    }
+                    Some(_) => {
+                        return Err(invalid(
+                            "ID has the wrong type; copy it from the matching result",
+                        ));
+                    }
+                    None if selector_alias_shape(selected) => {
+                        return Err(invalid(
+                            "ID is unavailable in this conversation; copy it from a current result",
+                        ));
+                    }
+                    None => {}
                 }
-                Some(_) => {
-                    return Err(invalid(
-                        "ID has the wrong type; copy it from the matching result",
-                    ));
-                }
-                None if selector_alias_shape(selected) => {
-                    return Err(invalid(
-                        "ID is unavailable in this conversation; copy it from a current result",
-                    ));
-                }
-                None => {}
             }
         }
         Ok(())
@@ -591,13 +615,20 @@ impl UiReferenceState {
         let Some(object) = value.as_object_mut() else {
             return;
         };
+        self.alias_selector_fields(object);
+    }
+
+    fn alias_selector_fields(&self, object: &mut serde_json::Map<String, Value>) {
         for (field, _) in SELECTOR_FIELDS {
-            if let Some(id) = object.get_mut(field)
-                && let Some(native) = id.as_str()
-                && let Some(alias) =
+            let Some(value) = object.get_mut(field) else {
+                continue;
+            };
+            for id in selector_ids_mut(value) {
+                if let Some(alias) = id.as_str().and_then(|native| {
                     selector_prefix(native).and_then(|prefix| self.alias(prefix, native, None))
-            {
-                *id = Value::String(alias.into());
+                }) {
+                    *id = Value::String(alias.into());
+                }
             }
         }
     }
@@ -606,6 +637,18 @@ impl UiReferenceState {
     fn observe_results(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
         for message in history {
             if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
+                continue;
+            }
+            // Registering an already observed result only re-adds its source.
+            let id = &message.message_id;
+            if self
+                .exact_alias("res", id, &serde_json::json!({"result_message_id": id}))
+                .is_some_and(|alias| {
+                    self.entries[alias]
+                        .sources
+                        .contains(&ReferenceSource::Message(id.clone()))
+                })
+            {
                 continue;
             }
             let mut projected = message.clone();
@@ -1373,8 +1416,8 @@ impl UiReferenceState {
                 std::iter::once(value).chain(value["requests"].as_array().into_iter().flatten())
             {
                 for (field, _) in SELECTOR_FIELDS {
-                    if let Some(id) = request.get(field).and_then(Value::as_str) {
-                        found.push(id.to_owned());
+                    if let Some(value) = request.get(field) {
+                        found.extend(selector_ids(value).into_iter().map(str::to_owned));
                     }
                 }
             }
@@ -1664,15 +1707,7 @@ impl UiReferenceState {
                         }
                     }
                 }
-                for (field, _) in SELECTOR_FIELDS {
-                    if let Some(id) = object.get_mut(field)
-                        && let Some(native) = id.as_str()
-                        && let Some(alias) = selector_prefix(native)
-                            .and_then(|prefix| self.alias(prefix, native, None))
-                    {
-                        *id = Value::String(alias.into());
-                    }
-                }
+                self.alias_selector_fields(object);
                 for field in RESULT_OUTPUT_FIELDS {
                     if let Some(id) = object.get_mut(field)
                         && let Some(alias) = id

@@ -198,3 +198,98 @@ fn runtime_state_reuses_aliases_and_recorded_calls_keep_them() {
     };
     assert!(references.expand_call(&call).is_ok());
 }
+
+#[test]
+fn reports_and_background_tasks_share_one_alias_across_fields() {
+    let report = native_ids::stable(Kind::WorkerReport, &("task", 1, "origin"));
+    let background = native_ids::stable(Kind::BackgroundAction, &("run", "turn", "call"));
+    let mut references = UiReferenceState::default();
+    let messages = vec![
+        ChatMessage::assistant_tool_calls(
+            "proposal",
+            "",
+            vec![
+                ToolCallRef {
+                    id: "reports".into(),
+                    name: tools::REPORTS.into(),
+                    arguments_json: "{}".into(),
+                },
+                ToolCallRef {
+                    id: "command".into(),
+                    name: "run_command".into(),
+                    arguments_json: "{}".into(),
+                },
+            ],
+        ),
+        ChatMessage::tool_result(
+            "reports-result",
+            "reports",
+            json!({"reports":[{"report_id":report,"question_id":report,"kind":"needs_input"}]})
+                .to_string(),
+        ),
+        ChatMessage::tool_result(
+            "command-result",
+            "command",
+            crate::chat::background_task_running_result(&background),
+        ),
+        ChatMessage::tool_result(
+            "ack-result",
+            "ack",
+            json!({"acknowledged_report_ids":[report]}).to_string(),
+        ),
+    ];
+    assert!(references.observe(&messages).unwrap());
+    let projected = |index: usize| {
+        let mut message: ChatMessage = messages[index].clone();
+        references.project_message(&mut message);
+        serde_json::from_str::<Value>(&message.text).unwrap()
+    };
+    // One native report id seen in two fields receives one alias.
+    let reports = projected(1);
+    assert_eq!(reports["reports"][0]["report_id"], "q1");
+    assert_eq!(reports["reports"][0]["question_id"], "q1");
+    assert_eq!(projected(2)["background_task_id"], "j1");
+    assert_eq!(projected(3)["acknowledged_report_ids"], json!(["q1"]));
+
+    let expand = |name: &str, arguments: Value| {
+        references
+            .expand_call(&ToolCall {
+                id: "next".into(),
+                name: name.into(),
+                arguments_json: arguments.to_string(),
+            })
+            .map(|(call, _)| serde_json::from_str::<Value>(&call.arguments_json).unwrap())
+    };
+    for arguments in [json!({"report_ids":["q1"]}), json!({"report_ids":[report]})] {
+        assert_eq!(
+            expand(tools::ACK_REPORTS, arguments).unwrap(),
+            json!({"report_ids":[report]})
+        );
+    }
+    assert!(expand(tools::ACK_REPORTS, json!({"report_ids":["j1"]})).is_err());
+    assert!(expand(tools::ACK_REPORTS, json!({"report_ids":["q2"]})).is_err());
+    assert_eq!(
+        expand(crate::wait_tools::WAIT_TOOL_NAME, json!({"task_id":"j1"})).unwrap(),
+        json!({"task_id":background})
+    );
+    let mut recorded = json!({"report_ids":[report]});
+    references.alias_selector_ids(&mut recorded);
+    assert_eq!(recorded, json!({"report_ids":["q1"]}));
+
+    // An unfinished acknowledgement keeps its report aliases after the
+    // reports leave the conversation.
+    let pending = ChatMessage::assistant_tool_calls(
+        "ack-proposal",
+        "",
+        vec![ToolCallRef {
+            id: "ack".into(),
+            name: tools::ACK_REPORTS.into(),
+            arguments_json: json!({"report_ids":["q1"]}).to_string(),
+        }],
+    );
+    assert!(
+        references
+            .retained_call_aliases(std::slice::from_ref(&pending), &[])
+            .contains("q1")
+    );
+}
