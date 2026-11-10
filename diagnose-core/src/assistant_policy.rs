@@ -290,18 +290,16 @@ pub fn validate_goal_claim(
     Ok(())
 }
 
-/// A host may use this only after matching the persisted owner decision and
-/// original input inside the permission-resume claim transaction.
-pub fn validate_permission_resume_claim(
+/// Whether the stored session and decision can authorize a personal resume,
+/// independent of the caller's claim parameters. A device conversation is
+/// authorized by its claim checks alone.
+pub fn resume_decision_authorized(
     session: &PersistedAgentSession,
-    params: &ClaimTurnParams,
     decision: &crate::dynamic_run::PermissionDecidedEvent,
-) -> Result<(), AgentError> {
-    if !params.device_id.is_empty() {
-        return validate_claim(session.surface, Some(session.policy_revision), params);
+) -> bool {
+    if !session.device_id.is_empty() {
+        return true;
     }
-    require_current_policy(params.policy_revision)?;
-    require_current_policy(session.policy_revision)?;
     use crate::dynamic_run::PermissionDecisionSource;
     let decided_request = session.permission_requests.iter().find(|request| {
         request.request_id == decision.request_id
@@ -327,12 +325,27 @@ pub fn validate_permission_resume_claim(
                     == session.approval_delegation_conversation_id()
         }
     };
-    if session.has_admitted_personal_input()
+    session.has_admitted_personal_input()
         && (session.agent_role.is_main()
             || (session.agent_role.binding().is_some() && selected_request.is_some()))
-        && params.trigger_origin == TriggerOrigin::PermissionDecision
         && session.input_revision == decision.request_input_revision
         && authorized_decision
+}
+
+/// A host may use this only after matching the persisted owner decision and
+/// original input inside the permission-resume claim transaction.
+pub fn validate_permission_resume_claim(
+    session: &PersistedAgentSession,
+    params: &ClaimTurnParams,
+    decision: &crate::dynamic_run::PermissionDecidedEvent,
+) -> Result<(), AgentError> {
+    if !params.device_id.is_empty() {
+        return validate_claim(session.surface, Some(session.policy_revision), params);
+    }
+    require_current_policy(params.policy_revision)?;
+    require_current_policy(session.policy_revision)?;
+    if resume_decision_authorized(session, decision)
+        && params.trigger_origin == TriggerOrigin::PermissionDecision
         && is_targetless_scope(&params.current_pdp_scope)
     {
         return Ok(());
@@ -522,6 +535,15 @@ mod tests {
             }),
         };
         assert!(validate_permission_resume_claim(&child, &params, &reviewed).is_err());
+        assert!(!resume_decision_authorized(&child, &reviewed));
+        // Caller parameters do not change whether the stored decision authorizes.
+        assert!(resume_decision_authorized(&session, &reviewed));
+        let mut forged = params.clone();
+        forged.policy_revision += 1;
+        assert!(validate_permission_resume_claim(&session, &forged, &reviewed).is_err());
+        let mut unreviewable = session.clone();
+        unreviewable.trigger_origin = TriggerOrigin::ExecCompletion;
+        assert!(!resume_decision_authorized(&unreviewable, &reviewed));
     }
 
     #[test]

@@ -626,6 +626,7 @@ export default {
   'pages.aiAssistant.contextNotice.refreshed': "Some temporary information expired or is about to expire and was removed from model context. It can be fetched again when needed; the original conversation is still available.",
   'pages.aiAssistant.contextNotice.restricted': "Some history is not eligible for the current model or authorization and was not sent. The original conversation is still available.",
   'pages.aiAssistant.contextNotice.automation_limit': "Automatic continuation reached its limit. The background result is saved. Send \"continue\" to let the assistant carry on.",
+  'pages.aiAssistant.contextNotice.resume_stopped': "The continuation after approval could not start. Send a message to continue.",
 
   'pages.aiAssistant.contextMeter.title': "Local request byte budget",
   'pages.aiAssistant.contextMeter.percent': "Conversation budget used: {{percent}}%",

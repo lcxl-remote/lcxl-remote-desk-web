@@ -257,6 +257,48 @@ async fn new_input_supersedes_pending_but_preserves_original_receipt() {
 }
 
 #[tokio::test]
+async fn ended_resume_is_skipped_and_still_reads() {
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
+    decide(&store, &decisions, true).await.unwrap();
+    let (claimant, mut params) = prepare(&store).await;
+    let pending = candidate(&store).await;
+    // Caller parameters that are stale or forged leave the continuation pending.
+    params.policy_revision += 1;
+    assert!(claimant.claim_turn(params.clone()).await.is_err());
+    assert_eq!(candidate(&store).await.state, "pending");
+    params.policy_revision -= 1;
+    resume::Entity::update_many()
+        .col_expr(resume::Column::State, Expr::value("failed"))
+        .exec(&store.db)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .permission_resume_candidates(0, 16)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .pending_permission_resume(&pending, Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(claimant.claim_turn(params).await.is_err());
+    assert_eq!(
+        replay(&store, &decisions).await.unwrap(),
+        Some(PermissionRequestState::PartiallyApproved)
+    );
+}
+
+#[tokio::test]
 async fn old_candidate_cannot_recover_a_new_input_turn_even_if_its_lease_lapsed() {
     let (store, decisions) = seed(
         crate::config::test_support::Database::connect("sqlite::memory:")

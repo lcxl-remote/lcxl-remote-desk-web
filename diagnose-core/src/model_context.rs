@@ -366,6 +366,9 @@ pub enum ContextNoticeKind {
     Compacted,
     /// Automatic follow-ups stopped at the chain limit; the result is saved.
     AutomationLimit,
+    /// The continuation after a permission decision was rejected and will not
+    /// be retried; the owner may send a new message.
+    ResumeStopped,
 }
 
 impl ContextNoticeKind {
@@ -376,6 +379,7 @@ impl ContextNoticeKind {
             Self::Refreshed => "context-refreshed",
             Self::Restricted => "context-restricted",
             Self::AutomationLimit => "automation-limit",
+            Self::ResumeStopped => "resume-stopped",
         }
     }
 }

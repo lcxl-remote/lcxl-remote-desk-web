@@ -1391,7 +1391,8 @@ export const contextNoticeKindDtoEnum = {
     restricted: "restricted",
     trimmed: "trimmed",
     compacted: "compacted",
-    automation_limit: "automation_limit"
+    automation_limit: "automation_limit",
+    resume_stopped: "resume_stopped"
 } as const;
 
 export type ContextNoticeKindDtoEnumKey = (typeof contextNoticeKindDtoEnum)[keyof typeof contextNoticeKindDtoEnum];

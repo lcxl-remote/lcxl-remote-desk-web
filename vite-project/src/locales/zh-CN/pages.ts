@@ -626,6 +626,7 @@ export default {
   'pages.aiAssistant.contextNotice.refreshed': "部分临时信息已失效或即将失效，已从模型上下文移除；需要时会重新获取，原始对话记录仍保留。",
   'pages.aiAssistant.contextNotice.restricted': "部分历史内容不适用于当前模型或授权，未发送给模型；原始对话记录仍保留。",
   'pages.aiAssistant.contextNotice.automation_limit': "已达到自动继续次数上限，后台结果已保存。发送“继续”让助手接着处理。",
+  'pages.aiAssistant.contextNotice.resume_stopped': "审批后的继续处理没能开始。发送消息即可继续。",
   'pages.aiAssistant.contextMeter.title': "本地请求字节预算",
   'pages.aiAssistant.contextMeter.percent': "对话预算已用 {{percent}}%",
   'pages.aiAssistant.contextMeter.unknown': "上下文用量未知",

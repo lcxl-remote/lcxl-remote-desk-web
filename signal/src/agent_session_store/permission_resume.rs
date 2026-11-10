@@ -84,7 +84,7 @@ async fn record(
                 .with_timezone(&Utc)
         || row.version < 1
         || !match (row.state.as_str(), row.turn_id.as_deref()) {
-            ("pending" | "superseded" | "goal_handled", None) => true,
+            ("pending" | "superseded" | "goal_handled" | "failed", None) => true,
             ("started" | "settled", Some(id)) => {
                 id == row.permission_id
                     || (session.trigger_origin == TriggerOrigin::ScheduledTask
@@ -501,10 +501,51 @@ impl SignalAgentSessionStore {
         if &current_grants != grants {
             return Err(ClaimError::Busy);
         }
-        desk_diagnose_core::assistant_policy::validate_permission_resume_claim(
+        if let Err(error) = desk_diagnose_core::assistant_policy::validate_permission_resume_claim(
             &session, &params, &decision,
-        )
-        .map_err(ClaimError::Backend)?;
+        ) {
+            // Caller parameters may be stale or forged; only a stored decision
+            // that cannot authorize this resume ends it.
+            if desk_diagnose_core::assistant_policy::resume_decision_authorized(&session, &decision)
+            {
+                return Err(ClaimError::Backend(error));
+            }
+            // A stored decision that cannot authorize never becomes valid by
+            // waiting. End it and tell the owner instead of rescanning it forever.
+            transition(&txn, &resume, "failed", false, now)
+                .await
+                .map_err(ClaimError::Backend)?;
+            let mut stopped = *session;
+            if stopped.record_resume_stopped(&resume.permission_id, now.to_rfc3339()) {
+                stopped.version = row
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| ClaimError::Backend(invalid()))?;
+                let encoded = stopped
+                    .encode_json_for_storage()
+                    .map_err(|_| ClaimError::Backend(invalid()))?;
+                let changed = agent_session::Entity::update_many()
+                    .col_expr(agent_session::Column::StateJson, Expr::value(encoded))
+                    .col_expr(agent_session::Column::Version, Expr::value(stopped.version))
+                    .col_expr(agent_session::Column::UpdatedAt, Expr::value(now))
+                    .filter(agent_session::Column::Id.eq(row.id))
+                    .filter(agent_session::Column::Version.eq(row.version))
+                    .exec(&txn)
+                    .await
+                    .map_err(|e| ClaimError::Backend(storage(e)))?;
+                if changed.rows_affected != 1 {
+                    return Err(ClaimError::Busy);
+                }
+            }
+            txn.commit()
+                .await
+                .map_err(|e| ClaimError::Backend(storage(e)))?;
+            log::warn!(
+                "[permission-resume] continuation rejected and ended: request={request_id}, reason={}",
+                error.message
+            );
+            return Err(ClaimError::Busy);
+        }
         self.reconcile_context_selection(&mut session)
             .map_err(ClaimError::Backend)?;
         if let (Some(root), Some(request)) = (

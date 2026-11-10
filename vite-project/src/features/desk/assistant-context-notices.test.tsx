@@ -6,7 +6,7 @@ import type { AiAssistantMessage } from './use-ai-assistant-chat';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string) => key }) }));
 
 describe('assistant context timeline notices', () => {
-    it.each(['refreshed', 'restricted', 'automation_limit'] as const)('distinguishes %s from capacity trimming', kind => {
+    it.each(['refreshed', 'restricted', 'automation_limit', 'resume_stopped'] as const)('distinguishes %s from capacity trimming', kind => {
         const { unmount } = render(<AssistantContextNotices notices={[{ id: kind, turnId: 'turn', kind }]} />);
         expect(screen.getByTestId('assistant-context-notice').textContent).toContain(`contextNotice.${kind}`);
         expect(screen.getByTestId('assistant-context-notice').textContent).not.toContain('contextNotice.trimmed');

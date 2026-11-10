@@ -1,1 +1,1 @@
-{"type":"string","enum":["refreshed","restricted","trimmed","compacted","automation_limit"],"x-readme-ref-name":"ContextNoticeKindDto"}
+{"type":"string","enum":["refreshed","restricted","trimmed","compacted","automation_limit","resume_stopped"],"x-readme-ref-name":"ContextNoticeKindDto"}

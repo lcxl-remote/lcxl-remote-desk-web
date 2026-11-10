@@ -2152,6 +2152,20 @@ impl PersistedAgentSession {
         self.add_context_notice(notice)
     }
 
+    /// Tell the owner that the continuation after `permission_id` was rejected
+    /// and will not run. A child is driven by its parent, so only a main
+    /// conversation records it; one notice per decision.
+    pub fn record_resume_stopped(&mut self, permission_id: &str, created_at: String) -> bool {
+        self.agent_role.is_main()
+            && self.record_context_notice(
+                ContextNotice::adjusted(
+                    permission_id,
+                    crate::model_context::ContextNoticeKind::ResumeStopped,
+                ),
+                created_at,
+            )
+    }
+
     /// Bind an event to the persisted history boundary, never to UI refresh time.
     pub fn record_context_notice(&mut self, mut notice: ContextNotice, created_at: String) -> bool {
         notice.created_at = Some(created_at);
