@@ -85,6 +85,7 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
                 "type": "object",
                 "properties": {
                     "before_message_id": {
+                        "description": "Copy a message id shown in a history page or summary, such as msg4.",
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512

@@ -250,8 +250,35 @@ const RECORD_FIELDS: &[(&str, &str)] = &[("schedule_id", "sc"), ("memory_id", "m
 /// Attachment ids are registered only from server-built delivery slots and
 /// stored screenshots, never by scanning result fields.
 const ATTACHMENT_PREFIX: &str = "att";
+/// Message ids are registered from checkpoint facts, history pages and goal
+/// markers, all built by the server.
+const MESSAGE_PREFIX: &str = "msg";
 /// Every durable record alias prefix, used for recycling and alias shapes.
-const RECORD_PREFIXES: &[&str] = &["sc", "mem", ATTACHMENT_PREFIX];
+const RECORD_PREFIXES: &[&str] = &["sc", "mem", ATTACHMENT_PREFIX, MESSAGE_PREFIX];
+
+/// Conversation history pages are server-labelled run control results.
+fn is_history_result(message: &ChatMessage) -> bool {
+    message.role == ChatRole::Tool
+        && message.data_envelope.as_ref().is_some_and(|label| {
+            label.provenance.source_provider_id == crate::dynamic_run::RUN_CONTROL_PROVIDER_ID
+                && label.provenance.source_tool_name
+                    == crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME
+        })
+}
+
+/// Visits the message ids of a history page.
+fn visit_history_ids(value: &mut Value, visitor: &mut impl FnMut(&mut Value)) {
+    if let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(id) = message.get_mut("message_id") {
+                visitor(id);
+            }
+        }
+    }
+    if let Some(id) = value.get_mut("next_before_message_id") {
+        visitor(id);
+    }
+}
 /// Per-prefix limit for record aliases whose showing messages are gone.
 const MAX_RECORD_ALIASES: usize = 256;
 
@@ -479,6 +506,7 @@ impl UiReferenceState {
         self.observe_results(history)?;
         self.observe_selectors(history)?;
         self.observe_attachment_slots(history)?;
+        self.observe_history_pages(history)?;
         Ok(*self != before)
     }
 
@@ -999,6 +1027,128 @@ impl UiReferenceState {
         Ok(())
     }
 
+    /// History pages name the messages they show and the paging cursor.
+    fn observe_history_pages(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
+        for message in history.iter().filter(|message| is_history_result(message)) {
+            let Ok(mut value) = serde_json::from_str::<Value>(&message.text) else {
+                continue;
+            };
+            let mut ids = Vec::new();
+            visit_history_ids(&mut value, &mut |id| {
+                if let Some(id) = id.as_str() {
+                    ids.push(id.to_owned());
+                }
+            });
+            for id in ids {
+                self.register_record("message_id", MESSAGE_PREFIX, &id, &message.message_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Registers message ids the model sees outside any history message, such
+    /// as checkpoint facts and goal markers. Returns whether the table changed.
+    pub(crate) fn register_message_ids<'a>(
+        &mut self,
+        natives: impl IntoIterator<Item = &'a str>,
+    ) -> Result<bool, AgentError> {
+        let before = self.entries.len();
+        for native in natives {
+            let reference = serde_json::json!({ "message_id": native });
+            if self
+                .exact_alias(MESSAGE_PREFIX, native, &reference)
+                .is_none()
+            {
+                self.register_entry(
+                    MESSAGE_PREFIX,
+                    native.into(),
+                    &reference,
+                    ReferenceSource::Record,
+                )?;
+            }
+        }
+        Ok(self.entries.len() != before)
+    }
+
+    /// Aliases of the given message ids, used to protect them from recycling.
+    pub(crate) fn message_aliases<'a>(
+        &self,
+        natives: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeSet<String> {
+        natives
+            .into_iter()
+            .filter_map(|native| self.alias(MESSAGE_PREFIX, native, None).map(str::to_owned))
+            .collect()
+    }
+
+    fn alias_message_id(&self, id: &mut Value) {
+        if let Some(alias) = id
+            .as_str()
+            .and_then(|native| self.alias(MESSAGE_PREFIX, native, None))
+        {
+            *id = Value::String(alias.into());
+        }
+    }
+
+    /// Presents message ids by their aliases in checkpoint summaries, history
+    /// pages and goal markers. Unregistered ids stay native.
+    fn project_message_ids(&self, message: &mut ChatMessage) {
+        if message.role == ChatRole::ContextSummary {
+            // Compression inputs share the role but are not summaries.
+            let Ok(mut summary) =
+                serde_json::from_str::<crate::model_context::ContextSummaryV1>(&message.text)
+            else {
+                return;
+            };
+            summary.visit_source_message_ids(&mut |id| {
+                if let Some(alias) = self.alias(MESSAGE_PREFIX, id, None) {
+                    *id = alias.into();
+                }
+            });
+            if let Ok(text) = serde_json::to_string(&summary) {
+                message.text = text;
+            }
+            return;
+        }
+        if is_history_result(message)
+            && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
+        {
+            visit_history_ids(&mut value, &mut |id| self.alias_message_id(id));
+            message.text = value.to_string();
+            return;
+        }
+        if message.role == ChatRole::SystemEvent
+            && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
+            && matches!(
+                value["authority"].as_str(),
+                Some("server_goal_original" | "server_goal_state")
+            )
+        {
+            if let Some(id) = value.get_mut("source_message_id") {
+                self.alias_message_id(id);
+            }
+            if let Some(ids) = value
+                .pointer_mut("/checkpoint/evidence_ids")
+                .and_then(Value::as_array_mut)
+            {
+                ids.iter_mut().for_each(|id| self.alias_message_id(id));
+            }
+            if let Some(ids) = value
+                .pointer_mut("/checkpoint/protected_attachment_ids")
+                .and_then(Value::as_array_mut)
+            {
+                for id in ids {
+                    if let Some(alias) =
+                        id.as_str().and_then(|native| self.attachment_alias(native))
+                    {
+                        *id = Value::String(alias.into());
+                    }
+                }
+            }
+            message.text = value.to_string();
+        }
+    }
+
     /// The alias of an attachment, if one is registered.
     pub(crate) fn attachment_alias(&self, native: &str) -> Option<&str> {
         self.alias(ATTACHMENT_PREFIX, native, None)
@@ -1211,6 +1361,11 @@ impl UiReferenceState {
             }
             if tool == crate::conversation_attachment::READ_ATTACHMENT_TOOL
                 && let Some(id) = value.get("attachment_id").and_then(Value::as_str)
+            {
+                found.push(id.to_owned());
+            }
+            if tool == crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME
+                && let Some(id) = value.get("before_message_id").and_then(Value::as_str)
             {
                 found.push(id.to_owned());
             }
@@ -1542,6 +1697,7 @@ impl UiReferenceState {
 
     pub(crate) fn project_message(&self, message: &mut ChatMessage) {
         self.project_attachments(message);
+        self.project_message_ids(message);
         if message
             .attachment_read
             .as_ref()
@@ -1753,6 +1909,12 @@ impl UiReferenceState {
             && let Some(selected) = id.as_str()
         {
             *id = Value::String(self.expand_record_id(ATTACHMENT_PREFIX, selected)?);
+        }
+        if tool == crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME
+            && let Some(id) = value.get_mut("before_message_id")
+            && let Some(selected) = id.as_str()
+        {
+            *id = Value::String(self.expand_record_id(MESSAGE_PREFIX, selected)?);
         }
         if !Self::cursor_paths(tool).is_empty()
             && let Some(id) = value.get_mut("cursor")
@@ -2591,5 +2753,145 @@ mod record_tests {
         let original = other.text.clone();
         state.project_message(&mut other);
         assert_eq!(other.text, original);
+    }
+
+    fn labelled_result(message_id: &str, tool: &str, text: &str) -> ChatMessage {
+        let mut message = schedule_result(message_id, &[]);
+        message.text = text.into();
+        message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            message.data_envelope.as_ref(),
+            message_id,
+            text,
+            tool,
+        )
+        .unwrap();
+        message
+    }
+
+    #[test]
+    fn history_pages_alias_message_ids_and_page_by_alias() {
+        let page = serde_json::json!({
+            "messages": [
+                {"message_id":"m_older","role":"user","text":"older"},
+                {"message_id":"m_newer","role":"assistant","text":"newer"}
+            ],
+            "unavailable_count": 0,
+            "availability_notice": "",
+            "has_more": true,
+            "next_before_message_id": "m_older"
+        })
+        .to_string();
+        let history = labelled_result(
+            "page",
+            crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME,
+            &page,
+        );
+        // The same fields in another tool's result are not trusted.
+        let other = labelled_result("other", "schedule_query", &page);
+        let mut state = UiReferenceState::default();
+        state.observe(&[history.clone(), other.clone()]).unwrap();
+        let mut projected = history.clone();
+        state.project_message(&mut projected);
+        assert_eq!(
+            projected.text,
+            page.replace("m_older", "msg1").replace("m_newer", "msg2")
+        );
+        let mut untouched = other.clone();
+        state.project_message(&mut untouched);
+        assert_eq!(untouched.text, other.text);
+
+        let call = |before: &str| ToolCall {
+            id: "load".into(),
+            name: crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({ "before_message_id": before }).to_string(),
+        };
+        let before = |state: &UiReferenceState, id: &str| -> Result<String, AgentError> {
+            let (call, _) = state.expand_call(&call(id))?;
+            let value: Value = serde_json::from_str(&call.arguments_json).unwrap();
+            Ok(value["before_message_id"].as_str().unwrap().to_owned())
+        };
+        assert_eq!(before(&state, "msg1").unwrap(), "m_older");
+        assert_eq!(before(&state, "m_older").unwrap(), "m_older");
+        assert!(before(&state, "msg9").is_err());
+        assert!(before(&state, "sc1").is_err());
+
+        // An in-flight page request keeps its alias after the page leaves.
+        let pending = ChatMessage::assistant_tool_calls(
+            "pending",
+            "",
+            vec![crate::chat::ToolCallRef {
+                id: "load".into(),
+                name: crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME.into(),
+                arguments_json: call("msg1").arguments_json,
+            }],
+        );
+        let protected = state.retained_call_aliases(std::slice::from_ref(&pending), &[]);
+        assert!(protected.contains("msg1"));
+    }
+
+    #[test]
+    fn summaries_and_goal_markers_show_registered_message_aliases() {
+        let summary = crate::model_context::ContextSummaryV1 {
+            goals: vec![crate::model_context::SummaryFactV1 {
+                text: "goal".into(),
+                source_message_ids: vec!["m_goal".into(), "m_unshown".into()],
+            }],
+            omitted_evidence: vec![crate::model_context::SummaryFactV1 {
+                text: "evidence".into(),
+                source_message_ids: vec!["m_evidence".into()],
+            }],
+            ..Default::default()
+        };
+        let canonical = serde_json::to_string(&summary).unwrap();
+        let message = ChatMessage::context_summary("checkpoint:1", &canonical);
+        let mut state = UiReferenceState::default();
+        let mut unregistered = message.clone();
+        state.project_message(&mut unregistered);
+        assert_eq!(unregistered.text, canonical);
+
+        assert!(
+            state
+                .register_message_ids(["m_goal", "m_evidence"])
+                .unwrap()
+        );
+        assert!(!state.register_message_ids(["m_goal"]).unwrap());
+        let mut projected = message.clone();
+        state.project_message(&mut projected);
+        assert_eq!(
+            projected.text,
+            canonical
+                .replace("m_goal", "msg1")
+                .replace("m_evidence", "msg2")
+        );
+
+        state.register_attachment("att_kept", "shot").unwrap();
+        let marker = serde_json::json!({
+            "authority": "server_goal_state",
+            "source_message_id": "m_goal",
+            "checkpoint": {"evidence_ids": ["m_evidence", "m_unshown"], "protected_attachment_ids": ["att_kept"]},
+        })
+        .to_string();
+        let mut goal = ChatMessage::system_event("goal-fixed-state", &marker);
+        state.project_message(&mut goal);
+        let value: Value = serde_json::from_str(&goal.text).unwrap();
+        assert_eq!(value["source_message_id"], "msg1");
+        assert_eq!(
+            value["checkpoint"]["evidence_ids"],
+            serde_json::json!(["msg2", "m_unshown"])
+        );
+        assert_eq!(
+            value["checkpoint"]["protected_attachment_ids"],
+            serde_json::json!(["att1"])
+        );
+
+        // Aliases of displayed checkpoint facts survive recycling when protected.
+        let protected = state.message_aliases(["m_goal", "m_evidence"]);
+        for index in 0..MAX_RECORD_ALIASES + 4 {
+            let id = format!("m_extra{index}");
+            state.register_message_ids([id.as_str()]).unwrap();
+        }
+        state.retain_sources(&BTreeSet::new(), &protected);
+        assert_eq!(state.message_aliases(["m_goal", "m_evidence"]), protected);
+        assert!(state.message_aliases(["m_extra0"]).is_empty());
     }
 }

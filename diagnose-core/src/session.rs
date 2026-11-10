@@ -830,10 +830,24 @@ impl PersistedAgentSession {
 
     /// Aliases that must survive pruning: those named by recorded calls and
     /// those of the current memory facts shown to the model.
+    /// Registers aliases for the history and the stored checkpoint facts.
+    /// Returns whether the alias table changed.
+    pub(crate) fn observe_references(&mut self) -> Result<bool, desk_agent_protocol::AgentError> {
+        let history = self.ui_references.observe(&self.conversation)?;
+        let checkpoints = self
+            .ui_references
+            .register_message_ids(self.model_context_state.checkpoint_message_ids())?;
+        Ok(history || checkpoints)
+    }
+
     pub(crate) fn protected_references(&self) -> std::collections::BTreeSet<String> {
         let mut protected = self
             .ui_references
             .retained_call_aliases(&self.conversation, &self.permission_requests);
+        protected.extend(
+            self.ui_references
+                .message_aliases(self.model_context_state.checkpoint_message_ids()),
+        );
         if let Some(data) = &self.assistant_data {
             protected.extend(
                 self.ui_references.record_aliases(

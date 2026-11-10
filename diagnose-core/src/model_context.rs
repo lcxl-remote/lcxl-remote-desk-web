@@ -296,6 +296,15 @@ pub struct ModelContextState {
 }
 
 impl ModelContextState {
+    /// Source message ids of every stored checkpoint fact.
+    pub(crate) fn checkpoint_message_ids(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.checkpoint.as_ref())
+            .flat_map(|checkpoint| checkpoint.v1().summary.all_facts())
+            .flat_map(|fact| fact.source_message_ids.iter().map(String::as_str))
+    }
+
     /// Upgrade the only supported historical representation. Schema v1 reserved
     /// `checkpoint` as null, so the migration is lossless and deliberately rejects
     /// any non-null/unknown checkpoint before changing the version.

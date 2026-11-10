@@ -186,6 +186,7 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
         .unwrap()
         .message_id
         .clone();
+    let source_id = source.clone();
     let second_listener = listener.clone();
     let second = actix_web::rt::spawn(async move {
         let summary =
@@ -216,7 +217,20 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
             .get("tools")
             .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty))
     );
-    assert!(String::from_utf8(answer).unwrap().contains("Earlier goal"));
+    let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    // The summary cites by message alias in the compression step's request.
+    let summary = answer["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .find(|content| content.contains("Earlier goal"))
+        .unwrap();
+    assert!(
+        summary.contains(r#""source_message_ids":["msg"#),
+        "{summary}"
+    );
+    assert!(!summary.contains(&format!("\"{source_id}\"")), "{summary}");
     assert!(
         after
             .context_notices

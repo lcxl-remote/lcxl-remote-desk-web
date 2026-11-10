@@ -134,6 +134,25 @@ impl ContextSummaryV1 {
     pub fn all_facts(&self) -> impl Iterator<Item = &SummaryFactV1> {
         self.fields().into_iter().flatten()
     }
+
+    /// Visits every fact's source message id in field order.
+    pub(crate) fn visit_source_message_ids(&mut self, visitor: &mut impl FnMut(&mut String)) {
+        for field in [
+            &mut self.goals,
+            &mut self.historical_constraints,
+            &mut self.reported_observations,
+            &mut self.completed_actions,
+            &mut self.unresolved_questions,
+            &mut self.next_steps,
+            &mut self.important_identifiers,
+            &mut self.omitted_evidence,
+        ] {
+            field
+                .iter_mut()
+                .flat_map(|fact| &mut fact.source_message_ids)
+                .for_each(&mut *visitor);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

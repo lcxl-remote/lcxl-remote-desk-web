@@ -407,7 +407,16 @@ pub(super) async fn apply_checkpoint(
     let previous_state = session.model_context_state.clone();
     let previous_notices = session.context_notices.clone();
     let previous_observation = session.latest_model_context.clone();
+    let previous_references = session.ui_references.clone();
     session.model_context_state = next_state;
+    if let Err(error) = session
+        .ui_references
+        .register_message_ids(session.model_context_state.checkpoint_message_ids())
+    {
+        session.model_context_state = previous_state;
+        session.ui_references = previous_references;
+        return Err(error);
+    }
     if let Some(observation) = &mut session.latest_model_context {
         observation.stale = true;
     }
@@ -417,6 +426,7 @@ pub(super) async fn apply_checkpoint(
     );
     if !lease_is_current(deps).await {
         session.model_context_state = previous_state;
+        session.ui_references = previous_references;
         session.context_notices = previous_notices;
         session.latest_model_context = previous_observation;
         return Err(report_context_compression_failure(
@@ -429,6 +439,7 @@ pub(super) async fn apply_checkpoint(
     }
     if let Err(error) = deps.session_seam.save(session).await {
         session.model_context_state = previous_state;
+        session.ui_references = previous_references;
         session.context_notices = previous_notices;
         session.latest_model_context = previous_observation;
         let _ = error;

@@ -1067,7 +1067,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             )? {
                 messages.push(artifact_projection);
             }
-            if session.ui_references.observe(&session.conversation)? {
+            if session.observe_references()? {
                 deps.session_seam.save(session).await?;
             }
             if let Some(result_projection) = reusable_provider_result_projection(
@@ -1311,7 +1311,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         // history window is selected. All transient blocks are included; only
         // protocol framing uses the reserve. Final wire encoding is rechecked.
         const REQUEST_FRAMING_RESERVE_BYTES: usize = 0;
-        let history_changed = session.ui_references.observe(&session.conversation)?;
+        let history_changed = session.observe_references()?;
         let runtime_changed = session.ui_references.observe(&messages)?;
         let sources = session
             .conversation
@@ -1388,7 +1388,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     != Some(&pinned_context.source_context_key)
                     || observation.profile_revision != pinned_context.profile_revision;
             }
-            if session.ui_references.observe(&session.conversation)? {
+            if session.observe_references()? {
                 deps.session_seam.save(session).await?;
             }
             let result_locators = crate::result_model_ids::locators(&session.model_conversation());
@@ -1435,6 +1435,19 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             }
             if session.trigger_origin == TriggerOrigin::GoalContinuation {
                 let goal = deps.session_seam.load_claimed_goal(session).await?;
+                // Goal markers show these message ids; they are rebuilt every step.
+                session.ui_references.register_message_ids(
+                    [
+                        goal.original_source_message_id.as_str(),
+                        goal.source_message_id.as_str(),
+                    ]
+                    .into_iter()
+                    .chain(
+                        goal.checkpoint.iter().flat_map(|checkpoint| {
+                            checkpoint.evidence_ids.iter().map(String::as_str)
+                        }),
+                    ),
+                )?;
                 if goal.goal_revision > 1 {
                     let original_source = session
                         .conversation
@@ -1641,6 +1654,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     Ok(view) => view,
                     Err(error) => return Err(error),
                 };
+                // Compression may have registered aliases for a new checkpoint.
+                request.ui_references = Some(session.ui_references.clone());
                 if deps.model.command_completion_event_id().is_none() {
                     request = assemble_context_request(&request, &context_view, session)?;
                 }

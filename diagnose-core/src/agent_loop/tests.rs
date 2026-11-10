@@ -3094,6 +3094,33 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
         crate::model_profile::ModelUseCase::ContextCompression
     );
     assert_eq!(requests[1].tools.len(), 1);
+    // The compression input shares the summary role but keeps its bytes.
+    let compression = crate::ui_model_ids::project_request(&requests[0]);
+    assert_eq!(
+        compression
+            .messages
+            .iter()
+            .map(|message| &message.text)
+            .collect::<Vec<_>>(),
+        requests[0]
+            .messages
+            .iter()
+            .map(|message| &message.text)
+            .collect::<Vec<_>>()
+    );
+    // The first request after compression already cites by message alias.
+    let main = crate::ui_model_ids::project_request(&requests[1]);
+    let summary = main
+        .messages
+        .iter()
+        .find(|message| message.role == ChatRole::ContextSummary)
+        .unwrap();
+    assert!(
+        summary.text.contains(r#""source_message_ids":["msg1"]"#),
+        "{}",
+        summary.text
+    );
+    assert!(!summary.text.contains("old-a"));
     drop(requests);
 
     let reviews = safety.model_turn_requests.borrow();
