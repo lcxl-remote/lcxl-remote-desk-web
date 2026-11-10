@@ -530,7 +530,7 @@ pub(crate) async fn plan_device_permission(
     let reference = input.as_object_mut()?.remove("target_ref")?;
     let invalid = || {
         crate::subagent::invalid(
-            "A target_ref requires native permission items on one admitted device",
+            "target_ref selects one admitted device for its native permission items; omit target_ref for public web reads and other items that do not run on a device",
         )
     };
     Some(

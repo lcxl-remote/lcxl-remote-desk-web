@@ -1123,7 +1123,12 @@ pub fn preflight_review_capacity(
     surface: ProductSurface,
     configured_bytes: usize,
 ) -> Result<(), ApprovalReviewError> {
-    if requires_owner_decision(request) {
+    // A request without a device target, such as a public web read in a
+    // multi-device conversation, is left for the owner like the review scanner
+    // leaves it; no AI review candidate is built for it.
+    if requires_owner_decision(request)
+        || crate::permission_grant::permission_device_id(session, request).is_empty()
+    {
         return Ok(());
     }
     if let Some(proposal) = session.conversation.iter().find(|message| {
@@ -2925,6 +2930,89 @@ mod tests {
                 .iter()
                 .any(|entry| entry.event_id == "clarifying-question")
         );
+    }
+
+    #[test]
+    fn targetless_web_read_in_a_multi_device_conversation_is_left_for_the_owner() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let call = crate::chat::ToolCall {
+            id: "call".into(),
+            name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"items":[{
+                "item_id": "item_1",
+                "tool_name": "fetch_public_web_page",
+                "exact_input": {"url": "https://example.com/releases"},
+                "suggested_ttl_seconds": 300,
+                "suggested_max_uses": 1,
+                "reason": "Read the release notes",
+            }]})
+            .to_string(),
+        };
+        let request = crate::permission_tools::build_permission_request(
+            &call,
+            &registry,
+            "request".into(),
+            1,
+            "2026-09-23T00:00:00Z".into(),
+        )
+        .unwrap();
+        let session = |device: &str| {
+            let mut session = PersistedAgentSession::new(
+                "conversation",
+                "owner",
+                device,
+                1,
+                desk_agent_protocol::AgentScope {
+                    granted: vec![],
+                    mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                    expires_at: None,
+                    policy_name: None,
+                },
+                &request.created_at,
+            );
+            session.surface = AgentSessionSurface::AiAssistant;
+            session.input_revision = 1;
+            session.conversation.push(ChatMessage::text(
+                "owner-request",
+                ChatRole::User,
+                "Find the latest release notes",
+            ));
+            session
+        };
+        let delegation = |device: &str| {
+            crate::approval_delegation::ApprovalDelegation::new(
+                "delegation".into(),
+                "conversation".into(),
+                "owner".into(),
+                device.into(),
+                "owner-decision".into(),
+                1,
+            )
+            .unwrap()
+        };
+        let personal = session("");
+        assert!(crate::permission_grant::permission_device_id(&personal, &request).is_empty());
+        preflight_review_capacity(
+            &personal,
+            &request,
+            &delegation(""),
+            None,
+            &registry,
+            ProductSurface::OssPersonalOwner,
+            400_000,
+        )
+        .unwrap();
+        // A device conversation still builds and fits the AI review candidate.
+        preflight_review_capacity(
+            &session("device"),
+            &request,
+            &delegation("device"),
+            None,
+            &registry,
+            ProductSurface::OssPersonalOwner,
+            400_000,
+        )
+        .unwrap();
     }
 
     #[test]
