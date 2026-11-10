@@ -52,6 +52,9 @@ async fn current_device_context(
             implicit_fresh_object_refs: vec![],
         });
     }
+    if subject.kind == PendingRequestKind::Permission && subject.target_device_id.is_empty() {
+        return targetless_context(db, now).await;
+    }
     let connection_id = {
         let map = connections.read().await;
         let mut targets = map.values().filter(|target| {
@@ -115,6 +118,35 @@ async fn current_device_context(
         readiness_revision: readiness.readiness.revision,
         device_allows_unattended: readiness.readiness.unattended_command_execution,
         implicit_fresh_object_refs,
+    })
+}
+
+/// A central web request in a personal conversation is reviewed with the same
+/// central capability context as the owner's decision for it.
+async fn targetless_context(
+    db: &DatabaseConnection,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<ReviewDeviceContext> {
+    let search = crate::web_search_config::read(db).await.ok()?;
+    let registry = ai_assistant_provider_registry().with_web_search_binding(search.binding());
+    let inventory = project_capability_availability(
+        &registry,
+        ProductSurface::OssPersonalOwner,
+        u64::try_from(now.timestamp_millis()).ok()?,
+        desk_diagnose_core::capability_availability::assistant_central_capability_readiness(
+            search.configured(),
+            false,
+        ),
+        Vec::new(),
+    )
+    .ok()?;
+    Some(ReviewDeviceContext {
+        connection_id: String::new(),
+        registry,
+        inventory,
+        readiness_revision: desk_diagnose_core::web_research::CENTRAL_WEB_READINESS_REVISION,
+        device_allows_unattended: false,
+        implicit_fresh_object_refs: vec![],
     })
 }
 

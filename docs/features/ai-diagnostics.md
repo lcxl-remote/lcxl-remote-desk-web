@@ -180,7 +180,7 @@ The sidebar **AI Assistant** entry opens an overview with **AI Assistant attenti
 
 **Approval mode** applies to the current conversation and its eligible Workers. Open **+ → Approval mode** in the Assistant, or **Settings → Approval mode** in the Super Agent workbench. A new personal conversation needs a first message before you can change its setting.
 
-- **AI review** is the default for eligible requests on devices you own. Configure an independent approval model on the host. While the model is unavailable, eligible requests remain available for manual approval. A failed review records that the action was not executed.
+- **AI review** is the default for eligible requests on devices you own, including web reads and web searches in a multi-device conversation. Configure an independent approval model on the host. While the model is unavailable, eligible requests remain available for manual approval. A failed review records that the action was not executed.
 - **Manual approval** sends each request to the device owner. Devices available through an organization still follow the device owner's manual approval. Interactive terminal commands always require the owner.
 - **No review** can authorize new, eligible non-interactive commands in work you assign directly. The current host and device policies must both allow unattended execution. Read the warning and confirm again before enabling it. Instructions embedded in a web page, issue, file, or log can still induce unintended changes or data loss. Subscription-triggered device actions use AI review or manual approval according to the current setting and model availability.
 

@@ -275,7 +275,11 @@ pub async fn pending_permission_reviews(
                     let target = desk_diagnose_core::permission_grant::permission_device_id(
                         &session, request,
                     );
-                    if target.is_empty() {
+                    if target.is_empty()
+                        && !desk_diagnose_core::assistant_policy::is_targetless_permission(
+                            &session, request,
+                        )
+                    {
                         continue;
                     }
                     if !desk_diagnose_core::approval_review::requires_owner_decision(request) {
@@ -1684,12 +1688,19 @@ pub(crate) async fn check_permission_target_on(
     request: &desk_diagnose_core::dynamic_run::PermissionRequest,
 ) -> Result<(), DbErr> {
     use crate::agent_session_store::permission_resume;
-    if desk_diagnose_core::permission_grant::permission_device_id(session, request).is_empty()
+    let targetless =
+        desk_diagnose_core::permission_grant::permission_device_id(session, request).is_empty();
+    if (targetless
+        && !desk_diagnose_core::assistant_policy::is_targetless_permission(session, request))
         || !permission_resume::permission_work_current(txn, session, request)
             .await
             .map_err(|_| invalid())?
     {
         return Err(invalid());
+    }
+    // A central web request has no device to validate.
+    if targetless {
+        return Ok(());
     }
     permission_resume::validate_permission_device_on(txn, session, request)
         .await

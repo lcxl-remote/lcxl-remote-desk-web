@@ -213,6 +213,63 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
             targetless_grant.issued_by,
             CapabilityGrantIssuer::UserDecision
         );
+        // AI review may issue the same device-less web grant as the owner.
+        let delegation = crate::approval_delegation::ApprovalDelegation::new(
+            "delegation-1".into(),
+            targetless.conversation_id.clone(),
+            targetless.actor_id.clone(),
+            String::new(),
+            "owner-open".into(),
+            500,
+        )
+        .unwrap();
+        let reviewed = crate::dynamic_run::PermissionDecidedEvent {
+            event: crate::dynamic_run::AgentRunEvent {
+                schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "decision-web".into(),
+                run_id: targetless.conversation_id.clone(),
+                event_seq: 1,
+                input_revision: request.input_revision,
+                kind: crate::dynamic_run::AgentRunEventKind::PermissionDecided,
+                correlation_id: Some(request.request_id.clone()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: "2026-10-11T00:00:01Z".into(),
+            },
+            request_id: request.request_id.clone(),
+            request_input_revision: request.input_revision,
+            resulting_state: PermissionRequestState::Approved,
+            items: decisions.clone(),
+            decision_source: crate::dynamic_run::PermissionDecisionSource::AutomaticReview {
+                failures: vec![],
+                delegation_id: delegation.delegation_id.clone(),
+                delegation_revision: delegation.revision,
+                reviews: vec![crate::dynamic_run::AiPermissionDecisionEvidence {
+                    item_id: item.item_id.clone(),
+                    candidate_id: "candidate-web".into(),
+                    candidate_expires_at_unix_ms: 50_000,
+                    model_config_revision: 1,
+                    reason_code: "within_scope".into(),
+                    reason: "The owner asked for this page".into(),
+                }],
+            },
+        };
+        let mut ai_grants = vec![targetless_grant.clone()];
+        bind_ai_permission_grants(
+            &targetless,
+            &request,
+            &reviewed,
+            &delegation,
+            None,
+            1_000,
+            &mut ai_grants,
+        )
+        .unwrap();
+        assert!(ai_grants[0].target_device_id.is_empty());
+        assert!(matches!(
+            ai_grants[0].issued_by,
+            CapabilityGrantIssuer::AiApproval(_)
+        ));
         let mut policy_grant = targetless_grant.clone();
         policy_grant.issued_by = CapabilityGrantIssuer::PolicyAuto;
         assert!(policy_grant.validate().is_err());

@@ -252,13 +252,18 @@ impl CapabilityGrant {
         ] {
             validate_id(field, value)?;
         }
+        // A device-less grant is a central web read or search in a personal
+        // conversation, approved by the owner or by AI review on the owner's behalf.
         if self.target_device_id.is_empty() {
             if !matches!(
                 self.surface,
                 ProductSurface::ManagerPersonalOwner | ProductSurface::OssPersonalOwner
             ) || self.target_session_id.is_some()
                 || self.risk_tier != CapabilityRiskTier::R1
-                || !matches!(self.issued_by, CapabilityGrantIssuer::UserDecision)
+                || !matches!(
+                    self.issued_by,
+                    CapabilityGrantIssuer::UserDecision | CapabilityGrantIssuer::AiApproval(_)
+                )
                 || !matches!(
                     (
                         self.provider_id.as_str(),

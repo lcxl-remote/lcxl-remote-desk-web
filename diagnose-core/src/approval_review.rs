@@ -958,6 +958,22 @@ impl ApprovalReviewCandidate {
             {
                 return Err(ApprovalReviewError::InvalidCandidate);
             }
+        } else if self.device_id.is_empty()
+            && crate::web_research::is_web_tool(&self.tool_name)
+            && action
+                .get("selected_device_target")
+                .is_none_or(serde_json::Value::is_null)
+            && action
+                .get("command_confirmation")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            // A central web read or search in a personal conversation names no
+            // device; it is reviewed as one exact input.
+            if !matches!(self.source, ApprovalSource::PermissionItem { .. })
+                || self.input_kind != ApprovalInputKind::ExactCall
+            {
+                return Err(ApprovalReviewError::InvalidCandidate);
+            }
         } else if self.device_id.is_empty() {
             let (target, selected_device) =
                 if let Some(target) = action.get("selected_device_target") {
@@ -1123,12 +1139,7 @@ pub fn preflight_review_capacity(
     surface: ProductSurface,
     configured_bytes: usize,
 ) -> Result<(), ApprovalReviewError> {
-    // A request without a device target, such as a public web read in a
-    // multi-device conversation, is left for the owner like the review scanner
-    // leaves it; no AI review candidate is built for it.
-    if requires_owner_decision(request)
-        || crate::permission_grant::permission_device_id(session, request).is_empty()
-    {
+    if requires_owner_decision(request) {
         return Ok(());
     }
     if let Some(proposal) = session.conversation.iter().find(|message| {
@@ -1351,7 +1362,8 @@ pub fn pending_default_device_review<'a>(
             && request.input_revision == session.input_revision
             && request.state == PermissionRequestState::Pending
             && !requires_owner_decision(request)
-            && !crate::permission_grant::permission_device_id(session, request).is_empty()
+            && (!crate::permission_grant::permission_device_id(session, request).is_empty()
+                || crate::assistant_policy::is_targetless_permission(session, request))
             && chrono::DateTime::parse_from_rfc3339(&request.created_at)
                 .ok()
                 .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
@@ -2933,7 +2945,7 @@ mod tests {
     }
 
     #[test]
-    fn targetless_web_read_in_a_multi_device_conversation_is_left_for_the_owner() {
+    fn targetless_web_read_in_a_multi_device_conversation_is_reviewed_by_ai() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let call = crate::chat::ToolCall {
             id: "call".into(),
@@ -2990,8 +3002,12 @@ mod tests {
             )
             .unwrap()
         };
-        let personal = session("");
-        assert!(crate::permission_grant::permission_device_id(&personal, &request).is_empty());
+        let mut personal = session("");
+        personal.bind_assistant_input_targets(&[]).unwrap();
+        assert!(crate::assistant_policy::is_targetless_permission(
+            &personal, &request
+        ));
+        // The preflight builds and fits the AI review candidate.
         preflight_review_capacity(
             &personal,
             &request,
@@ -3002,6 +3018,75 @@ mod tests {
             400_000,
         )
         .unwrap();
+        let mut pending = personal.clone();
+        pending.permission_requests.push(request.clone());
+        let now = u64::try_from(
+            chrono::DateTime::parse_from_rfc3339(&request.created_at)
+                .unwrap()
+                .timestamp_millis(),
+        )
+        .unwrap()
+            + 1_000;
+        assert!(pending_default_device_review(&pending, &request.request_id, now).is_some());
+        let item = &request.items[0];
+        let (descriptor_json, risk) =
+            trusted_permission_descriptor(&registry, item, ProductSurface::OssPersonalOwner)
+                .unwrap();
+        let review = |input_kind| {
+            permission_review_candidate(PermissionReviewInput {
+                session: &pending,
+                request: &request,
+                item_id: &item.item_id,
+                delegation: &delegation(""),
+                goal: None,
+                descriptor_json: &descriptor_json,
+                risk,
+                input_kind,
+                current_authority: vec![ApprovalAuthorityFact {
+                    source: ApprovalSource::PermissionItem {
+                        request_id: request.request_id.clone(),
+                        item_id: item.item_id.clone(),
+                    },
+                    status: ApprovalAuthorityStatus::Pending,
+                    decision_event_id: None,
+                    active_grant_ids: vec![],
+                    dispatch_ids: vec![],
+                }],
+                now_unix_ms: now,
+            })
+        };
+        let candidate = review(ApprovalInputKind::ExactCall).unwrap();
+        assert!(candidate.device_id.is_empty());
+        let mut scoped = candidate.clone();
+        scoped.input_kind = ApprovalInputKind::Scope;
+        assert_eq!(
+            scoped.validate(),
+            Err(ApprovalReviewError::InvalidCandidate)
+        );
+        let mut not_web = candidate;
+        not_web.tool_name = "read_file".into();
+        assert!(not_web.validate().is_err());
+        // A child conversation is not a targetless owner request.
+        let mut child = pending.clone();
+        child.agent_role = crate::subagent::AgentRole::SubAgent {
+            binding: Box::new(crate::subagent::DelegatedTaskBinding {
+                targets: vec![],
+                root_conversation_id: "root".into(),
+                group_id: "group".into(),
+                task_id: "task".into(),
+                source: crate::subagent::DelegationSource::UserInput { input_revision: 1 },
+                objective: "Read".into(),
+                acceptance_criteria: vec!["Report".into()],
+                input_revision: 1,
+                control_revision: 1,
+                source_epoch: 1,
+                deadline_ms: 1,
+            }),
+        };
+        assert!(!crate::assistant_policy::is_targetless_permission(
+            &child, &request
+        ));
+        assert!(pending_default_device_review(&child, &request.request_id, now).is_none());
         // A device conversation still builds and fits the AI review candidate.
         preflight_review_capacity(
             &session("device"),

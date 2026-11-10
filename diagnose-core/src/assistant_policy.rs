@@ -183,6 +183,23 @@ pub fn permits_permission_request(
             })))
 }
 
+/// A permission request with no device target: a central web read or search
+/// asked by the main conversation of a personal assistant session. Owner and
+/// AI review decide it alike; it carries no device authority.
+pub fn is_targetless_permission(
+    session: &PersistedAgentSession,
+    request: &crate::dynamic_run::PermissionRequest,
+) -> bool {
+    crate::permission_grant::permission_device_id(session, request).is_empty()
+        && session.agent_role.is_main()
+        && !request.items.is_empty()
+        && request
+            .items
+            .iter()
+            .all(|item| crate::web_research::is_web_tool(&item.tool_name))
+        && permits_permission_request(session, request)
+}
+
 pub fn require_current_policy(revision: i64) -> Result<(), AgentError> {
     if revision == PERSONAL_ASSISTANT_POLICY_REVISION {
         Ok(())

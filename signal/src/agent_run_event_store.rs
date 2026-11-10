@@ -2499,6 +2499,71 @@ mod tests {
             .turn_id = session.current_turn_id.clone();
         session.finish_turn(TurnState::Idle, now.to_rfc3339());
         sessions.save(&mut session).await.unwrap();
+        if !stop_before_resume {
+            // AI review covers the same central web request the owner may approve.
+            use crate::agent_approval_store as approvals;
+            use crate::config::ConfigConnection;
+            let ms = now.timestamp_millis() as u64;
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway.gateway.base_url = Some("http://127.0.0.1:1".into());
+                    file.approval_gateway.gateway.model = Some("reviewer".into());
+                    file.approval_gateway.gateway.api_key = Some("test-key".into());
+                    file.approval_gateway.gateway.wire_protocol = Some(
+                        desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                    );
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                approvals::discover_default_review_roots(&db, 0, 64, ms)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                approvals::load_latest_for_subject(&db, &input.run_id, &input.actor_id, "")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let pending = approvals::pending_permission_reviews(&db, 0, 64, ms)
+                .await
+                .unwrap()
+                .0;
+            let selected = pending
+                .iter()
+                .find(|row| row.request_id == event.request.request_id)
+                .unwrap();
+            assert!(selected.device_id.is_empty() && selected.target_device_id.is_empty());
+            let search = crate::web_search_config::read(&db).await.unwrap();
+            let review_registry =
+                desk_diagnose_core::ai_assistant::ai_assistant_provider_registry()
+                    .with_web_search_binding(search.binding());
+            let candidates = approvals::prepare_permission_review_batch(
+                &db,
+                &input.run_id,
+                &input.actor_id,
+                "",
+                &event.request.request_id,
+                desk_diagnose_core::approval_review::PendingRequestKind::Permission,
+                &review_registry,
+                ProductSurface::OssPersonalOwner,
+                desk_diagnose_core::web_research::CENTRAL_WEB_READINESS_REVISION,
+                ms,
+            )
+            .await
+            .unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates[0].device_id.is_empty());
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway.enabled = false;
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+        }
         let queued = if stop_before_resume {
             None
         } else {
