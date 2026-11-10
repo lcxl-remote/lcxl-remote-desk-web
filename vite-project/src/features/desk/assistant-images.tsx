@@ -196,10 +196,8 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                 return;
             }
             flushGroup();
-            // Prose saved with a tool call belongs to the work leading to that call.
-            const next = messages[index + 1];
-            const assistantBody = message.role === 'assistant' && message.text.trim()
-                && !(next?.role === 'tool_call' && next.contextBoundaryIds?.includes(message.id));
+            // Assistant prose always stays visible, including text sent with a tool call.
+            const assistantBody = message.role === 'assistant' && !!message.text.trim();
             if (message.role === 'assistant' && renderReasoning && message.reasoning?.trim()) {
                 timeline.push({ key: `reasoning:${message.id}`, kind: 'reasoning', count: 1,
                     content: renderReasoning(message) });

@@ -547,7 +547,7 @@ A completed UI action batch means its steps were dispatched; the application sta
 
 On Web and Tauri, pages open to the same conversation sync saved messages, approval records, and tool results. When the model provides reasoning, it appears before the corresponding tool call. Expand a tool card to see its inputs. Outputs appear after the tool returns a result. When a call requires approval, you can inspect the inputs before following the approval prompt.
 
-On Web and Tauri, adjacent reasoning and tool calls appear in order in a **Work process** group. Open the group to expand individual reasoning sections and tool details. A group at the end of the conversation opens by default and collapses by default when a reply arrives. Groups with screenshots open by default, including when screenshots arrive later. If you open or close a group yourself, the page keeps your choice. User messages and standalone assistant replies separate groups. A single activity appears on its own.
+On Web and Tauri, adjacent reasoning and tool calls appear in order in a **Work process** group. Open the group to expand individual reasoning sections and tool details. A group at the end of the conversation opens by default and collapses by default when a reply arrives. Groups with screenshots open by default, including when screenshots arrive later. If you open or close a group yourself, the page keeps your choice. Assistant prose always stays visible, including text sent with a tool call; prose and user messages separate groups. A single activity appears on its own.
 
 On Android and iOS, two or more thinking sections or tool calls between two non-empty assistant replies form a **Work process** group, collapsed by default.
 

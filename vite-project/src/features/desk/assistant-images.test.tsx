@@ -266,34 +266,37 @@ describe('assistant activity folding', () => {
         expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.activityGroup:2' })).toHaveLength(1);
     });
 
-    it('groups the first reasoning and its tools while running and after the answer arrives', () => {
+    it('keeps prose sent with a tool call visible and groups the work after it', () => {
         const messages: AiAssistantMessage[] = [
             { id: 'question', role: 'user', text: 'Check the disk' },
             { id: 'plan', role: 'assistant', text: 'I will check free space.', reasoning: 'Inspect the current usage.' },
             { id: 'call', role: 'tool_call', toolCallId: 'disk', text: 'Disk tool input', contextBoundaryIds: ['plan'] },
+            { id: 'result', role: 'tool_result', toolCallId: 'disk', text: '41 GB free' },
+            { id: 'thought', role: 'assistant', text: '', reasoning: 'Check the mount too.' },
+            { id: 'mount', role: 'tool_call', toolCallId: 'mount', text: 'Mount tool input' },
         ];
         const renderConversation = (records: AiAssistantMessage[]) => <AssistantImages evidence={[]} messages={records}
             renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />;
         const view = render(renderConversation(messages));
-        const group = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' });
+        const group = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:3' });
         expect(group.getAttribute('data-state')).toBe('open');
         const panel = group.closest('[data-slot="disclosure"]');
-        const thought = screen.getByText('Inspect the current usage.');
+        const prose = screen.getByText('I will check free space.');
+        expect(panel?.contains(prose)).toBe(false);
+        expect(prose.closest('[data-slot="disclosure"]')).toBeNull();
         const input = screen.getByText('Disk tool input');
-        expect(panel?.contains(thought)).toBe(true);
-        expect(panel?.contains(screen.getByText('I will check free space.'))).toBe(true);
         expect(panel?.contains(input)).toBe(true);
-        expect(thought.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(panel?.contains(screen.getByText('Check the mount too.'))).toBe(true);
+        expect(prose.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
         view.rerender(renderConversation([...messages,
-            { id: 'result', role: 'tool_result', toolCallId: 'disk', text: '41 GB free' },
+            { id: 'mount-result', role: 'tool_result', toolCallId: 'mount', text: '/data mounted' },
             { id: 'answer', role: 'assistant', text: 'The disk has 41 GB free.' },
         ]));
-        expect(screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' })).toBe(group);
+        expect(screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:3' })).toBe(group);
         expect(group.getAttribute('data-state')).toBe('closed');
-        fireEvent.click(group);
-        expect(panel?.contains(screen.getByText('41 GB free'))).toBe(true);
         expect(panel?.contains(screen.getByText('The disk has 41 GB free.'))).toBe(false);
+        expect(panel?.contains(screen.getByText('I will check free space.'))).toBe(false);
     });
 
     it('does not group across a user message and keeps the last process open', () => {
