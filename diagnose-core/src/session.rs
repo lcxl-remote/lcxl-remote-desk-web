@@ -2132,6 +2132,26 @@ impl PersistedAgentSession {
         true
     }
 
+    /// Whether a follow-up of `chain_id` dropped at `limit` should tell the owner.
+    /// A child is driven by its parent, so the owner cannot continue it directly.
+    pub fn automation_limit_reached(&self, chain_id: &str, limit: u32) -> bool {
+        self.agent_role.binding().is_none()
+            && self.chain_id == chain_id
+            && self.automation_turns_used >= limit
+    }
+
+    /// Tell the owner that automatic follow-ups of this chain stopped after the
+    /// result `after_message_id`; one notice per chain.
+    pub fn record_automation_limit(&mut self, after_message_id: &str, created_at: String) -> bool {
+        let mut notice = ContextNotice::adjusted(
+            self.chain_id.clone(),
+            crate::model_context::ContextNoticeKind::AutomationLimit,
+        );
+        notice.created_at = Some(created_at);
+        notice.after_message_id = Some(after_message_id.into());
+        self.add_context_notice(notice)
+    }
+
     /// Bind an event to the persisted history boundary, never to UI refresh time.
     pub fn record_context_notice(&mut self, mut notice: ContextNotice, created_at: String) -> bool {
         notice.created_at = Some(created_at);

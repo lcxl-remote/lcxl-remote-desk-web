@@ -310,6 +310,42 @@ async fn policy_compare_and_swap_preserves_other_sections() {
     assert_eq!(saved.usage_retention.turn_days, 7);
 }
 
+#[tokio::test]
+async fn automation_limit_is_file_owned_bounded_and_revisioned() {
+    use desk_agent_protocol::ai_assistant::automation_policy::UpdateAutomationPolicy;
+    let db = test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let initial = crate::automation_policy::read(&db).await;
+    assert_eq!(initial.max_auto_turns_per_chain, 20);
+    let update = |expected_revision, max_auto_turns_per_chain| UpdateAutomationPolicy {
+        expected_revision,
+        max_auto_turns_per_chain,
+    };
+    for invalid in [0, 51] {
+        assert!(matches!(
+            crate::automation_policy::update(&db, &update(initial.revision, invalid)).await,
+            Err(crate::automation_policy::WriteError::Invalid)
+        ));
+    }
+    let saved = crate::automation_policy::update(&db, &update(initial.revision, 8))
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, initial.revision + 1);
+    assert!(matches!(
+        crate::automation_policy::update(&db, &update(initial.revision, 9)).await,
+        Err(crate::automation_policy::WriteError::Conflict)
+    ));
+    assert_eq!(
+        crate::automation_policy::max_auto_turns_per_chain(&db).await,
+        8
+    );
+    let config: GlobalConfig = (**db.config_read().await).clone();
+    let encoded = toml::to_string(&config).unwrap();
+    assert!(encoded.contains("[automation_policy]"));
+    assert!(encoded.contains("maxAutoTurnsPerChain = 8"));
+}
+
 struct FailingFile;
 #[async_trait]
 impl ConfigPersistence for FailingFile {

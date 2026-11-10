@@ -364,6 +364,8 @@ pub enum ContextNoticeKind {
     Restricted,
     Trimmed,
     Compacted,
+    /// Automatic follow-ups stopped at the chain limit; the result is saved.
+    AutomationLimit,
 }
 
 impl ContextNoticeKind {
@@ -373,6 +375,7 @@ impl ContextNoticeKind {
             Self::Compacted => "context-compacted",
             Self::Refreshed => "context-refreshed",
             Self::Restricted => "context-restricted",
+            Self::AutomationLimit => "automation-limit",
         }
     }
 }

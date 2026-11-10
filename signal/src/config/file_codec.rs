@@ -44,6 +44,10 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
         ),
         ("subagent_policy".into(), value(&config.subagent_policy)?),
         (
+            "automation_policy".into(),
+            value(&config.automation_policy)?,
+        ),
+        (
             "terminal_completion".into(),
             value(&config.terminal_completion)?,
         ),
@@ -230,6 +234,8 @@ impl<'de> Deserialize<'de> for GlobalConfig {
                 .map_err(serde::de::Error::custom)?,
             subagent_policy: decode(take("subagent_policy"), "subagent_policy")
                 .map_err(serde::de::Error::custom)?,
+            automation_policy: decode(take("automation_policy"), "automation_policy")
+                .map_err(serde::de::Error::custom)?,
             goal_budget_policy: decode(take("goal_budget_policy"), "goal_budget_policy")
                 .map_err(serde::de::Error::custom)?,
             schedule_budget_policy: decode(
@@ -361,6 +367,7 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
         "access_code_protection" => config.access_code_protection.revision.to_string(),
         "terminal_completion" => config.terminal_completion.revision.to_string(),
         "subagent_policy" => config.subagent_policy.revision.to_string(),
+        "automation_policy" => config.automation_policy.revision.to_string(),
         "goal_budget_policy" => config.goal_budget_policy.revision.to_string(),
         "schedule_budget_policy" => config.schedule_budget_policy.revision.to_string(),
         "model_metrics" => config.model_metrics.revision.clone(),
@@ -431,6 +438,7 @@ pub(super) fn advance_revision(
             "access_code_protection" => config.access_code_protection.revision = next,
             "terminal_completion" => config.terminal_completion.revision = next,
             "subagent_policy" => config.subagent_policy.revision = next,
+            "automation_policy" => config.automation_policy.revision = next,
             "goal_budget_policy" => config.goal_budget_policy.revision = next,
             "schedule_budget_policy" => config.schedule_budget_policy.revision = next,
             _ => unreachable!("known policy revision"),

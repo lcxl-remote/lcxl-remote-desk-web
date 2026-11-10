@@ -9,7 +9,10 @@ mod tests;
 
 use async_trait::async_trait;
 use desk_agent_protocol::{
-    ai_assistant::{goal_budget::GoalBudgetPolicy, subagent_policy::SubAgentPolicy},
+    ai_assistant::{
+        automation_policy::AutomationPolicy, goal_budget::GoalBudgetPolicy,
+        subagent_policy::SubAgentPolicy,
+    },
     schedule::policy::ScheduleBudgetPolicy,
 };
 use desk_diagnose_core::model_context::PlatformContextPolicy;
@@ -25,7 +28,7 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 19] = [
+pub const SECTION_NAMES: [&str; 20] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
@@ -40,6 +43,7 @@ pub const SECTION_NAMES: [&str; 19] = [
     "device_codes",
     "access_code_protection",
     "subagent_policy",
+    "automation_policy",
     "goal_budget_policy",
     "schedule_budget_policy",
     "usage_retention",
@@ -76,6 +80,7 @@ pub struct GlobalConfig {
     pub terminal_completion:
         desk_diagnose_core::terminal_completion_policy::TerminalCompletionPolicy,
     pub subagent_policy: SubAgentPolicy,
+    pub automation_policy: AutomationPolicy,
     pub goal_budget_policy: GoalBudgetPolicy,
     pub schedule_budget_policy: ScheduleBudgetPolicy,
     pub usage_retention: UsageRetentionConfig,
@@ -104,6 +109,7 @@ impl Default for GlobalConfig {
             assistant_user_instructions: Default::default(),
             terminal_completion: Default::default(),
             subagent_policy: desk_diagnose_core::subagent::policy::initial(),
+            automation_policy: AutomationPolicy::default(),
             goal_budget_policy: desk_diagnose_core::goal_budget::initial(),
             schedule_budget_policy: desk_diagnose_core::schedule::policy::initial(),
             usage_retention: UsageRetentionConfig::default(),
@@ -186,6 +192,9 @@ impl GlobalConfig {
             .map_err(|_| invalid("terminal_completion"))?;
         desk_diagnose_core::subagent::policy::validate(&self.subagent_policy)
             .map_err(|_| invalid("subagent_policy"))?;
+        self.automation_policy
+            .validate()
+            .map_err(|_| invalid("automation_policy"))?;
         desk_diagnose_core::goal_budget::validate(&self.goal_budget_policy)
             .map_err(|_| invalid("goal_budget_policy"))?;
         desk_diagnose_core::schedule::policy::validate(&self.schedule_budget_policy)

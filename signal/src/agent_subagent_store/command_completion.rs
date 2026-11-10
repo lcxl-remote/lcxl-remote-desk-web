@@ -43,12 +43,13 @@ impl SubAgentStore {
         .ok_or_else(|| invalid())?;
         let mut session =
             PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+        let limit = crate::automation_policy::max_auto_turns_per_chain(&txn).await;
         if session.agent_role.binding().is_none()
             || session.turn_state.is_active()
             || session.version != row.version
             || session.lease_token as i64 != row.lease_token
             || session.scope_snapshot != params.current_pdp_scope
-            || session.automation_turns_used >= 3
+            || session.automation_turns_used >= limit
             || !desk_diagnose_core::future::boxed(|| async {
                 child_resume_admitted_on(&txn, &session, now.timestamp_millis()).await
             })

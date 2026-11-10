@@ -802,7 +802,7 @@ impl SignalBackgroundTaskStore {
         now: &str,
         work_kind: WorkKind,
     ) -> Result<bool, DbErr> {
-        const MAX_AUTO_FOLLOW_UP_TURNS: u32 = 3;
+        let limit = crate::automation_policy::max_auto_turns_per_chain(&self.db).await;
         let Some(session) = sessions
             .pending_auto_trigger(&row.conversation_id, &row.completion_event_id)
             .await
@@ -829,7 +829,7 @@ impl SignalBackgroundTaskStore {
             }
             return Ok(!matches!(
                 sessions
-                    .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now)
+                    .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now, None)
                     .await
                     .map_err(agent_error)?,
                 EventAppend::Busy
@@ -855,13 +855,16 @@ impl SignalBackgroundTaskStore {
                     .map(|deadline| deadline < Utc::now())
                     .unwrap_or(true)
             });
-        if pending.chain_id != session.chain_id
-            || session.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS
-            || expired
+        if pending.chain_id != session.chain_id || session.automation_turns_used >= limit || expired
         {
             return Ok(!matches!(
                 sessions
-                    .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now)
+                    .prune_auto_trigger(
+                        &row.conversation_id,
+                        &row.completion_event_id,
+                        now,
+                        (!expired).then_some(limit)
+                    )
                     .await
                     .map_err(agent_error)?,
                 EventAppend::Busy
@@ -889,6 +892,7 @@ impl SignalBackgroundTaskStore {
                                 &row.conversation_id,
                                 &row.completion_event_id,
                                 &Utc::now().to_rfc3339(),
+                                None,
                             )
                             .await
                             .map_err(agent_error)?,
@@ -902,7 +906,7 @@ impl SignalBackgroundTaskStore {
                     .pending_auto_trigger(&row.conversation_id, &row.completion_event_id)
                     .await
                     .map_err(agent_error)?
-                    .is_some_and(|latest| latest.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS);
+                    .is_some_and(|latest| latest.automation_turns_used >= limit);
                 // Terminal validation failures must not redial the same result.
                 // Transient failures retain the existing bounded retry path.
                 if exhausted
@@ -915,6 +919,7 @@ impl SignalBackgroundTaskStore {
                                 &row.conversation_id,
                                 &row.completion_event_id,
                                 &Utc::now().to_rfc3339(),
+                                exhausted.then_some(limit),
                             )
                             .await
                             .map_err(agent_error)?,

@@ -1390,7 +1390,8 @@ export const contextNoticeKindDtoEnum = {
     refreshed: "refreshed",
     restricted: "restricted",
     trimmed: "trimmed",
-    compacted: "compacted"
+    compacted: "compacted",
+    automation_limit: "automation_limit"
 } as const;
 
 export type ContextNoticeKindDtoEnumKey = (typeof contextNoticeKindDtoEnum)[keyof typeof contextNoticeKindDtoEnum];
@@ -5715,6 +5716,24 @@ export type AuthorizeWaylandRequest = {
      * @type string
     */
     target: WaylandAuthorizationTarget;
+};
+
+export type AutomationPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxAutoTurnsPerChain: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
 };
 
 /**
@@ -13122,6 +13141,41 @@ export type RestResponseAttachmentPageDto = {
     success: boolean;
 };
 
+export type RestResponseAutomationPolicy = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        maxAutoTurnsPerChain: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schemaVersion: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseBackendInfo = {
     /**
      * @type integer, int32
@@ -19407,6 +19461,19 @@ export type UpdateAssistantApprovalMode = {
     session: string;
 };
 
+export type UpdateAutomationPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxAutoTurnsPerChain: number;
+};
+
 export type UpdateContextManagementRequest = {
     /**
      * @minLength 1
@@ -19737,6 +19804,27 @@ export type UpdateContextManagementMutationResponse = UpdateContextManagement200
 export type UpdateContextManagementMutation = {
     Response: UpdateContextManagement200;
     Request: UpdateContextManagementMutationRequest;
+    Errors: any;
+};
+
+export type GetAutomationPolicy200 = RestResponseAutomationPolicy;
+
+export type GetAutomationPolicyQueryResponse = GetAutomationPolicy200;
+
+export type GetAutomationPolicyQuery = {
+    Response: GetAutomationPolicy200;
+    Errors: any;
+};
+
+export type UpdateAutomationPolicy200 = RestResponseAutomationPolicy;
+
+export type UpdateAutomationPolicyMutationRequest = UpdateAutomationPolicy;
+
+export type UpdateAutomationPolicyMutationResponse = UpdateAutomationPolicy200;
+
+export type UpdateAutomationPolicyMutation = {
+    Response: UpdateAutomationPolicy200;
+    Request: UpdateAutomationPolicyMutationRequest;
     Errors: any;
 };
 

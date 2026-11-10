@@ -542,7 +542,7 @@ impl SignalAgentExecStore {
         task: &agent_exec_task::Model,
         now: &str,
     ) -> Result<bool, AgentError> {
-        const MAX_AUTO_FOLLOW_UP_TURNS: u32 = 3;
+        let limit = crate::automation_policy::max_auto_turns_per_chain(&self.db).await;
 
         let Some(session) = sessions
             .pending_auto_trigger(&task.conversation_id, &task.event_id)
@@ -566,7 +566,7 @@ impl SignalAgentExecStore {
         if session.main_stopped || terminal_child {
             return Ok(!matches!(
                 sessions
-                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now, None)
                     .await?,
                 EventAppend::Busy
             ));
@@ -586,7 +586,7 @@ impl SignalAgentExecStore {
                 }
                 return Ok(!matches!(
                     sessions
-                        .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                        .prune_auto_trigger(&task.conversation_id, &task.event_id, now, None)
                         .await?,
                     EventAppend::Busy
                 ));
@@ -622,13 +622,16 @@ impl SignalAgentExecStore {
                     .map(|deadline| deadline < Utc::now())
                     .unwrap_or(true)
             });
-        if pending.chain_id != session.chain_id
-            || session.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS
-            || expired
+        if pending.chain_id != session.chain_id || session.automation_turns_used >= limit || expired
         {
             return Ok(!matches!(
                 sessions
-                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                    .prune_auto_trigger(
+                        &task.conversation_id,
+                        &task.event_id,
+                        now,
+                        (!expired).then_some(limit)
+                    )
                     .await?,
                 EventAppend::Busy
             ));
@@ -665,6 +668,7 @@ impl SignalAgentExecStore {
                                 &task.conversation_id,
                                 &task.event_id,
                                 &Utc::now().to_rfc3339(),
+                                None,
                             )
                             .await?,
                         EventAppend::Busy
@@ -683,7 +687,7 @@ impl SignalAgentExecStore {
                 let exhausted = sessions
                     .pending_auto_trigger(&task.conversation_id, &task.event_id)
                     .await?
-                    .is_some_and(|latest| latest.automation_turns_used >= MAX_AUTO_FOLLOW_UP_TURNS);
+                    .is_some_and(|latest| latest.automation_turns_used >= limit);
                 if exhausted || !error.retryable {
                     Ok(!matches!(
                         sessions
@@ -691,6 +695,7 @@ impl SignalAgentExecStore {
                                 &task.conversation_id,
                                 &task.event_id,
                                 &Utc::now().to_rfc3339(),
+                                exhausted.then_some(limit),
                             )
                             .await?,
                         EventAppend::Busy

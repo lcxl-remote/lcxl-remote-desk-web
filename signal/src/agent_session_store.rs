@@ -1348,11 +1348,14 @@ impl SignalAgentSessionStore {
 
     /// Remove one pending automatic follow-up under the session version CAS.
     /// Active turns retain ownership; the publisher retries after they settle.
+    /// With `limit`, a follow-up dropped because its chain spent that many
+    /// automatic turns also tells the owner, unless a goal still drives the work.
     pub async fn prune_auto_trigger(
         &self,
         conversation_id: &str,
         event_id: &str,
         now: &str,
+        limit: Option<u32>,
     ) -> Result<EventAppend, AgentError> {
         let now_dt = now_from(now);
         for _ in 0..CLAIM_ATTEMPTS {
@@ -1372,8 +1375,28 @@ impl SignalAgentSessionStore {
             {
                 return Ok(EventAppend::Busy);
             }
+            let chain = session
+                .pending_auto_triggers
+                .iter()
+                .find(|pending| pending.event_id == event_id)
+                .map(|pending| pending.chain_id.clone());
             if !session.remove_pending_auto_trigger(event_id) {
                 return Ok(EventAppend::AlreadyPresent);
+            }
+            let mut notified = false;
+            if let (Some(limit), Some(chain)) = (limit, chain)
+                && session.automation_limit_reached(&chain, limit)
+                && crate::agent_goal_store::load_for_subject(
+                    &self.db,
+                    &session.conversation_id,
+                    &session.actor_id,
+                    &session.device_id,
+                )
+                .await
+                .map_err(|e| internal(format!("load goal for follow-up limit: {e}")))?
+                .is_none()
+            {
+                notified = session.record_automation_limit(event_id, now.to_owned());
             }
             let new_version = row.version + 1;
             session.version = new_version;
@@ -1390,6 +1413,12 @@ impl SignalAgentSessionStore {
                 .await
                 .map_err(|e| internal(format!("save auto-follow-up prune: {e}")))?;
             if result.rows_affected == 1 {
+                if notified {
+                    log::info!(
+                        "[auto-follow-up] chain limit reached conversation={conversation_id} event={event_id} limit={}",
+                        limit.unwrap_or_default()
+                    );
+                }
                 return Ok(EventAppend::Appended);
             }
         }
@@ -5669,7 +5698,7 @@ mod tests {
 
         assert_eq!(
             store
-                .prune_auto_trigger("conversation-1", "event-1", &now)
+                .prune_auto_trigger("conversation-1", "event-1", &now, None)
                 .await
                 .unwrap(),
             EventAppend::Appended
@@ -5682,6 +5711,118 @@ mod tests {
                 .is_none()
         );
     }
+    #[tokio::test]
+    async fn chain_limit_prune_tells_the_owner_once_unless_a_goal_drives_the_work() {
+        let store = store().await;
+        let mut session = store.claim_turn(claim("turn-1")).await.unwrap();
+        let chain = session.chain_id.clone();
+        let pending = |event: &str, chain: &str| PendingAutoTrigger {
+            work_id: 7,
+            kind: WorkKind::AgentExec,
+            execution_id: format!("execution-{event}"),
+            tool_call_id: format!("call-{event}"),
+            event_id: event.into(),
+            chain_id: chain.into(),
+            resolution_org_id: None,
+            since: "2026-09-03T00:00:01Z".into(),
+        };
+        session.pending_auto_triggers = vec![
+            pending("event-1", &chain),
+            pending("event-2", &chain),
+            pending("event-old", "old-chain"),
+            pending("event-3", &chain),
+        ];
+        session.automation_turns_used = 3;
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        store.save(&mut session).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        let notices = |store: &SignalAgentSessionStore| {
+            let db = store.db.clone();
+            async move {
+                let row = find(&db, "conversation-1").await.unwrap().unwrap();
+                PersistedAgentSession::decode_json(&row.state_json)
+                    .unwrap()
+                    .context_notices
+            }
+        };
+        // Other prune reasons and a superseded chain do not tell the owner.
+        for (event, limit) in [("event-old", Some(3)), ("event-1", None)] {
+            store
+                .prune_auto_trigger("conversation-1", event, &now, limit)
+                .await
+                .unwrap();
+        }
+        assert!(notices(&store).await.is_empty());
+        // Below the limit the chain may still continue.
+        store
+            .prune_auto_trigger("conversation-1", "event-2", &now, Some(4))
+            .await
+            .unwrap();
+        assert!(notices(&store).await.is_empty());
+        store
+            .prune_auto_trigger("conversation-1", "event-3", &now, Some(3))
+            .await
+            .unwrap();
+        let saved = notices(&store).await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].id, format!("automation-limit:{chain}"));
+        assert_eq!(
+            saved[0].kind,
+            desk_diagnose_core::model_context::ContextNoticeKind::AutomationLimit
+        );
+        assert_eq!(saved[0].after_message_id.as_deref(), Some("event-3"));
+        assert_eq!(saved[0].created_at.as_deref(), Some(now.as_str()));
+
+        // A running goal keeps driving the work, so the owner is not asked.
+        let store = super::tests::store().await;
+        let mut session = store.claim_turn(claim("turn-2")).await.unwrap();
+        let chain = session.chain_id.clone();
+        session.pending_auto_triggers = vec![pending("event-goal", &chain)];
+        session.automation_turns_used = 3;
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        store.save(&mut session).await.unwrap();
+        let goal = desk_diagnose_core::goal::GoalRun::new(
+            "goal".into(),
+            session.conversation_id.clone(),
+            session.actor_id.clone(),
+            desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed(session.device_id.clone()),
+            session.device_id.clone(),
+            "Find the report".into(),
+            "owner-message".into(),
+            desk_diagnose_core::goal::GoalOpening::OwnerRequest,
+            desk_diagnose_core::goal::GoalModelBinding::from_destination(
+                &desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                    connection_id: "gateway".into(),
+                    connection_revision: 1,
+                    model_id: "model".into(),
+                    profile_revision: 1,
+                },
+            )
+            .unwrap(),
+            1,
+            Utc::now().timestamp_millis() as u64,
+            desk_diagnose_core::goal::GoalLimits::default(),
+        )
+        .unwrap();
+        let txn = store.db.begin().await.unwrap();
+        crate::agent_goal_store::insert_on(&txn, &goal)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        store
+            .prune_auto_trigger("conversation-1", "event-goal", &now, Some(3))
+            .await
+            .unwrap();
+        assert!(notices(&store).await.is_empty());
+        assert!(
+            store
+                .pending_auto_trigger("conversation-1", "event-goal")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_tasks_survive_persistence_and_next_user_turn() {
         let store = store().await;

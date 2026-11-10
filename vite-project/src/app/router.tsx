@@ -217,6 +217,10 @@ export const router = createBrowserRouter([
                         lazy: async () => ({ Component: (await import('@/features/settings/subagent-policy-settings')).default }),
                     },
                     {
+                        path: 'automation-policy',
+                        lazy: async () => ({ Component: (await import('@/features/settings/automation-policy-settings')).default }),
+                    },
+                    {
                         path: 'goal-budget',
                         lazy: async () => ({ Component: (await import('@/features/settings/goal-budget-policy-settings')).default }),
                     },

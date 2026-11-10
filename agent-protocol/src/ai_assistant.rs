@@ -13,6 +13,7 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::computer_use::{ObjectKind, ObjectRef};
 
 pub mod approval_mode;
+pub mod automation_policy;
 pub mod goal_budget;
 pub mod history;
 pub mod history_window;

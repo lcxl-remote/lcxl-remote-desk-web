@@ -738,6 +738,7 @@ pub enum ContextNoticeKindDto {
     Restricted,
     Trimmed,
     Compacted,
+    AutomationLimit,
 }
 
 impl From<desk_diagnose_core::model_context::ContextNoticeKind> for ContextNoticeKindDto {
@@ -747,6 +748,9 @@ impl From<desk_diagnose_core::model_context::ContextNoticeKind> for ContextNotic
             desk_diagnose_core::model_context::ContextNoticeKind::Restricted => Self::Restricted,
             desk_diagnose_core::model_context::ContextNoticeKind::Trimmed => Self::Trimmed,
             desk_diagnose_core::model_context::ContextNoticeKind::Compacted => Self::Compacted,
+            desk_diagnose_core::model_context::ContextNoticeKind::AutomationLimit => {
+                Self::AutomationLimit
+            }
         }
     }
 }

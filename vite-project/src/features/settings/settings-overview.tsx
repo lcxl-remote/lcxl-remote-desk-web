@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
 import { startupModeEnum } from "@/services/types";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, FileText, Server, Key, Shield, ShieldCheck, Network, Monitor, KeyRound, Link2, Search, CalendarClock, Target, Layers3, BarChart3 } from "lucide-react";
+import { Settings, FileText, Server, Key, Shield, ShieldCheck, Network, Monitor, KeyRound, Link2, Search, CalendarClock, Target, Layers3, Repeat, BarChart3 } from "lucide-react";
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 export function SettingsOverview() {
@@ -179,6 +179,17 @@ export function SettingsOverview() {
                                         <CardTitle className="text-lg">{t('pages.aiAssistant.subagentPolicyTitle')}</CardTitle>
                                     </div>
                                     <CardDescription className="mt-2 line-clamp-2">{t('pages.aiAssistant.subagentPolicyDescription')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
+                        <Link to="/system/automation-policy" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Repeat className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.aiAssistant.automationPolicyTitle')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.aiAssistant.automationPolicyDescription')}</CardDescription>
                                 </CardHeader>
                             </Card>
                         </Link>

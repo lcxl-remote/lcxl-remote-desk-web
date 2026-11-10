@@ -164,6 +164,24 @@ async fn original_receipt_backfills_paused_child_and_claim_waits_for_goal_resume
             .unwrap()
             .is_none()
     );
+    // A chain past three automatic turns still resumes under the default limit.
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&child.conversation_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut spent = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    spent.automation_turns_used = 5;
+    session_row::Entity::update_many()
+        .col_expr(
+            session_row::Column::StateJson,
+            sea_orm::sea_query::Expr::value(spent.encode_json_for_storage().unwrap()),
+        )
+        .filter(session_row::Column::Id.eq(row.id))
+        .exec(&db)
+        .await
+        .unwrap();
     let restored = super::paused_permission::session(&db, &child.conversation_id).await;
     let claimed = store
         .claim_child_completion(&params, &super::creation::destination(), &event)

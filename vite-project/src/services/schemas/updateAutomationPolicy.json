@@ -1,0 +1,1 @@
+{"type":"object","required":["expectedRevision","maxAutoTurnsPerChain"],"properties":{"expectedRevision":{"type":"integer","format":"int64","minimum":0},"maxAutoTurnsPerChain":{"type":"integer","format":"int32","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"UpdateAutomationPolicy"}
