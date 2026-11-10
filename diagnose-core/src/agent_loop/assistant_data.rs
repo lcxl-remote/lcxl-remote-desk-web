@@ -7,7 +7,9 @@ use crate::ai_assistant::{
     seam::{AssistantDataCall, AssistantDataRead},
 };
 use crate::chat::ToolCall;
-use desk_agent_protocol::ai_assistant::memory::MemoryWriteRequest;
+use desk_agent_protocol::ai_assistant::{
+    history::AssistantDeviceScope, memory::MemoryWriteRequest,
+};
 
 pub(super) struct DataToolResult {
     pub message: Box<ChatMessage>,
@@ -472,13 +474,24 @@ async fn invoke(
         now_unix_ms: now,
     };
     match &arguments {
-        ParsedDataCall::SearchMemories(request) => project(
-            deps.session_seam
-                .memory()
-                .ok_or_else(|| invalid("memory storage is unavailable"))?
-                .search_memories(context, request)
-                .await?,
-        ),
+        ParsedDataCall::SearchMemories(request) => {
+            // A frozen narrower scope is an answerable limit, not a turn failure.
+            if request.scope == AssistantDeviceScope::AllMyDevices
+                && crate::ai_assistant::memory_access::usable_memory_scope(session, now)
+                    .is_some_and(|scope| scope.device_rule != AssistantDeviceScope::AllMyDevices)
+            {
+                return Err(invalid(
+                    "memory device scope exceeds original authorization; search current_device",
+                ));
+            }
+            project(
+                deps.session_seam
+                    .memory()
+                    .ok_or_else(|| invalid("memory storage is unavailable"))?
+                    .search_memories(context, request)
+                    .await?,
+            )
+        }
         ParsedDataCall::ReadMemoryHistory(request) => project(
             deps.session_seam
                 .memory()

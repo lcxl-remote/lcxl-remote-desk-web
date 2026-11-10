@@ -115,7 +115,12 @@ async fn search_on(
             "original delivered retrieval response is unavailable",
         ));
     }
-    let devices = owner_devices_on(db, &fence).await?;
+    let mut devices = owner_devices_on(db, &fence).await?;
+    // Account-level conversations belong to no device and share the device limit.
+    devices.insert(String::new());
+    if devices.len() > fence.policy.limits.retrieval.episode.query_devices as usize {
+        return Err(AssistantStoreError::Capacity);
+    }
     let mut query = desk_diagnose_core::future::boxed(|| {
         prepare_query_on(
             db,
@@ -154,7 +159,7 @@ async fn search_on(
                     db,
                     &authority,
                     &view.source.row.root_conversation_id,
-                    &view.device,
+                    view.device.as_ref(),
                 )
             })
             .await?;
@@ -366,9 +371,6 @@ pub(super) async fn owner_devices_on(
         != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
     {
         return Err(AssistantStoreError::Inaccessible);
-    }
-    if fence.context.session.has_admitted_personal_input() {
-        return Ok(BTreeSet::new());
     }
     let maximum = fence
         .context

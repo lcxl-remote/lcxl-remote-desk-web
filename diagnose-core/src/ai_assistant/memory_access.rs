@@ -40,11 +40,6 @@ impl MemoryAccessScope {
         desk_agent_protocol::ai_assistant::validate_target_refs(
             self.request_device_refs.iter().map(String::as_str),
         )?;
-        if self.current_device_ref.is_empty()
-            && self.device_rule != AssistantDeviceScope::CurrentDevice
-        {
-            return Err("account-only memory access cannot include devices");
-        }
         if !self.current_device_ref.is_empty() && !self.request_device_refs.is_empty() {
             return Err("fixed-device memory access cannot carry request targets");
         }
@@ -97,11 +92,9 @@ pub fn owner_memory_scope(
         task_id: None,
         authorized_input_seq: input_seq,
         accepted_at_unix_ms: accepted_at,
-        device_rule: if device.is_empty() {
-            AssistantDeviceScope::CurrentDevice
-        } else {
-            AssistantDeviceScope::AllMyDevices
-        },
+        // An owner input covers the owner's own data on every device; the
+        // default query still selects the current device or request targets.
+        device_rule: AssistantDeviceScope::AllMyDevices,
         current_device_ref: device.into(),
         request_device_refs: Vec::new(),
         policy_revision,

@@ -19,7 +19,8 @@ use sea_orm::ConnectionTrait;
 pub(crate) struct AuthorizedHistoryView {
     pub source: Box<ReadableHistorySource>,
     pub locator: AssistantSourceLocator,
-    pub device: AssistantSourceDevice,
+    /// Absent for account-level conversations that belong to no device.
+    pub device: Option<AssistantSourceDevice>,
     pub kind: AssistantSourceKind,
     pub availability: SourceAvailability,
     pub native_summary: Option<Box<super::native_summary::AuthorizedNativeSummary>>,
@@ -54,12 +55,13 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         return Err(AssistantStoreError::Inaccessible);
     }
     let locator = view.locator.ok_or(AssistantStoreError::Inaccessible)?;
-    let device = view
-        .source_device
-        .ok_or(AssistantStoreError::Inaccessible)?;
+    let device = view.source_device;
     if locator.conversation_id != source.row.conversation_id
         || locator.root_conversation_id != source.row.root_conversation_id
-        || device.device_ref != source.row.device_ref
+        || device
+            .as_ref()
+            .map_or("", |device| device.device_ref.as_str())
+            != source.row.device_ref
     {
         return Err(AssistantStoreError::Inaccessible);
     }

@@ -6,25 +6,41 @@ use crate::ai_assistant::{
 };
 
 #[test]
-fn account_memory_scope_cannot_be_extended_to_devices() {
-    let mut scope = owner_memory_scope(
-        "actor",
-        "root",
-        "",
-        1,
-        100,
-        "episode",
-        1,
-        &AssistantDataSettings::default(),
-        false,
+fn an_account_conversation_may_read_the_owner_data_on_every_device() {
+    let settings = AssistantDataSettings::default();
+    let memory = owner_memory_scope("actor", "root", "", 1, 100, "episode", 1, &settings, false)
+        .unwrap()
+        .unwrap();
+    assert!(memory.current_device_ref.is_empty());
+    assert_eq!(memory.device_rule, AssistantDeviceScope::AllMyDevices);
+    // A frozen narrower scope from an earlier version still decodes.
+    let mut frozen = (*memory).clone();
+    frozen.device_rule = AssistantDeviceScope::CurrentDevice;
+    assert!(frozen.validate().is_ok());
+    // A fixed device still cannot also carry request targets.
+    let mut fixed = owner_memory_scope(
+        "actor", "root", "device", 1, 100, "episode", 1, &settings, false,
     )
     .unwrap()
     .unwrap();
-    assert!(scope.current_device_ref.is_empty());
-    assert_eq!(scope.device_rule, AssistantDeviceScope::CurrentDevice);
-    assert!(scope.validate().is_ok());
-    scope.device_rule = AssistantDeviceScope::AllMyDevices;
-    assert!(scope.validate().is_err());
+    assert_eq!(fixed.device_rule, AssistantDeviceScope::AllMyDevices);
+    fixed.request_device_refs = vec!["other".into()];
+    assert!(fixed.validate().is_err());
+
+    let history = crate::ai_assistant::data_access::owner_history_scope(
+        "actor", "root", "", 1, 100, "episode", 1, &settings, "UTC", false,
+    )
+    .unwrap()
+    .expect("an account conversation may search its owner's conversations");
+    assert!(history.current_device_ref.is_empty());
+    assert_eq!(history.device_rule, AssistantDeviceScope::AllMyDevices);
+    assert!(
+        crate::ai_assistant::data_access::owner_history_scope(
+            "actor", "root", "", 1, 100, "episode", 1, &settings, "UTC", true,
+        )
+        .unwrap()
+        .is_none()
+    );
 }
 
 #[test]

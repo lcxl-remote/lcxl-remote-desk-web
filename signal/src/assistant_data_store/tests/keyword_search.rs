@@ -163,8 +163,9 @@ pub(super) async fn capture_many_native_at(
         .filter(crate::entity::agent_assistant_device_binding::Column::BindingId.eq(device))
         .one(&store.db)
         .await
-        .unwrap()
         .unwrap();
+    // An account-level conversation has no device binding.
+    assert_eq!(binding.is_none(), device.is_empty());
     let txn = store.db.begin().await.unwrap();
     ensure_runtime_on(&txn, "1").await.unwrap();
     let outcome = super::super::history::capture_on(
@@ -173,13 +174,13 @@ pub(super) async fn capture_many_native_at(
             native,
             actor_id: "1",
             device_ref: device,
-            directory: Some(
+            directory: binding.as_ref().map(|binding| {
                 desk_diagnose_core::ai_assistant::source::HistorySourceDirectory {
                     instance_id: &config.metadata.instance,
                     audience: &binding.audience,
                     device_name: binding.device_name.as_deref(),
-                },
-            ),
+                }
+            }),
             conversation_id: root,
             root_conversation_id: root,
             native_id: &message.message_id,

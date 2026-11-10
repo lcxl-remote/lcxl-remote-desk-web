@@ -103,7 +103,8 @@ impl RetrievalQuerySnapshot {
         }
         let mut devices = BTreeSet::new();
         for id in &self.device_refs {
-            desk_agent_protocol::ai_assistant::source::validate_source_id(id)?;
+            // The empty device names account-level conversations.
+            desk_agent_protocol::ai_assistant::source::validate_optional_device_ref(id)?;
             if !devices.insert(id) {
                 return Err("duplicate retrieval device binding");
             }

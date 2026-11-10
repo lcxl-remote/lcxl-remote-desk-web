@@ -64,7 +64,7 @@ The mode is fixed when the first input is accepted and survives refreshes, recon
 
 ## Searching other conversations
 
-Enable **Cross-conversation search**, then ask, for example, “Find my earlier research on this topic” or “Who did I send files to last week?” The assistant searches your account's accessible retained records in the current deployment, including conversations on other devices, and reads nearby source text when needed. Each search still follows its authorized device, time and content scope.
+Enable **Cross-conversation search**, then ask, for example, “Find my earlier research on this topic” or “Who did I send files to last week?” The assistant searches your account's accessible retained records in the current deployment, including conversations on other devices, and reads nearby source text when needed. Each search still follows its authorized device, time and content scope. Both fixed-device and multi-device conversations can search: by default only the scope related to the current conversation (the current device, or in a multi-device conversation, conversations without a device plus the selected devices), and on request every device you own, for both conversations and memories.
 
 Search covers user inputs, assistant replies and tool records permitted for retention. It uses keywords and time ranges and can find matches near the end of long messages. Results show an excerpt before the assistant reads more source text. A miss or incomplete search only describes the evidence currently available; a historical statement alone also does not establish that a task finished.
 

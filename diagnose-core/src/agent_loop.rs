@@ -4522,6 +4522,7 @@ async fn read_conversation_attachment(
             &input,
             &call.id,
             *remaining_budget,
+            maximum_response_bytes,
             observation,
             &mut session.ui_references,
         )?;

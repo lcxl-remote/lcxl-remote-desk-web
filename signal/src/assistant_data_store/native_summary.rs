@@ -32,7 +32,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
     db: &C,
     context: &HistorySearchAuthorization<'_>,
     root: &str,
-    device: &AssistantSourceDevice,
+    device: Option<&AssistantSourceDevice>,
 ) -> Result<Option<Box<AuthorizedNativeSummary>>, AssistantStoreError> {
     if !context
         .scope
@@ -46,7 +46,9 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
         .filter(history::Column::ActorId.eq(context.actor_id))
         .filter(history::Column::RootConversationId.eq(root))
         .filter(history::Column::ConversationId.eq(root))
-        .filter(history::Column::DeviceRef.eq(&device.device_ref))
+        .filter(
+            history::Column::DeviceRef.eq(device.map_or("", |device| device.device_ref.as_str())),
+        )
         .filter(history::Column::Kind.eq("native_status"))
         .filter(history::Column::FragmentIndex.eq(0))
         .filter(history::Column::DeletedAtMs.is_null())
@@ -132,7 +134,7 @@ pub(crate) async fn read_on<C: ConnectionTrait + ConfigConnection>(
             .ok_or(AssistantStoreError::Inaccessible)?
             .1
             .clone();
-        item.source_device = Some(device.clone());
+        item.source_device = device.cloned();
     }
     summary.additional_sources = additional
         .iter()

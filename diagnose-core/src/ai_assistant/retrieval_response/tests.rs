@@ -53,7 +53,7 @@ fn search(count: usize) -> ConversationSearchResult {
                     byte_start: 0,
                     byte_end: 1024,
                 },
-                source_device: device(),
+                source_device: Some(device()),
                 conversation_title: Some("报告调研".into()),
                 snippet: "汉".repeat(300),
                 recorded_at_unix_ms: 1000,
@@ -85,7 +85,7 @@ fn window(count: usize, content: &str) -> ConversationReadResult {
                 content: content.into(),
                 recorded_at_unix_ms: 1000 + index as u64,
                 statement_timezone: "Asia/Shanghai".into(),
-                source_device: device(),
+                source_device: Some(device()),
             })
             .collect(),
         related_results: Vec::new(),

@@ -383,7 +383,8 @@ pub struct ConversationSearchHit {
     pub revision: u64,
     pub kind: AssistantSourceKind,
     pub locator: AssistantSourceLocator,
-    pub source_device: AssistantSourceDevice,
+    /// Absent for account-level conversations that belong to no device.
+    pub source_device: Option<AssistantSourceDevice>,
     pub conversation_title: Option<String>,
     pub snippet: String,
     pub recorded_at_unix_ms: u64,
@@ -421,7 +422,8 @@ pub struct HistoryMessage {
     pub content: String,
     pub recorded_at_unix_ms: u64,
     pub statement_timezone: String,
-    pub source_device: AssistantSourceDevice,
+    /// Absent for account-level conversations that belong to no device.
+    pub source_device: Option<AssistantSourceDevice>,
 }
 
 #[derive(
@@ -467,12 +469,13 @@ impl HistoryAccessScope {
         for id in [
             &self.actor_id,
             &self.root_conversation_id,
-            &self.current_device_ref,
             &self.retrieval_episode_id,
             &self.timezone,
         ] {
             super::source::validate_source_id(id)?;
         }
+        // An empty device names the account-level conversations.
+        super::source::validate_optional_device_ref(&self.current_device_ref)?;
         if let Some(id) = &self.task_id {
             super::source::validate_source_id(id)?;
         }

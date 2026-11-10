@@ -570,7 +570,7 @@ async fn native_inventory_search_corpus_binds_twenty_roots_and_five_statuses_to_
                     assert_eq!(summary.items[0].state, "unknown");
                     assert!(summary.items.iter().all(|item| item.historical
                         && item.revision.is_none()
-                        && item.source_device.as_ref() == Some(&hit.source_device)));
+                        && item.source_device == hit.source_device));
                 }
             }
         }
@@ -711,3 +711,52 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../signal-facade/tests/fixtures/conversation_alias_search.rs"
 ));
+
+#[tokio::test]
+async fn all_my_devices_also_finds_account_level_conversations() {
+    let search_with = |scope: &'static str| {
+        move |_: &PersistedAgentSession| {
+            vec![ToolCall {
+                id: "history-call".into(),
+                name: data_tools::SEARCH_CONVERSATIONS.into(),
+                arguments_json: serde_json::json!({"queries":["report"],"scope":scope}).to_string(),
+            }]
+        }
+    };
+    for (scope, expected) in [("all_my_devices", true), ("current_device", false)] {
+        let frame = Frame::configured(&format!("account-{scope}"), true, search_with(scope)).await;
+        let device = capture(
+            &frame,
+            "past-device",
+            "device-report",
+            "report A",
+            frame.now - 20,
+        )
+        .await;
+        let account = capture_at(
+            &frame.store,
+            "",
+            "past-account",
+            "account-report",
+            "report B",
+            &[],
+            frame.now - 10,
+        )
+        .await;
+        let result = search::search(&frame.store.db, frame.context(), &request(&frame, 0))
+            .await
+            .unwrap()
+            .result;
+        let hits = result
+            .hits
+            .iter()
+            .map(|hit| (hit.source_id.clone(), hit.source_device.is_some()))
+            .collect::<BTreeSet<_>>();
+        let mut wanted = BTreeSet::from([(device, true)]);
+        if expected {
+            // An account-level conversation has no source device.
+            wanted.insert((account, false));
+        }
+        assert_eq!(hits, wanted, "{scope}");
+    }
+}

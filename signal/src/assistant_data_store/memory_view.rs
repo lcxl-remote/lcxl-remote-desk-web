@@ -58,8 +58,8 @@ impl<C: ConnectionTrait + crate::config::ConfigConnection>
     }
 }
 
-/// The personal entry exposes the selected request's devices to memory tools.
-/// A fixed-device entry keeps its existing owner-wide retrieval authority.
+/// Memory tools may read every owner device. A personal entry also exposes its
+/// selected request devices, which may be authorized rather than owned.
 pub(super) async fn retrieval_devices_on(
     db: &DatabaseTransaction,
     fence: &super::retrieval_native::NativeAssistantDataFence<'_>,
@@ -68,15 +68,23 @@ pub(super) async fn retrieval_devices_on(
     let session = fence.context.session;
     let scope = desk_diagnose_core::ai_assistant::memory_access::usable_memory_scope(session, now)
         .ok_or(AssistantStoreError::Inaccessible)?;
+    let maximum = fence.policy.limits.retrieval.episode.query_devices as usize;
     if scope.request_device_refs.is_empty() {
-        super::conversation_search::owner_devices_on(db, fence).await
-    } else {
-        Ok(super::current_memory::fact_devices_on(db, session, scope)
-            .await?
-            .into_iter()
-            .take(fence.policy.limits.retrieval.episode.query_devices as usize)
-            .collect())
+        return super::conversation_search::owner_devices_on(db, fence).await;
     }
+    let mut devices = super::current_memory::fact_devices_on(db, session, scope)
+        .await?
+        .into_iter()
+        .take(maximum)
+        .collect::<std::collections::BTreeSet<_>>();
+    if scope.device_rule == AssistantDeviceScope::AllMyDevices {
+        devices.extend(super::conversation_search::owner_devices_on(db, fence).await?);
+        // Truncating could drop a request target that defines current_device.
+        if devices.len() > maximum {
+            return Err(AssistantStoreError::Capacity);
+        }
+    }
+    Ok(devices)
 }
 
 pub(crate) struct AuthorizedMemoryView {

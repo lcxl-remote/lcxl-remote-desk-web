@@ -766,6 +766,7 @@ pub(crate) mod tests {
             &input,
             "read",
             100000,
+            None,
             &crate::model_observability::tool::ToolObservation::default(),
             &mut session.ui_references,
         )

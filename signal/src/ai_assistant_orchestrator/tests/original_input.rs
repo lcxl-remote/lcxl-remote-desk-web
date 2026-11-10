@@ -4151,6 +4151,8 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
                 | "fetch_public_web_page"
                 | "read_conversation_attachment"
                 | "search_memories"
+                | "search_conversations"
+                | "read_conversation"
                 | "read_memory_history"
                 | "read_memory_source"
                 | "manage_memories"

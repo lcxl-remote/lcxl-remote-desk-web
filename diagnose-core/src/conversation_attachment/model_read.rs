@@ -89,18 +89,29 @@ pub fn text_page(
     budget: usize,
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<(String, ReadReceipt), AgentError> {
-    text_page_impl(part, input, call_id, budget, observation, None)
+    text_page_impl(part, input, call_id, budget, None, observation, None)
 }
 
+/// `framed_limit` bounds the encoded tool response, including JSON escaping
+/// and protocol framing, when the turn shares a response byte budget.
 pub(crate) fn text_page_with_references(
     part: &PreparedAttachment,
     input: &Input,
     call_id: &str,
     budget: usize,
+    framed_limit: Option<u32>,
     observation: &crate::model_observability::tool::ToolObservation,
     references: &mut crate::ui_references::UiReferenceState,
 ) -> Result<(String, ReadReceipt), AgentError> {
-    text_page_impl(part, input, call_id, budget, observation, Some(references))
+    text_page_impl(
+        part,
+        input,
+        call_id,
+        budget,
+        framed_limit,
+        observation,
+        Some(references),
+    )
 }
 
 fn text_page_impl(
@@ -108,6 +119,7 @@ fn text_page_impl(
     input: &Input,
     call_id: &str,
     budget: usize,
+    framed_limit: Option<u32>,
     observation: &crate::model_observability::tool::ToolObservation,
     mut references: Option<&mut crate::ui_references::UiReferenceState>,
 ) -> Result<(String, ReadReceipt), AgentError> {
@@ -139,11 +151,22 @@ fn text_page_impl(
         }
         let content =
             serde_json::to_string(&page).map_err(|_| invalid("Cannot encode attachment page"))?;
-        if crate::trim::model_context_cost(&ChatMessage::tool_result(
-            "attachment-page",
-            call_id,
-            &content,
-        )) <= budget
+        let framed_fits = match framed_limit {
+            Some(maximum) => {
+                crate::ai_assistant::history::serialized_tool_response_bytes(
+                    call_id, &content, None,
+                )
+                .map_err(invalid)?
+                    <= maximum
+            }
+            None => true,
+        };
+        if framed_fits
+            && crate::trim::model_context_cost(&ChatMessage::tool_result(
+                "attachment-page",
+                call_id,
+                &content,
+            )) <= budget
         {
             if let (Some(references), Some(cursor)) =
                 (references.as_deref_mut(), native_cursor.as_deref())
@@ -382,6 +405,7 @@ mod tests {
             &input,
             "first",
             100000,
+            None,
             &crate::model_observability::tool::ToolObservation::default(),
             &mut references,
         )
@@ -408,6 +432,7 @@ mod tests {
             &input,
             "second",
             100000,
+            None,
             &crate::model_observability::tool::ToolObservation::default(),
             &mut references,
         )
@@ -436,6 +461,7 @@ mod tests {
             &input,
             "read",
             100000,
+            None,
             &observation,
             &mut unregistered,
         )
@@ -447,9 +473,16 @@ mod tests {
         references
             .register_attachment(&native, &part.metadata.message_id)
             .unwrap();
-        let (content, mut receipt) =
-            text_page_with_references(&part, &input, "read", 100000, &observation, &mut references)
-                .unwrap();
+        let (content, mut receipt) = text_page_with_references(
+            &part,
+            &input,
+            "read",
+            100000,
+            None,
+            &observation,
+            &mut references,
+        )
+        .unwrap();
         let page: ReadPage = serde_json::from_str(&content).unwrap();
         assert_eq!(page.attachment_id, "att1");
         assert!(!content.contains(&native));
@@ -502,6 +535,63 @@ mod tests {
         };
         (part, input)
     }
+    #[test]
+    fn a_full_escaped_page_shrinks_to_the_shared_response_limit() {
+        let mut delivery = prepare_delivery(
+            &DeliveryIdentity {
+                conversation_id: "run",
+                actor_id: "owner",
+                device_id: "device",
+                message_id: "message",
+                tool_call_id: "call",
+            },
+            vec![OutputPart {
+                name: "result".into(),
+                content: PartContent::Text(format!("{}\n", "\"\\".repeat(400)).repeat(100)),
+                source_truncated: false,
+            }],
+            1,
+        )
+        .unwrap();
+        let part = delivery.attachments.remove(0);
+        let (_, mut input) = fixture();
+        input.attachment_id = part.metadata.attachment_id.clone();
+        input.max_bytes = Some(32768);
+        let observation = crate::model_observability::tool::ToolObservation::default();
+        let framed = |content: &str| {
+            crate::ai_assistant::history::serialized_tool_response_bytes("read", content, None)
+                .unwrap()
+        };
+        let mut unbounded = crate::ui_references::UiReferenceState::default();
+        let (full, _) = text_page_with_references(
+            &part,
+            &input,
+            "read",
+            1_000_000,
+            None,
+            &observation,
+            &mut unbounded,
+        )
+        .unwrap();
+        // The default page alone exceeds the shared limit once escaped.
+        assert!(framed(&full) > 32768);
+        let mut references = crate::ui_references::UiReferenceState::default();
+        let (content, receipt) = text_page_with_references(
+            &part,
+            &input,
+            "read",
+            1_000_000,
+            Some(32768),
+            &observation,
+            &mut references,
+        )
+        .unwrap();
+        assert!(framed(&content) <= 32768);
+        let page: ReadPage = serde_json::from_str(&content).unwrap();
+        assert!(page.cursor.is_some());
+        assert!(receipt.input.max_bytes.unwrap() < 32768);
+    }
+
     #[test]
     fn page_budget_counts_escaped_protocol_text_and_read_receipt_waits_for_consumption() {
         let (part, input) = fixture();

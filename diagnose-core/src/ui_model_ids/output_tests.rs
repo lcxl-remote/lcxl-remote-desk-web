@@ -614,7 +614,7 @@ fn typed_history_inventory_and_memory_search_keep_uncertainty_coverage_and_fact_
                 byte_start: 0,
                 byte_end: 3,
             },
-            source_device: device.clone(),
+            source_device: Some(device.clone()),
             conversation_title: Some("Report".into()),
             snippet: "Recorded outcome is unknown".into(),
             recorded_at_unix_ms: 42,
@@ -706,7 +706,7 @@ fn attachment_pages_share_inline_projection_and_keep_original_proof_on_small_sta
             let mut input=model_read::Input {attachment_id:part.metadata.attachment_id.clone(),cursor:None,queries:None,start_line:None,end_line:None,ignore_case:false,before_context:0,after_context:0,max_bytes:Some(512)};
             let mut body=String::new();let mut pages=0;
             loop {
-                let (wire,proof)=model_read::text_page_with_references(&part,&input,"read",100000,&crate::model_observability::tool::ToolObservation::default(),&mut refs).unwrap();
+                let (wire,proof)=model_read::text_page_with_references(&part,&input,"read",100000,None,&crate::model_observability::tool::ToolObservation::default(),&mut refs).unwrap();
                 assert_eq!(proof.projection_version,2);
                 let page:ReadPage=serde_json::from_str(&wire).unwrap();
                 for line in page.lines { body.push_str(&line.text); }

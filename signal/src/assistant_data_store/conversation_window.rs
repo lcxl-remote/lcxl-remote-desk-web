@@ -150,7 +150,7 @@ async fn read_on(
             db,
             &authority,
             &original_anchor.source.row.root_conversation_id,
-            &original_anchor.device,
+            original_anchor.device.as_ref(),
         )
     })
     .await?;

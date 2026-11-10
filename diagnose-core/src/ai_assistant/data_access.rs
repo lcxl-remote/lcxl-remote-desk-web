@@ -82,7 +82,7 @@ pub fn owner_history_scope(
     client_timezone: &str,
     temporary: bool,
 ) -> Result<Option<Box<HistoryAccessScope>>, &'static str> {
-    if temporary || device.is_empty() || !settings.model_history_search_enabled {
+    if temporary || !settings.model_history_search_enabled {
         return Ok(None);
     }
     let scope = HistoryAccessScope {

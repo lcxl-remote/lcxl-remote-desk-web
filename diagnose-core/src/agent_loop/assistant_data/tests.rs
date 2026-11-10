@@ -458,6 +458,80 @@ async fn a_skipped_write_uses_original_scope_without_rewriting_generations_or_re
     assert_eq!(store.saves.get(), 0);
 }
 
+#[tokio::test]
+async fn a_frozen_narrower_memory_scope_is_reported_to_the_model() {
+    let mut session = personal_session("owner", "root", "device");
+    session.turn_state = crate::session::TurnState::Running;
+    session.current_turn_id = Some("turn".into());
+    session.input_revision = 1;
+    session
+        .assistant_data
+        .as_mut()
+        .unwrap()
+        .memory_access_scope
+        .as_mut()
+        .unwrap()
+        .device_rule =
+        desk_agent_protocol::ai_assistant::history::AssistantDeviceScope::CurrentDevice;
+    let call = ToolCall {
+        id: "search-call".into(),
+        name: data_tools::SEARCH_MEMORIES.into(),
+        arguments_json: serde_json::json!({"queries":["rust"], "scope":"all_my_devices"})
+            .to_string(),
+    };
+    let policy = Model.model_egress_policy().unwrap().unwrap();
+    let input = crate::model_message_labels::model_bound_user_message(
+        "owner-input".into(),
+        "search".into(),
+        policy.destination.clone(),
+    )
+    .unwrap()
+    .data_envelope
+    .unwrap();
+    let parent = policy
+        .derive_model_output_envelope(
+            &crate::chat::ModelTurn {
+                tool_calls: vec![call.clone()],
+                stop_reason: crate::chat::StopReason::ToolUse,
+                ..Default::default()
+            },
+            &[input],
+        )
+        .unwrap();
+    let mut producer =
+        ChatMessage::assistant_tool_calls("producer", "", vec![call.to_ref()]).with_turn_id("turn");
+    producer.data_envelope = Some(parent.clone());
+    session.conversation.push(producer);
+    let store = Store {
+        stale: false,
+        current_access: None,
+        commits: Cell::new(0),
+        saves: Cell::new(0),
+        stored: RefCell::new(session.clone()),
+    };
+    let clock = || "1970-01-01T00:00:01Z".into();
+    let deps = deps(&store, &clock);
+    // The store's search is unreachable: the narrower scope is answered first.
+    let result = crate::future::boxed(|| {
+        dispatch(
+            &deps,
+            &mut session,
+            &call,
+            "producer",
+            "result".into(),
+            Some(&parent),
+        )
+    })
+    .await
+    .unwrap();
+    assert!(!result.ok);
+    assert!(
+        result.message.text.contains("search current_device"),
+        "{}",
+        result.message.text
+    );
+}
+
 struct FollowupModel {
     history: bool,
     calls: Cell<u32>,

@@ -1007,3 +1007,58 @@ fn memory_history_refresh_keeps_its_original_head_bound_and_uses_revision_pages(
     }
     assert!(original.validate_successor(&refreshed).is_err());
 }
+
+#[test]
+fn account_conversations_may_query_every_owner_device() {
+    // A personal memory query with request targets may still widen to all devices.
+    let mut memory = binding();
+    memory.source_device_ref.clear();
+    memory.history_scope = None;
+    memory.request_memory_device_refs = vec!["device-A".into()];
+    let request = FrozenRetrievalRequest::Memories {
+        request: serde_json::from_value(
+            serde_json::json!({"queries": ["settings"], "scope": "all_my_devices"}),
+        )
+        .unwrap(),
+    };
+    let query = FrozenRetrievalQuery::prepare(
+        memory.clone(),
+        &reservation(RetrievalCallKind::Relevance),
+        request,
+        selection(),
+        1100,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(query.snapshot.device_refs, ["device-A", "device-B"]);
+    // History bindings never carry request targets.
+    memory.history_scope = binding().history_scope;
+    assert!(memory.validate().is_err());
+
+    // Account-level conversations appear as the empty device.
+    let mut history = binding();
+    history.source_device_ref.clear();
+    history
+        .history_scope
+        .as_mut()
+        .unwrap()
+        .current_device_ref
+        .clear();
+    let mut devices = selection();
+    devices.devices.push(String::new());
+    let query = FrozenRetrievalQuery::prepare(
+        history,
+        &reservation(RetrievalCallKind::Relevance),
+        FrozenRetrievalRequest::Conversations {
+            request: serde_json::from_value(
+                serde_json::json!({"queries": ["settings"], "scope": "all_my_devices"}),
+            )
+            .unwrap(),
+        },
+        devices,
+        1100,
+        Default::default(),
+    )
+    .unwrap();
+    assert!(query.snapshot.device_refs.contains(&String::new()));
+}

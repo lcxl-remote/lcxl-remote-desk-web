@@ -116,7 +116,7 @@ impl RetrievalQueryBinding {
         )?;
         if !self.request_memory_device_refs.is_empty()
             && (!self.source_device_ref.is_empty()
-                || self.memory_device_rule != Some(AssistantDeviceScope::CurrentDevice)
+                || self.memory_device_rule.is_none()
                 || self.history_scope.is_some())
         {
             return Err("retrieval query request devices do not match its original scope");

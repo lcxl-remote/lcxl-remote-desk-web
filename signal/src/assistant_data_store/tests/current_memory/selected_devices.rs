@@ -257,6 +257,54 @@ async fn assert_explicit_read_scope(
             .collect::<BTreeSet<_>>(),
         [personal, first, second].into(),
     );
+    // The owner's other devices are reachable on request, without changing
+    // the default selection above.
+    assert_eq!(scope.device_rule, AssistantDeviceScope::AllMyDevices);
+    let outside_device = fact::Entity::find()
+        .filter(fact::Column::MemoryId.eq(outside))
+        .one(&txn)
+        .await
+        .unwrap()
+        .unwrap()
+        .device_ref;
+    let mut every = devices.clone();
+    every.insert(outside_device);
+    let wide = MemoryReadAuthorization {
+        actor_id: authority.actor_id,
+        current_device_ref: authority.current_device_ref,
+        assistant_scope: authority.assistant_scope,
+        scope,
+        access: authority.access,
+        platform: authority.platform,
+        destination: authority.destination,
+        requested_devices: &every,
+        observation_generation: authority.observation_generation,
+        now_unix_ms: now,
+    };
+    let all = memory_keyword::relevance_on(
+        &txn,
+        &wide,
+        &MemorySearchRequest {
+            scope: AssistantDeviceScope::AllMyDevices,
+            ..search.clone()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        all.versions
+            .iter()
+            .any(|version| version.source_id == outside)
+    );
+    let current = memory_keyword::relevance_on(&txn, &wide, &search)
+        .await
+        .unwrap();
+    assert!(
+        !current
+            .versions
+            .iter()
+            .any(|version| version.source_id == outside)
+    );
     let result = desk_assistant_data_store::memory_history::head_on(&txn, &authority, second)
         .await
         .unwrap();
