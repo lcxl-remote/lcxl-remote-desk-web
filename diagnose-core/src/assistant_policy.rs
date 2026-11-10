@@ -303,18 +303,22 @@ pub fn validate_permission_resume_claim(
     require_current_policy(params.policy_revision)?;
     require_current_policy(session.policy_revision)?;
     use crate::dynamic_run::PermissionDecisionSource;
-    let selected_request = session.permission_requests.iter().find(|request| {
+    let decided_request = session.permission_requests.iter().find(|request| {
         request.request_id == decision.request_id
             && request.input_revision == decision.request_input_revision
             && request.state == decision.resulting_state
-            && request.selected_device_id().is_some()
-            && permits_permission_request(session, request)
     });
+    let selected_request = decided_request.filter(|request| {
+        request.selected_device_id().is_some() && permits_permission_request(session, request)
+    });
+    // AI review decides a central web request exactly as the owner may.
+    let reviewed_request = selected_request
+        .or_else(|| decided_request.filter(|request| is_targetless_permission(session, request)));
     let authorized_decision = match &decision.decision_source {
         PermissionDecisionSource::UserDecision => true,
         PermissionDecisionSource::AutomaticReview { .. }
         | PermissionDecisionSource::SystemDecision { .. } => {
-            selected_request.is_some() && session.allows_delegated_review()
+            reviewed_request.is_some() && session.allows_delegated_review()
         }
         PermissionDecisionSource::OwnerNoReview { authorization } => {
             selected_request.is_some_and(|request| request.exact_command().is_some())
@@ -400,6 +404,124 @@ mod tests {
         ask.selected_capability_ids
             .push("device-system-info".into());
         assert!(validate_assistant_ask_scope(&ask, false).is_err());
+    }
+
+    #[test]
+    fn ai_reviewed_central_web_request_resumes_the_personal_conversation() {
+        use crate::dynamic_run::{
+            AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind,
+            AiPermissionDecisionEvidence, PermissionDecidedEvent, PermissionDecisionSource,
+            PermissionRequestState,
+        };
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let mut request = crate::permission_tools::build_permission_request(
+            &crate::chat::ToolCall {
+                id: "web-plan".into(),
+                name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+                arguments_json: serde_json::json!({"items":[{
+                    "item_id": "web", "tool_name": "fetch_public_web_page",
+                    "exact_input": {"url": "https://example.com/releases"},
+                    "suggested_ttl_seconds": 300, "suggested_max_uses": 1,
+                    "reason": "Read the release notes",
+                }]})
+                .to_string(),
+            },
+            &registry,
+            "web-permission".into(),
+            1,
+            "2026-10-09T00:00:00Z".into(),
+        )
+        .unwrap();
+        request.state = PermissionRequestState::Approved;
+        let scope = AgentScope {
+            granted: vec![desk_agent_protocol::Capability::WebResearchFetch],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        };
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "",
+            PERSONAL_ASSISTANT_POLICY_REVISION,
+            scope.clone(),
+            "2026-10-09T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.input_revision = 1;
+        session.trigger_origin = TriggerOrigin::PermissionDecision;
+        session.bind_assistant_input_targets(&[]).unwrap();
+        session.permission_requests.push(request.clone());
+        assert!(is_targetless_permission(&session, &request));
+        let decision = |source| PermissionDecidedEvent {
+            event: AgentRunEvent {
+                schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "decision".into(),
+                run_id: "conversation".into(),
+                event_seq: 2,
+                input_revision: 1,
+                kind: AgentRunEventKind::PermissionDecided,
+                correlation_id: Some(request.request_id.clone()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: "2026-10-09T00:00:01Z".into(),
+            },
+            request_id: request.request_id.clone(),
+            request_input_revision: 1,
+            resulting_state: PermissionRequestState::Approved,
+            items: vec![],
+            decision_source: source,
+        };
+        let params = ClaimTurnParams {
+            conversation_id: "conversation".into(),
+            actor_id: "owner".into(),
+            device_id: String::new(),
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+            current_pdp_scope: scope,
+            turn_id: "resume".into(),
+            request_id: None,
+            connection_id: None,
+            now: "2026-10-09T00:00:02Z".into(),
+            trigger_origin: TriggerOrigin::PermissionDecision,
+        };
+        let reviewed = decision(PermissionDecisionSource::AutomaticReview {
+            failures: vec![],
+            delegation_id: "delegation".into(),
+            delegation_revision: 1,
+            reviews: vec![AiPermissionDecisionEvidence {
+                item_id: "web".into(),
+                candidate_id: "candidate".into(),
+                candidate_expires_at_unix_ms: 1,
+                model_config_revision: 1,
+                reason_code: "within_scope".into(),
+                reason: "The owner asked for this page".into(),
+            }],
+        });
+        validate_permission_resume_claim(&session, &params, &reviewed).unwrap();
+        validate_permission_resume_claim(
+            &session,
+            &params,
+            &decision(PermissionDecisionSource::UserDecision),
+        )
+        .unwrap();
+        // A child conversation is not the owner's central web request.
+        let mut child = session.clone();
+        child.agent_role = crate::subagent::AgentRole::SubAgent {
+            binding: Box::new(crate::subagent::DelegatedTaskBinding {
+                targets: vec![],
+                root_conversation_id: "root".into(),
+                group_id: "group".into(),
+                task_id: "task".into(),
+                source: crate::subagent::DelegationSource::UserInput { input_revision: 1 },
+                objective: "Read".into(),
+                acceptance_criteria: vec!["Report".into()],
+                input_revision: 1,
+                control_revision: 1,
+                source_epoch: 1,
+                deadline_ms: 1,
+            }),
+        };
+        assert!(validate_permission_resume_claim(&child, &params, &reviewed).is_err());
     }
 
     #[test]
