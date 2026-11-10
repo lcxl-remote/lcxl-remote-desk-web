@@ -633,6 +633,70 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn delivered_attachments_reach_the_model_and_read_by_alias() {
+        let store = Store::default();
+        let mut session = session();
+        let original = json!({"body": "data".repeat(2000)}).to_string();
+        let message = externalize(
+            &store,
+            &session,
+            ChatMessage::tool_result("message", "call", &original),
+            ToolOutputFormat::Json,
+            None,
+            Ok(1),
+        )
+        .await
+        .unwrap();
+        let native = message.raw_result.as_ref().unwrap().slots[0]
+            .attachment_id
+            .clone();
+        assert!(message.text.contains(&native));
+        session.conversation.push(message);
+        assert!(
+            session
+                .ui_references
+                .observe(&session.conversation)
+                .unwrap()
+        );
+        let mut projected = session.conversation[0].clone();
+        crate::ui_model_ids::project_model_message(
+            &mut projected,
+            Some(&session.ui_references),
+            &[],
+            crate::model_profile::ModelUseCase::Agent,
+        );
+        assert!(projected.text.contains(r#""attachment_id":"att1""#));
+        assert!(!projected.text.contains(&native));
+
+        let call = crate::chat::ToolCall {
+            id: "read".into(),
+            name: READ_ATTACHMENT_TOOL.into(),
+            arguments_json: json!({"attachment_id": "att1"}).to_string(),
+        };
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
+        let input: super::super::model_read::Input =
+            serde_json::from_str(&resolved.arguments_json).unwrap();
+        assert_eq!(input.attachment_id, native);
+        let part = store
+            .read_attachment(&session, &input.attachment_id, false)
+            .await
+            .unwrap();
+        let (page, _) = super::super::model_read::text_page_with_references(
+            &part,
+            &input,
+            "read",
+            100000,
+            &crate::model_observability::tool::ToolObservation::default(),
+            &mut session.ui_references,
+        )
+        .unwrap();
+        assert!(page.contains(r#""attachment_id":"att1""#));
+        assert!(!page.contains(&native));
+    }
+
+    #[tokio::test]
     async fn json_is_externalized_without_preview_and_restored_only_for_internal_checks() {
         let store = Store::default();
         let mut session = session();

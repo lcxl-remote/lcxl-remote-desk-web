@@ -3778,6 +3778,18 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     .unwrap();
             assert_eq!(image.frame.device_id, target);
             assert!(image.restore(&pixels).unwrap().image_data_url.is_some());
+            // The stored screenshot is registered under a session alias.
+            assert_eq!(frame.evidence_id.len(), 26, "{}", frame.evidence_id);
+            let references = serde_json::to_value(&saved.ui_references).unwrap();
+            assert!(
+                references["entries"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .any(|(alias, entry)| alias.starts_with("att")
+                        && entry["native_id"] == frame.evidence_id.as_str()),
+                "{references}"
+            );
         }
     }
     gateway.await.unwrap();

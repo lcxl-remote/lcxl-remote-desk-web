@@ -64,7 +64,7 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
             name: crate::conversation_attachment::READ_ATTACHMENT_TOOL.into(),
             description: "Read an immutable attachment from this conversation by attachment_id. When a tool result is externalized, read it before interpreting its content or taking dependent actions. JSON supports original ordered pages, never search; narrow the source tool's parameters for filtered JSON. Text supports literal OR queries and grep-like context lines. Images return historical pixels, never fresh desktop observations. Deleted or automatically evicted contents cannot be recovered; never repeat a side effect to recreate them. Bodies stay for the current turn and become concise read receipts only after successful consumption and completion.".into(),
             parameters_schema: json!({"type":"object", "required":["attachment_id"], "properties":{
-                "attachment_id":{"type":"string","minLength":1,"maxLength":256},
+                "attachment_id":{"description":"Copy the attachment_id shown in the result, such as att3.","type":"string","minLength":1,"maxLength":256},
                 "cursor":{"type":"string"},
                 "queries":{"description":"Text attachments only. Omit for JSON and images. JSON must be read with attachment_id and optional cursor/max_bytes, never queries.","type":"array","items":{"type":"string"},"minItems":1,"maxItems":8},
                 "start_line":{"type":"integer","minimum":1},

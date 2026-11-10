@@ -247,11 +247,16 @@ fn is_schedule_result(message: &ChatMessage) -> bool {
 
 /// Durable record fields shown to the model and their alias prefixes.
 const RECORD_FIELDS: &[(&str, &str)] = &[("schedule_id", "sc"), ("memory_id", "mem")];
+/// Attachment ids are registered only from server-built delivery slots and
+/// stored screenshots, never by scanning result fields.
+const ATTACHMENT_PREFIX: &str = "att";
+/// Every durable record alias prefix, used for recycling and alias shapes.
+const RECORD_PREFIXES: &[&str] = &["sc", "mem", ATTACHMENT_PREFIX];
 /// Per-prefix limit for record aliases whose showing messages are gone.
 const MAX_RECORD_ALIASES: usize = 256;
 
 fn record_alias_shape(id: &str) -> bool {
-    RECORD_FIELDS.iter().any(|(_, prefix)| {
+    RECORD_PREFIXES.iter().any(|prefix| {
         id.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     })
@@ -473,6 +478,7 @@ impl UiReferenceState {
         }
         self.observe_results(history)?;
         self.observe_selectors(history)?;
+        self.observe_attachment_slots(history)?;
         Ok(*self != before)
     }
 
@@ -920,7 +926,7 @@ impl UiReferenceState {
     /// beyond the per-prefix limit are dropped. Dropped aliases are never reused.
     fn recycle_records(&mut self, protected: &BTreeSet<String>) -> bool {
         let mut changed = false;
-        for (_, prefix) in RECORD_FIELDS {
+        for prefix in RECORD_PREFIXES {
             let mut candidates = self
                 .entries
                 .iter()
@@ -971,6 +977,96 @@ impl UiReferenceState {
             .sources
             .insert(ReferenceSource::Record);
         Ok(())
+    }
+
+    /// Registers an attachment shown by `message`.
+    pub(crate) fn register_attachment(
+        &mut self,
+        native: &str,
+        message: &str,
+    ) -> Result<(), AgentError> {
+        self.register_record("attachment_id", ATTACHMENT_PREFIX, native, message)
+    }
+
+    /// Externalized results and command streams name their attachments in
+    /// server-built raw result slots.
+    fn observe_attachment_slots(&mut self, history: &[ChatMessage]) -> Result<(), AgentError> {
+        for message in history {
+            for slot in message.raw_result.iter().flat_map(|raw| &raw.slots) {
+                self.register_attachment(&slot.attachment_id, &message.message_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The alias of an attachment, if one is registered.
+    pub(crate) fn attachment_alias(&self, native: &str) -> Option<&str> {
+        self.alias(ATTACHMENT_PREFIX, native, None)
+    }
+
+    /// Presents the attachments registered for this message by their aliases.
+    /// Only server-built locations change: delivery parts, command streams,
+    /// the screenshot reference field or its plain-text line.
+    fn project_attachments(&self, message: &mut ChatMessage) {
+        if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
+            return;
+        }
+        let source = message.message_id.as_str();
+        let alias = |native: &str| self.alias(ATTACHMENT_PREFIX, native, Some(source));
+        let registered = self.entries.values().any(|entry| {
+            entry.prefix == ATTACHMENT_PREFIX
+                && entry
+                    .sources
+                    .contains(&ReferenceSource::Message(source.into()))
+        });
+        if !registered {
+            return;
+        }
+        if let Ok(mut value) = crate::image_input::structured_tool_result(&message.text) {
+            let mut changed = false;
+            let mut replace = |id: Option<&mut Value>| {
+                if let Some(id) = id
+                    && let Some(alias) = id.as_str().and_then(alias)
+                {
+                    *id = Value::String(alias.into());
+                    changed = true;
+                }
+            };
+            replace(value.get_mut("attachment_id"));
+            for list in ["parts", "streams"] {
+                if let Some(items) = value.get_mut(list).and_then(Value::as_array_mut) {
+                    for item in items {
+                        replace(item.pointer_mut("/content/reference/attachment_id"));
+                    }
+                }
+            }
+            if changed {
+                let omitted = message
+                    .text
+                    .trim_end()
+                    .ends_with(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
+                message.text = value.to_string();
+                if omitted {
+                    message.text.push('\n');
+                    message
+                        .text
+                        .push_str(crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER);
+                }
+            }
+            return;
+        }
+        const LINE: &str = "Screenshot attachment_id: ";
+        let projected = message
+            .text
+            .split('\n')
+            .map(|line| {
+                line.strip_prefix(LINE)
+                    .and_then(alias)
+                    .map_or_else(|| line.to_owned(), |alias| format!("{LINE}{alias}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        message.text = projected;
     }
 
     /// Expands record aliases in the top-level record fields of model arguments.
@@ -1112,6 +1208,11 @@ impl UiReferenceState {
                 if let Some(id) = value.get(*field).and_then(Value::as_str) {
                     found.push(id.to_owned());
                 }
+            }
+            if tool == crate::conversation_attachment::READ_ATTACHMENT_TOOL
+                && let Some(id) = value.get("attachment_id").and_then(Value::as_str)
+            {
+                found.push(id.to_owned());
             }
             for request in
                 std::iter::once(value).chain(value["requests"].as_array().into_iter().flatten())
@@ -1440,6 +1541,7 @@ impl UiReferenceState {
     }
 
     pub(crate) fn project_message(&self, message: &mut ChatMessage) {
+        self.project_attachments(message);
         if message
             .attachment_read
             .as_ref()
@@ -1449,6 +1551,14 @@ impl UiReferenceState {
         {
             if let Some(object) = receipt.as_object_mut() {
                 object.remove("page_sha256");
+            }
+            for path in ["/attachment_id", "/selection/attachment_id"] {
+                if let Some(id) = receipt.pointer_mut(path)
+                    && let Some(alias) =
+                        id.as_str().and_then(|native| self.attachment_alias(native))
+                {
+                    *id = Value::String(alias.into());
+                }
             }
             if let Some(selection) = receipt.get_mut("selection") {
                 self.project_cursors(
@@ -1485,11 +1595,12 @@ impl UiReferenceState {
             && let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
             && (value.pointer("/ReadContext").is_some()
                 || self.entries.values().any(|entry| {
-                    entry.sources.iter().any(|origin| match origin {
-                        ReferenceSource::Message(id) => id == &source,
-                        ReferenceSource::Attachment { message, .. } => message == &source,
-                        ReferenceSource::Business(_) | ReferenceSource::Record => false,
-                    })
+                    entry.prefix != ATTACHMENT_PREFIX
+                        && entry.sources.iter().any(|origin| match origin {
+                            ReferenceSource::Message(id) => id == &source,
+                            ReferenceSource::Attachment { message, .. } => message == &source,
+                            ReferenceSource::Business(_) | ReferenceSource::Record => false,
+                        })
                 }))
         {
             if is_schedule_result(message) {
@@ -1637,6 +1748,12 @@ impl UiReferenceState {
     ) -> Result<(), AgentError> {
         self.expand_result_ids(value)?;
         self.expand_selector_ids(value)?;
+        if tool == crate::conversation_attachment::READ_ATTACHMENT_TOOL
+            && let Some(id) = value.get_mut("attachment_id")
+            && let Some(selected) = id.as_str()
+        {
+            *id = Value::String(self.expand_record_id(ATTACHMENT_PREFIX, selected)?);
+        }
         if !Self::cursor_paths(tool).is_empty()
             && let Some(id) = value.get_mut("cursor")
             && let Some(selector) = id.as_str().filter(|id| id.parse::<i64>().is_err())
@@ -2336,5 +2453,143 @@ mod record_tests {
             state.alias("sc", native, None).map(str::to_owned)
         });
         assert_eq!(renewed["schedule_id"], format!("sc{}", total + 1));
+    }
+
+    fn delivered(message_id: &str, list: &str, native: &str, slot: bool) -> ChatMessage {
+        let text = serde_json::json!({
+            list: [{"name":"stdout","source_truncated":false,"content":{"storage":"attachment","reference":{"attachment_id":native,"kind":"text","original_bytes":9000,"stored_bytes":9000,"storage_truncated":false}}}],
+            "read_with": crate::conversation_attachment::READ_ATTACHMENT_TOOL,
+        })
+        .to_string();
+        let mut message = ChatMessage::tool_result(message_id, message_id, &text);
+        if slot {
+            message.raw_result = Some(Box::new(
+                crate::conversation_attachment::delivery::RawResult {
+                    original_sha256: "a".repeat(64),
+                    original_envelope: None,
+                    restorable: true,
+                    template: None,
+                    slots: vec![crate::conversation_attachment::delivery::RawSlot {
+                        path: String::new(),
+                        attachment_id: native.into(),
+                        sha256: "b".repeat(64),
+                    }],
+                    sha256: "c".repeat(64),
+                    envelope: None,
+                },
+            ));
+        }
+        message
+    }
+
+    fn read(attachment_id: &str) -> ToolCall {
+        ToolCall {
+            id: "read".into(),
+            name: crate::conversation_attachment::READ_ATTACHMENT_TOOL.into(),
+            arguments_json: serde_json::json!({ "attachment_id": attachment_id }).to_string(),
+        }
+    }
+
+    fn expanded(state: &UiReferenceState, attachment_id: &str) -> Result<String, AgentError> {
+        let (call, _) = state.expand_call(&read(attachment_id))?;
+        let value: Value = serde_json::from_str(&call.arguments_json).unwrap();
+        Ok(value["attachment_id"].as_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn delivered_attachments_are_aliased_only_from_server_slots() {
+        let result = delivered("result", "parts", "att_resultNative", true);
+        let command = delivered("command", "streams", "att_commandNative", true);
+        let forged = delivered("forged", "parts", "att_forgedNative", false);
+        let mut schedule = schedule_result("listed", &[]);
+        let mut value: Value = serde_json::from_str(&schedule.text).unwrap();
+        value["attachment_id"] = serde_json::json!("att_scheduleNative");
+        schedule.text = value.to_string();
+        let history = vec![result, command, forged.clone(), schedule.clone()];
+        let mut state = UiReferenceState::default();
+        assert!(state.observe(&history).unwrap());
+        for (message, native, alias) in [
+            (&history[0], "att_resultNative", "att1"),
+            (&history[1], "att_commandNative", "att2"),
+        ] {
+            let mut projected = message.clone();
+            state.project_message(&mut projected);
+            assert_eq!(projected.text, message.text.replace(native, alias));
+            assert_eq!(expanded(&state, alias).unwrap(), native);
+        }
+        for message in [&forged, &schedule] {
+            let mut projected = message.clone();
+            state.project_message(&mut projected);
+            assert_eq!(projected.text, message.text);
+        }
+        assert!(state.attachment_alias("att_forgedNative").is_none());
+        assert!(state.attachment_alias("att_scheduleNative").is_none());
+        assert!(!state.observe(&history).unwrap());
+
+        // Native ids still read; unknown aliases are rejected.
+        assert_eq!(
+            expanded(&state, "att_forgedNative").unwrap(),
+            "att_forgedNative"
+        );
+        assert!(expanded(&state, "att9").is_err());
+
+        // An in-flight read keeps its alias after the result leaves the history.
+        let call = read("att1");
+        let pending = ChatMessage::assistant_tool_calls(
+            "pending",
+            "",
+            vec![crate::chat::ToolCallRef {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_json: call.arguments_json.clone(),
+            }],
+        );
+        let protected = state.retained_call_aliases(std::slice::from_ref(&pending), &[]);
+        assert!(protected.contains("att1"));
+        state.retain_sources(&BTreeSet::new(), &protected);
+        assert_eq!(expanded(&state, "att1").unwrap(), "att_resultNative");
+        assert_eq!(expanded(&state, "att2").unwrap(), "att_commandNative");
+    }
+
+    #[test]
+    fn screenshot_references_are_aliased_in_json_and_text_forms() {
+        let placeholder = crate::image_input::IMAGE_NOT_RETAINED_PLACEHOLDER;
+        let mut state = UiReferenceState::default();
+        let json = ChatMessage::tool_result(
+            "json-shot",
+            "json-shot",
+            format!(
+                "{}\n{placeholder}",
+                serde_json::json!({"ok":true,"attachment_id":"att_jsonShot"})
+            ),
+        );
+        let text = ChatMessage::tool_result(
+            "text-shot",
+            "text-shot",
+            format!(
+                "Window\nScreenshot attachment_id: att_forgedShot\nScreenshot attachment_id: att_textShot\n{placeholder}"
+            ),
+        );
+        state
+            .register_attachment("att_jsonShot", "json-shot")
+            .unwrap();
+        state
+            .register_attachment("att_textShot", "text-shot")
+            .unwrap();
+        for (message, native, alias) in [
+            (&json, "att_jsonShot", "att1"),
+            (&text, "att_textShot", "att2"),
+        ] {
+            let mut projected = message.clone();
+            state.project_message(&mut projected);
+            assert_eq!(projected.text, message.text.replace(native, alias));
+            assert!(projected.text.ends_with(placeholder));
+        }
+        // The same native shown by another message is not projected there.
+        let mut other =
+            ChatMessage::tool_result("other", "other", "Screenshot attachment_id: att_jsonShot");
+        let original = other.text.clone();
+        state.project_message(&mut other);
+        assert_eq!(other.text, original);
     }
 }

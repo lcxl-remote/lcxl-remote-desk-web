@@ -1573,6 +1573,10 @@ async fn append_reviewed_tool_result_inner(
                             &bytes,
                             "image-reference",
                         )?;
+                    let message_id = message.message_id.clone();
+                    session
+                        .ui_references
+                        .register_attachment(&frame.evidence_id, &message_id)?;
                 }
             }
             Ok(None)

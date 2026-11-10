@@ -10,7 +10,6 @@ use desk_agent_protocol::{
     },
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{chat::ChatRole, image_input::ImageDataUrlInfo, session::PersistedAgentSession};
 
@@ -142,15 +141,17 @@ pub fn record_live_observation(
         .current_turn_id
         .clone()
         .ok_or("visual evidence has no current turn")?;
-    let evidence_id = format!(
-        "visual-{:x}",
-        Sha256::digest(
-            format!(
-                "{}:{}:{turn_id}:{call_id}:{frame_id}",
-                session.conversation_id, session.input_revision
-            )
-            .as_bytes()
-        )
+    // The id is also the global attachment key, and replaying the same call
+    // must yield the same id, so it is derived from the variable-length identity.
+    let evidence_id = crate::native_ids::stable(
+        crate::native_ids::Kind::Attachment,
+        &(
+            &session.conversation_id,
+            session.input_revision,
+            &turn_id,
+            call_id,
+            &frame_id,
+        ),
     );
     let window_summary = session
         .context_attachments
@@ -435,6 +436,12 @@ mod tests {
         let second =
             record_live_observation(&mut session, "call-1", data_url, &info, 300_000).unwrap();
         assert_eq!(first.evidence_id, second.evidence_id);
+        // The evidence id is a short attachment id, not a full digest.
+        assert!(crate::native_ids::is(
+            crate::native_ids::Kind::Attachment,
+            &first.evidence_id
+        ));
+        assert_eq!(first.evidence_id.len(), 26);
         assert_eq!(session.visual_evidence.len(), 1);
         assert_eq!(
             session.visual_evidence[0].preview_data_url.as_deref(),

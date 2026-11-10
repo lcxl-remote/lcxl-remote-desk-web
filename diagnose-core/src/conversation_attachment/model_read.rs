@@ -131,9 +131,13 @@ fn text_page_impl(
             observation,
         )?;
         let native_cursor = page.cursor.clone();
-        if let (Some(references), Some(cursor)) = (references.as_deref(), native_cursor.as_deref())
-        {
-            page.cursor = Some(references.attachment_cursor_alias(cursor)?);
+        if let Some(references) = references.as_deref() {
+            if let Some(cursor) = native_cursor.as_deref() {
+                page.cursor = Some(references.attachment_cursor_alias(cursor)?);
+            }
+            if let Some(alias) = references.attachment_alias(&page.attachment_id) {
+                page.attachment_id = alias.into();
+            }
         }
         let content =
             serde_json::to_string(&page).map_err(|_| invalid("Cannot encode attachment page"))?;
@@ -440,6 +444,53 @@ mod tests {
         assert_eq!(projected.messages[0].text, second);
         message.text.push(' ');
         assert!(canonical_source(&message).is_err());
+    }
+
+    #[test]
+    fn pages_and_receipts_name_registered_attachments_by_alias() {
+        let (part, input) = fixture();
+        let native = part.metadata.attachment_id.clone();
+        let observation = crate::model_observability::tool::ToolObservation::default();
+        let mut unregistered = crate::ui_references::UiReferenceState::default();
+        let (content, _) = text_page_with_references(
+            &part,
+            &input,
+            "read",
+            100000,
+            &observation,
+            &mut unregistered,
+        )
+        .unwrap();
+        let page: ReadPage = serde_json::from_str(&content).unwrap();
+        assert_eq!(page.attachment_id, native);
+
+        let mut references = crate::ui_references::UiReferenceState::default();
+        references
+            .register_attachment(&native, &part.metadata.message_id)
+            .unwrap();
+        let (content, mut receipt) =
+            text_page_with_references(&part, &input, "read", 100000, &observation, &mut references)
+                .unwrap();
+        let page: ReadPage = serde_json::from_str(&content).unwrap();
+        assert_eq!(page.attachment_id, "att1");
+        assert!(!content.contains(&native));
+        assert_eq!(receipt.page_sha256, digest(content.as_bytes()));
+        assert_eq!(receipt.input.attachment_id, native);
+
+        receipt.consumed = true;
+        let mut message = ChatMessage::tool_result("page", "read", &content);
+        message.attachment_read = Some(Box::new(receipt));
+        release_consumed(std::slice::from_mut(&mut message)).unwrap();
+        assert!(message.text.contains(&native));
+        let mut projected = message.clone();
+        references.project_message(&mut projected);
+        let value: serde_json::Value = serde_json::from_str(&projected.text).unwrap();
+        assert_eq!(value["attachment_read"]["attachment_id"], "att1");
+        assert_eq!(
+            value["attachment_read"]["selection"]["attachment_id"],
+            "att1"
+        );
+        assert!(!projected.text.contains(&native));
     }
 
     fn fixture() -> (PreparedAttachment, Input) {
