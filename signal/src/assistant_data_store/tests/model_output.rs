@@ -49,9 +49,7 @@ pub(super) fn output_text(
     .unwrap()
 }
 
-pub(super) async fn admitted(
-    label: &str,
-) -> (TestStore, ModelRequest, ReadProjectionProof, String) {
+pub(super) async fn admitted(label: &str) -> (TestStore, ModelRequest, ReadProjectionProof, i64) {
     admitted_with_owner_input(label, false, true, None, None).await
 }
 
@@ -61,7 +59,7 @@ pub(super) async fn admitted_with_owner_input(
     include_memory: bool,
     model_base_url: Option<&str>,
     owner_inputs: Option<&[(&str, &str)]>,
-) -> (TestStore, ModelRequest, ReadProjectionProof, String) {
+) -> (TestStore, ModelRequest, ReadProjectionProof, i64) {
     let (store, mut request, proof, original) =
         super::model_gate::fixture_with_model(label, model_base_url).await;
     if capture_owner_input {
@@ -429,7 +427,7 @@ async fn completion_keeps_read_snapshots_but_rejects_changed_current_session_jso
                     origin::Column::DeletedAtMs,
                     Expr::value(Some(chrono::Utc::now().timestamp_millis())),
                 )
-                .filter(origin::Column::OriginId.eq(original))
+                .filter(origin::Column::Id.eq(original))
                 .exec(&txn)
                 .await
                 .unwrap();

@@ -215,7 +215,7 @@ async fn time_scans_exclude_owner_viewable_no_export_text_and_derived_sources_wi
     .await;
     origin::Entity::update_many()
         .col_expr(origin::Column::DeletedAtMs, Expr::value(Some(2000_i64)))
-        .filter(origin::Column::OriginId.eq(row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .exec(&store.db)
         .await
         .unwrap();

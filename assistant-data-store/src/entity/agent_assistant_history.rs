@@ -10,7 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
     #[sea_orm(indexed)]
-    pub origin_id: String,
+    pub origin_id: i64,
     #[sea_orm(indexed)]
     pub actor_id: String,
     #[sea_orm(indexed)]

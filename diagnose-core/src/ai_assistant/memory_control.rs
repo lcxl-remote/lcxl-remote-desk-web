@@ -10,14 +10,14 @@ use std::collections::BTreeSet;
 pub struct KnownMemorySource {
     pub source_id: String,
     pub revision: u64,
-    pub origin_id: String,
+    pub origin_id: i64,
 }
 
 impl KnownMemorySource {
     pub fn validate(&self) -> Result<(), &'static str> {
         if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&self.source_id)
             .is_none()
-            || !native_ids::is(Kind::AssistantOrigin, &self.origin_id)
+            || self.origin_id <= 0
             || self.revision == 0
         {
             return Err("invalid known memory source");
@@ -39,7 +39,7 @@ pub fn canonical_sources(
         source.validate()?;
     }
     sources.sort_by(|a, b| {
-        (&a.source_id, a.revision, &a.origin_id).cmp(&(&b.source_id, b.revision, &b.origin_id))
+        (&a.source_id, a.revision, a.origin_id).cmp(&(&b.source_id, b.revision, b.origin_id))
     });
     sources.dedup();
     Ok(sources)
@@ -98,7 +98,7 @@ mod tests {
         KnownMemorySource {
             source_id: native_ids::fixture_source_id(&seed),
             revision: 1,
-            origin_id: native_ids::stable(Kind::AssistantOrigin, &"same-message"),
+            origin_id: native_ids::fixture_origin_id(&"same-message"),
         }
     }
 
@@ -114,13 +114,31 @@ mod tests {
     }
 
     #[test]
+    fn origin_ids_are_positive_row_keys_ordered_as_integers() {
+        let mut invalid = source("invalid");
+        for origin_id in [0, -1] {
+            invalid.origin_id = origin_id;
+            assert!(invalid.validate().is_err());
+        }
+        let mut nine = source("same");
+        nine.origin_id = 9;
+        let mut ten = source("same");
+        ten.origin_id = 10;
+        // Integer order, not text order ("10" < "9").
+        assert_eq!(
+            canonical_sources(vec![ten.clone(), nine.clone()]).unwrap(),
+            vec![nine, ten]
+        );
+    }
+
+    #[test]
     fn a_shared_origin_does_not_suppress_an_unrelated_fragment() {
         let known = source("preference");
         let unrelated = source("unrelated-background");
         let mut dependency = HistoryDependency {
             source_id: known.source_id.clone(),
             source_revision: 1,
-            origin_id: known.origin_id.clone(),
+            origin_id: known.origin_id,
             origin_deletion_generation: 1,
             policy_revision: 1,
             expires_at_unix_ms: None,

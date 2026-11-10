@@ -147,7 +147,12 @@ pub(crate) async fn prepare_requests_on<'db, 'source>(
                 continue;
             }
         };
-        if !identities.insert(prepared.origin_id.clone()) {
+        // The actor is shared by the batch; this is the origin's unique key.
+        if !identities.insert((
+            capture.conversation_id.to_owned(),
+            capture.native_id.to_owned(),
+            capture.kind,
+        )) {
             return Err(AssistantStoreError::Invalid(
                 "duplicate native history unit in one capture batch",
             ));

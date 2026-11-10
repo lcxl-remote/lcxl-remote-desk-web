@@ -27,7 +27,7 @@ async fn evidence_dependency(store: &TestStore, source: &str) -> HistoryDependen
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -53,7 +53,7 @@ async fn archive_copy(store: &TestStore, source: &str, dependency: &HistoryDepen
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&retained.origin_id))
+        .filter(origin::Column::Id.eq(retained.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -421,7 +421,7 @@ async fn identity_cleanup_is_valid_only_after_the_original_body_retention_bounda
             origin::Column::DeletedAtMs,
             sea_orm::sea_query::Expr::value(Some((40 * DAY) as i64)),
         )
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -463,7 +463,7 @@ async fn retained_evidence_policy_has_its_own_revision_and_real_hard_deadline() 
     let dependency = evidence_dependency(&store, &source).await;
     assert_eq!(dependency.policy_revision, 2);
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .one(&store.db)
         .await
         .unwrap()

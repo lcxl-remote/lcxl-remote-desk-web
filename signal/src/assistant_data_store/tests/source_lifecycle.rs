@@ -52,7 +52,7 @@ async fn natural_execution_reclamation_and_file_cleanup_do_not_expire_independen
     let store = setup().await;
     let (memory, evidence_id, original_id) = super::owner_memory::seed(&store, 1, "natural").await;
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(original_id))
+        .filter(origin::Column::Id.eq(original_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -129,19 +129,19 @@ async fn manual_root_deletion_denies_completed_child_evidence_and_derived_text_w
             origin::Column::RootConversationId,
             Expr::value("removed-root"),
         )
-        .filter(origin::Column::OriginId.eq(&origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .exec(&store.db)
         .await
         .unwrap();
     super::owner_memory::rebuild_evidence_proof(&store, &evidence_id).await;
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     let sibling = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(sibling_origin))
+        .filter(origin::Column::Id.eq(sibling_origin))
         .one(&store.db)
         .await
         .unwrap()
@@ -149,7 +149,7 @@ async fn manual_root_deletion_denies_completed_child_evidence_and_derived_text_w
     let dependency = HistoryDependency {
         source_id: evidence_id.clone(),
         source_revision: 1,
-        origin_id: origin_id.clone(),
+        origin_id,
         origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
         policy_revision: 1,
         expires_at_unix_ms: None,
@@ -244,7 +244,7 @@ async fn manual_root_deletion_denies_completed_child_evidence_and_derived_text_w
     // Logical revocation does not wait for physical cleanup or rewrite evidence.
     assert!(
         origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(origin_id))
+            .filter(origin::Column::Id.eq(origin_id))
             .one(&store.db)
             .await
             .unwrap()
@@ -462,7 +462,7 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
         serde_json::from_str(&current.known_sources_json).unwrap();
     let old_known: Vec<KnownMemorySource> = serde_json::from_str(&old.known_sources_json).unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&old_origin))
+        .filter(origin::Column::Id.eq(old_origin))
         .one(&store.db)
         .await
         .unwrap()
@@ -475,7 +475,7 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
         dependencies.push(HistoryDependency {
             source_id: source.source_id.clone(),
             source_revision: source.revision,
-            origin_id: source.origin_id.clone(),
+            origin_id: source.origin_id,
             origin_deletion_generation: original.deletion_generation as u64,
             policy_revision: original_policy.policy_revision,
             expires_at_unix_ms: original_policy.content_hard_expires_at_unix_ms,
@@ -517,7 +517,7 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
             .unwrap()
     );
     let old_origin = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(old_origin))
+        .filter(origin::Column::Id.eq(old_origin))
         .one(&store.db)
         .await
         .unwrap()
@@ -525,7 +525,7 @@ async fn a_known_original_origin_cannot_be_hidden_behind_a_new_primary_evidence_
     native_removal_on(&store.db, &old_origin.root_conversation_id, "1").await;
     remove(&store, &old_origin.root_conversation_id, 1200).await;
     let newer_origin = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(newer_origin))
+        .filter(origin::Column::Id.eq(newer_origin))
         .one(&store.db)
         .await
         .unwrap()

@@ -2,9 +2,7 @@
 //! It carries no execution handles, model-send grant, result body or task text.
 use super::*;
 use crate::{
-    ai_assistant::source::{
-        HistoryCapture, HistorySourceDirectory, history_origin_id, owner_text_policy,
-    },
+    ai_assistant::source::{HistoryCapture, HistorySourceDirectory, owner_text_policy},
     native_ids::{self, Kind},
 };
 use desk_agent_protocol::{
@@ -111,15 +109,6 @@ impl NativeStatusHistoryProjection {
             policy,
             envelope,
         })
-    }
-    pub fn origin_id(&self) -> String {
-        history_origin_id(
-            &self.actor,
-            &self.device,
-            &self.conversation,
-            &self.native_id,
-            AssistantSourceKind::NativeStatus,
-        )
     }
     pub fn capture<'a>(
         &'a self,

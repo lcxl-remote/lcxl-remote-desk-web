@@ -365,3 +365,55 @@ async fn owner_evidence_is_saved_when_other_context_cannot_be_retained() {
     );
     assert_eq!(result.result.reason.as_deref(), Some("committed"));
 }
+
+#[tokio::test]
+async fn owner_input_references_resolve_to_the_captured_history_row() {
+    let frame = Frame::with_call_scope(
+        "input-reference",
+        true,
+        None,
+        true,
+        false,
+        None,
+        async |_store, _session| {
+            let arguments = serde_json::json!({"operation":"remember",
+                "content":"用户偏好中文且简明的回复", "context":"用于日常回答的风格偏好",
+                "source_refs":[{"kind":"input","id":"input:0","role":"evidence"}]});
+            vec![ToolCall {
+                id: "interactive-write-call".into(),
+                name: data_tools::MANAGE_MEMORIES.into(),
+                arguments_json: arguments.to_string(),
+            }]
+        },
+    )
+    .await;
+    let source = history::Entity::find()
+        .filter(history::Column::NativeId.eq("interactive-owner-input"))
+        .one(&frame.store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = crate::assistant_data_store::memory_write::write(
+        &frame.store.db,
+        frame.context(),
+        &request(&frame),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.result.outcome,
+        MemoryWriteOutcome::Applied,
+        "{:?}",
+        result.result
+    );
+    let memory_id = &result.result.memory.as_ref().unwrap().memory_id;
+    let evidence = crate::entity::agent_memory_source::Entity::find()
+        .filter(crate::entity::agent_memory_source::Column::MemoryId.eq(memory_id))
+        .one(&frame.store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    // `input:0` names the newest owner input before the producing call.
+    assert_eq!(evidence.origin_id, source.origin_id);
+    assert!(evidence.known_sources_json.contains(&source.source_id()));
+}

@@ -25,7 +25,7 @@ async fn personal_input_selects_current_facts_by_device_and_rechecks_before_mode
     for label in ["selected-mac", "selected-linux", "unselected-device"] {
         let (memory, _, origin_id) = super::super::owner_memory::seed(&store, 1, label).await;
         let original = origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(origin_id))
+            .filter(origin::Column::Id.eq(origin_id))
             .one(&store.db)
             .await
             .unwrap()

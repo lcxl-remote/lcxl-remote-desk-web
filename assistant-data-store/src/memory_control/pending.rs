@@ -195,7 +195,7 @@ impl PendingControl {
             self.owns_suppression(&KnownMemorySource {
                 source_id: source.source_id.clone(),
                 revision: source.source_revision,
-                origin_id: source.origin_id.clone(),
+                origin_id: source.origin_id,
             })
         })
     }
@@ -345,15 +345,11 @@ pub(super) async fn revisions_on<C: ConnectionTrait>(
 }
 
 use crate::entity::agent_assistant_source_suppression as source_suppression;
-type SuppressionKey = (String, i64, String);
+type SuppressionKey = (String, i64, i64);
 pub(super) type SuppressionImages =
     std::collections::BTreeMap<SuppressionKey, source_suppression::Model>;
 fn image_key(row: &source_suppression::Model) -> SuppressionKey {
-    (
-        row.source_id.clone(),
-        row.source_revision,
-        row.origin_id.clone(),
-    )
+    (row.source_id.clone(), row.source_revision, row.origin_id)
 }
 fn image_map(
     rows: Vec<source_suppression::Model>,
@@ -370,7 +366,7 @@ fn known_source(row: &source_suppression::Model) -> Result<KnownMemorySource, As
     Ok(KnownMemorySource {
         source_id: row.source_id.clone(),
         revision: unsigned(row.source_revision)?,
-        origin_id: row.origin_id.clone(),
+        origin_id: row.origin_id,
     })
 }
 
@@ -390,7 +386,7 @@ pub(super) async fn suppress_sources_on<C: ConnectionTrait>(
         let key = (
             source.source_id.clone(),
             signed(source.revision)?,
-            source.origin_id.clone(),
+            source.origin_id,
         );
         let current = original.remove(&key);
         if owned
@@ -404,7 +400,7 @@ pub(super) async fn suppress_sources_on<C: ConnectionTrait>(
             actor_id: actor.into(),
             source_id: source.source_id.clone(),
             source_revision: signed(source.revision)?,
-            origin_id: source.origin_id.clone(),
+            origin_id: source.origin_id,
             cutoff_input_seq: cutoff,
             control_generation: generation,
             created_at_ms: now,

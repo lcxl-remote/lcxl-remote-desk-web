@@ -13,7 +13,7 @@ pub struct Model {
     pub actor_id: String,
     pub source_id: String,
     pub source_revision: i64,
-    pub origin_id: String,
+    pub origin_id: i64,
     pub cutoff_input_seq: i64,
     pub control_generation: i64,
     pub created_at_ms: i64,

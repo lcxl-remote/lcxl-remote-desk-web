@@ -84,7 +84,7 @@ fn request() -> ConversationSearchRequest {
 pub(super) async fn device(store: &TestStore, label: &str) -> String {
     let (_, _, original) = super::owner_memory::seed(store, 1, label).await;
     origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(original))
+        .filter(origin::Column::Id.eq(original))
         .one(&store.db)
         .await
         .unwrap()
@@ -213,7 +213,7 @@ pub(super) async fn private_source(store: &TestStore, source: &str) {
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -227,7 +227,7 @@ pub(super) async fn private_source(store: &TestStore, source: &str) {
             origin::Column::PolicyJson,
             Expr::value(serde_json::to_string(&policy).unwrap()),
         )
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -393,7 +393,7 @@ async fn original_dependency_deletion_blocks_a_matching_derived_source() {
     .await;
     origin::Entity::update_many()
         .col_expr(origin::Column::DeletedAtMs, Expr::value(Some(2000_i64)))
-        .filter(origin::Column::OriginId.eq(row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -742,7 +742,25 @@ async fn history_source_ids_are_row_keys_that_replay_and_are_never_reused() {
     );
     let key = desk_assistant_data_store::source_rows::history(&first);
     assert!(key > 0);
-    for table in ["agent_assistant_history", "agent_memory_source"] {
+    // The replay reuses one origin row, and the history row cites its key.
+    let row = history::Entity::find_by_id(key)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let origins = origin::Entity::find()
+        .filter(origin::Column::ConversationId.eq(&row.conversation_id))
+        .filter(origin::Column::NativeId.eq(&row.native_id))
+        .all(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(origins.len(), 1);
+    assert_eq!(row.origin_id, origins[0].id);
+    for table in [
+        "agent_assistant_history",
+        "agent_memory_source",
+        "agent_assistant_origin",
+    ] {
         let ddl = store
             .db
             .query_one_raw(Statement::from_string(

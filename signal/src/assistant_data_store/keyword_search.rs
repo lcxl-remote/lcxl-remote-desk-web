@@ -81,7 +81,7 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     }
     let original = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(context.actor_id))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -93,7 +93,7 @@ pub(crate) async fn readable_history_on<C: ConnectionTrait + crate::config::Conf
     let own = HistoryDependency {
         source_id: row.source_id().clone(),
         source_revision: revision,
-        origin_id: row.origin_id.clone(),
+        origin_id: row.origin_id,
         origin_deletion_generation: unsigned(original.deletion_generation)?,
         policy_revision: policy.policy_revision,
         expires_at_unix_ms: Some(unsigned(row.expires_at_ms)?),

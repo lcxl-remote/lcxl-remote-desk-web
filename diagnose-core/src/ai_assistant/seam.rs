@@ -105,7 +105,7 @@ impl AssistantDataReadUse {
                 &dependency.source_id,
             )
             .is_none()
-                || !native_ids::is(Kind::AssistantOrigin, &dependency.origin_id)
+                || dependency.origin_id <= 0
                 || dependency.source_revision == 0
                 || dependency.origin_deletion_generation == 0
                 || dependency.policy_revision == 0

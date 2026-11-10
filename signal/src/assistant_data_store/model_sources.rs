@@ -35,12 +35,12 @@ enum SourceContentUse {
     RetainedIdentity,
 }
 
-type SourceKey = (String, u64, String);
+type SourceKey = (String, u64, i64);
 fn key(source: &HistoryDependency) -> SourceKey {
     (
         source.source_id.clone(),
         source.source_revision,
-        source.origin_id.clone(),
+        source.origin_id,
     )
 }
 
@@ -601,7 +601,7 @@ async fn evidence_with_control_on<C: ConnectionTrait + crate::config::ConfigConn
     }
     let original = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -632,7 +632,7 @@ async fn evidence_with_control_on<C: ConnectionTrait + crate::config::ConfigConn
     let own = HistoryDependency {
         source_id: row.source_id().clone(),
         source_revision: unsigned(row.memory_revision)?,
-        origin_id: row.origin_id.clone(),
+        origin_id: row.origin_id,
         origin_deletion_generation: unsigned(original.deletion_generation)?,
         policy_revision: policy.policy_revision,
         expires_at_unix_ms: expiry,
@@ -672,7 +672,7 @@ async fn origin_on<C: ConnectionTrait + crate::config::ConfigConnection>(
 ) -> Result<Option<u64>, AssistantStoreError> {
     let row = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -745,7 +745,7 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
     }
     let original = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -773,7 +773,6 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
                 .is_none())
         || !allows_model_use(&policy, destination, now)
         || proof.actor_id != actor
-        || proof.origin_id != row.origin_id
         || proof.device_ref != row.device_ref
         || (proof.accepted_input_seq == 0 && !native_without_owner_input)
         || proof.accepted_input_seq != unsigned(original.accepted_input_seq)?
@@ -798,8 +797,7 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
     let [doc] = docs.as_slice() else {
         return Err(AssistantStoreError::Inaccessible);
     };
-    if doc.origin_id != row.origin_id
-        || doc.device_ref != row.device_ref
+    if doc.device_ref != row.device_ref
         || doc.conversation_id != row.conversation_id
         || doc.root_conversation_id != row.root_conversation_id
         || doc.fragment_index != row.fragment_index
@@ -888,7 +886,7 @@ fn control_owns(
         control.owns_suppression(&KnownMemorySource {
             source_id: dependency.source_id.clone(),
             revision: dependency.source_revision,
-            origin_id: dependency.origin_id.clone(),
+            origin_id: dependency.origin_id,
         })
     })
 }

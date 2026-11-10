@@ -19,20 +19,6 @@ use crate::{
 
 static HISTORY_REDACTOR: LazyLock<RegexRedactor> = LazyLock::new(RegexRedactor::new);
 
-/// Deterministic locators carry no authority; hosts still validate native rows.
-pub fn history_origin_id(
-    actor: &str,
-    device: &str,
-    conversation: &str,
-    native: &str,
-    kind: AssistantSourceKind,
-) -> String {
-    native_ids::stable(
-        Kind::AssistantOrigin,
-        &(actor, device, conversation, native, kind),
-    )
-}
-
 pub fn valid_statement_timezone(value: &str) -> bool {
     value.len() <= 128 && value.parse::<chrono_tz::Tz>().is_ok()
 }
@@ -191,7 +177,6 @@ pub fn derive_visible_text_policy(
 pub struct HistoryRetentionProof {
     pub actor_id: String,
     pub device_ref: String,
-    pub origin_id: String,
     pub original_envelope_id: String,
     pub accepted_input_seq: u64,
     /// The origin's policy at capture; the origin row's policy never changes
@@ -230,7 +215,6 @@ pub struct HistorySourceDirectory<'a> {
 }
 
 pub struct PreparedHistoryCapture {
-    pub origin_id: String,
     pub retained_content: String,
     pub index: IndexProjection,
     pub proof: HistoryRetentionProof,
@@ -251,7 +235,7 @@ pub fn validate_history_dependencies(
     for dependency in &ordered {
         if desk_agent_protocol::ai_assistant::source_ref::SourceRef::parse(&dependency.source_id)
             .is_none()
-            || !native_ids::is(Kind::AssistantOrigin, &dependency.origin_id)
+            || dependency.origin_id <= 0
             || dependency.source_revision == 0
             || dependency.origin_deletion_generation == 0
             || dependency.policy_revision == 0
@@ -406,18 +390,10 @@ pub fn prepare_capture(
     index.partial |= capture
         .native
         .is_some_and(|native| native.projection_partial);
-    let origin_id = history_origin_id(
-        capture.actor_id,
-        capture.device_ref,
-        capture.conversation_id,
-        capture.native_id,
-        capture.kind,
-    );
     Ok(Some(PreparedHistoryCapture {
         proof: HistoryRetentionProof {
             actor_id: capture.actor_id.into(),
             device_ref: capture.device_ref.into(),
-            origin_id: origin_id.clone(),
             original_envelope_id: capture.envelope.envelope_id.clone(),
             accepted_input_seq: capture.accepted_input_seq,
             source_policy: capture.source_policy.clone(),
@@ -425,7 +401,6 @@ pub fn prepare_capture(
             statement_timezone: capture.statement_timezone.into(),
             expires_at_unix_ms: expires_at,
         },
-        origin_id,
         retained_content,
         index,
         redacted: !redacted.kinds.is_empty(),
@@ -566,7 +541,7 @@ mod tests {
         let source = |name: &str| HistoryDependency {
             source_id: native_ids::fixture_source_id(&name),
             source_revision: 1,
-            origin_id: native_ids::stable(Kind::AssistantOrigin, &name),
+            origin_id: native_ids::fixture_origin_id(&name),
             origin_deletion_generation: 1,
             policy_revision: 1,
             expires_at_unix_ms: None,

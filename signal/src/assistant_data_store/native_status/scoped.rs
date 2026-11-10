@@ -118,7 +118,9 @@ impl NativeStatusScope {
         use crate::entity::agent_assistant_origin as origin;
         if origin::Entity::find()
             .filter(origin::Column::ActorId.eq(&self.actor))
-            .filter(origin::Column::OriginId.eq(status.projection.origin_id()))
+            .filter(origin::Column::ConversationId.eq(capture.conversation_id))
+            .filter(origin::Column::NativeId.eq(capture.native_id))
+            .filter(origin::Column::Kind.eq("native_status"))
             .one(db)
             .await?
             .is_some()

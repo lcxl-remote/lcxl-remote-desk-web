@@ -112,7 +112,6 @@ pub struct MemoryIndexInput<'a> {
     pub next: &'a memory::Model,
     pub removed: BTreeSet<String>,
     pub text: &'a str,
-    pub source_origin_id: &'a String,
     pub origin: &'a origin::Model,
     pub policy: &'a AssistantDataPolicy,
     pub body_expiry: Option<i64>,
@@ -125,7 +124,6 @@ pub async fn prepare_on<C: ConnectionTrait>(
         next,
         removed,
         text,
-        source_origin_id,
         origin,
         policy,
         body_expiry,
@@ -155,7 +153,6 @@ pub async fn prepare_on<C: ConnectionTrait>(
             history_id: None,
             source_revision: next.revision,
             corpus_generation: next.state_generation,
-            origin_id: source_origin_id.clone(),
             root_conversation_id: origin.root_conversation_id.clone(),
             conversation_id: origin.conversation_id.clone(),
             fragment_index: part

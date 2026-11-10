@@ -76,7 +76,7 @@ async fn an_original_owner_export_to_another_model_keeps_the_same_logical_owner_
     host(&store).save(&mut session).await.unwrap();
     let row = answer(&store).await.unwrap();
     let source = origins::Entity::find()
-        .filter(origins::Column::OriginId.eq(&row.origin_id))
+        .filter(origins::Column::Id.eq(row.origin_id))
         .one(&store.db)
         .await
         .unwrap()

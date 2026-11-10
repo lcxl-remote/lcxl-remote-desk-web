@@ -5,17 +5,14 @@ use crate::entity::{
     agent_assistant_source_suppression as suppression, agent_memory as memory,
 };
 use desk_agent_protocol::ai_assistant::{memory::MemoryDeleteRequest, source::HistoryDependency};
-use desk_diagnose_core::{
-    ai_assistant::memory_control::KnownMemorySource,
-    native_ids::{self, Kind},
-};
+use desk_diagnose_core::{ai_assistant::memory_control::KnownMemorySource, native_ids};
 use sea_orm::PaginatorTrait;
 
 fn known(label: &str) -> KnownMemorySource {
     KnownMemorySource {
         source_id: native_ids::fixture_source_id(&label),
         revision: 1,
-        origin_id: native_ids::stable(Kind::AssistantOrigin, &"shared-origin"),
+        origin_id: native_ids::fixture_origin_id(&"shared-origin"),
     }
 }
 
@@ -23,7 +20,7 @@ fn dependency(source: &KnownMemorySource) -> HistoryDependency {
     HistoryDependency {
         source_id: source.source_id.clone(),
         source_revision: source.revision,
-        origin_id: source.origin_id.clone(),
+        origin_id: source.origin_id,
         origin_deletion_generation: 1,
         policy_revision: 1,
         expires_at_unix_ms: None,
@@ -60,7 +57,7 @@ async fn suppression_matches_the_exact_fragment_version_origin_and_hash_for_the_
     changed.source_revision += 1;
     assert!(!suppressed_on(&txn, "1", &changed).await.unwrap());
     let mut changed = dependency(&source);
-    changed.origin_id = native_ids::stable(Kind::AssistantOrigin, &"another-origin");
+    changed.origin_id = native_ids::fixture_origin_id(&"another-origin");
     assert!(!suppressed_on(&txn, "1", &changed).await.unwrap());
     txn.commit().await.unwrap();
 }

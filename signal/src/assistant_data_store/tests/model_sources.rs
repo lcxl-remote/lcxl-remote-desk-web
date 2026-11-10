@@ -55,7 +55,7 @@ pub(super) async fn memory_usage(
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&evidence.origin_id))
+        .filter(origin::Column::Id.eq(evidence.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -103,7 +103,7 @@ pub(super) async fn history_usage(
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -294,7 +294,7 @@ async fn owner_view_and_no_export_retention_never_become_model_read_permission()
     let store = setup().await;
     let (memory, source, origin_id) = super::owner_memory::seed(&store, 1, "no-export").await;
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -307,7 +307,7 @@ async fn owner_view_and_no_export_retention_never_become_model_read_permission()
             origin::Column::PolicyJson,
             sea_orm::sea_query::Expr::value(encoded.clone()),
         )
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -622,7 +622,7 @@ async fn a_window_decision_anchor_is_validated_without_pretending_its_text_is_re
             origin::Column::DeletedAtMs,
             sea_orm::sea_query::Expr::value(Some(1001_i64)),
         )
-        .filter(origin::Column::OriginId.eq(origin))
+        .filter(origin::Column::Id.eq(*origin))
         .exec(&store.db)
         .await
         .unwrap();

@@ -175,15 +175,15 @@ async fn write_on(
             &reference.id,
         )
         .ok_or(AssistantStoreError::SourceUnavailable)?;
-        let origin_id = desk_diagnose_core::ai_assistant::source::history_origin_id(
-            &context.session.actor_id,
-            &data.source_device_ref,
-            &context.session.conversation_id,
-            &message.message_id,
-            AssistantSourceKind::Input,
-        );
-        reference.id = input_source_id_on(db, &context.session.actor_id, &origin_id)
+        reference.id = history::Entity::find()
+            .filter(history::Column::ActorId.eq(&context.session.actor_id))
+            .filter(history::Column::ConversationId.eq(&context.session.conversation_id))
+            .filter(history::Column::NativeId.eq(&message.message_id))
+            .filter(history::Column::Kind.eq("input"))
+            .filter(history::Column::FragmentIndex.eq(0))
+            .one(db)
             .await?
+            .map(|row| row.source_id())
             .ok_or(AssistantStoreError::SourceUnavailable)?;
     }
     if data.current_actor_input_seq > 0 {
@@ -195,9 +195,7 @@ async fn write_on(
             .one(db)
             .await?;
         let id = match input {
-            Some(input) => {
-                input_source_id_on(db, &context.session.actor_id, &input.origin_id).await?
-            }
+            Some(input) => input_source_id_on(db, &context.session.actor_id, input.id).await?,
             None => None,
         };
         if let Some(id) = id
@@ -491,7 +489,7 @@ fn skipped(reason: &str) -> MemoryWriteResult {
 async fn input_source_id_on(
     db: &DatabaseTransaction,
     actor: &str,
-    origin_id: &str,
+    origin_id: i64,
 ) -> Result<Option<String>, AssistantStoreError> {
     Ok(history::Entity::find()
         .filter(history::Column::ActorId.eq(actor))

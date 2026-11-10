@@ -33,7 +33,7 @@ fn source_proof(key: &str) -> ReadProjectionProof {
     proof.usage.history_dependencies.push(HistoryDependency {
         source_id: native_ids::fixture_source_id(&"source"),
         source_revision: 1,
-        origin_id: native_ids::stable(Kind::AssistantOrigin, &"origin"),
+        origin_id: native_ids::fixture_origin_id(&"origin"),
         origin_deletion_generation: 1,
         policy_revision: 1,
         expires_at_unix_ms: None,

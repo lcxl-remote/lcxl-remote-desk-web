@@ -25,14 +25,14 @@ use desk_diagnose_core::{
 use sea_orm::ExprTrait;
 use sea_orm::{PaginatorTrait, sea_query::Expr};
 
-pub(super) async fn fixture(label: &str) -> (TestStore, ModelRequest, ReadProjectionProof, String) {
+pub(super) async fn fixture(label: &str) -> (TestStore, ModelRequest, ReadProjectionProof, i64) {
     fixture_with_model(label, None).await
 }
 
 pub(super) async fn fixture_with_model(
     label: &str,
     model_base_url: Option<&str>,
-) -> (TestStore, ModelRequest, ReadProjectionProof, String) {
+) -> (TestStore, ModelRequest, ReadProjectionProof, i64) {
     let store = setup().await;
     let actual_destination = if let Some(base_url) = model_base_url {
         Some(
@@ -46,7 +46,7 @@ pub(super) async fn fixture_with_model(
     };
     let (memory, source, origin_id) = super::owner_memory::seed(&store, 1, label).await;
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -317,7 +317,7 @@ async fn a_source_revoked_after_preparation_rolls_back_the_native_receipt_and_ev
             origin::Column::DeletedAtMs,
             Expr::value(Some(chrono::Utc::now().timestamp_millis())),
         )
-        .filter(origin::Column::OriginId.eq(original))
+        .filter(origin::Column::Id.eq(original))
         .exec(&txn)
         .await
         .unwrap();

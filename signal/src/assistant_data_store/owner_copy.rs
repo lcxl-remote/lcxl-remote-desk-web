@@ -102,7 +102,7 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
         }
         let Some(original) = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(view.actor_id()))
-            .filter(origin::Column::OriginId.eq(&source.origin_id))
+            .filter(origin::Column::Id.eq(source.origin_id))
             .one(db)
             .await?
         else {

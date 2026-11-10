@@ -67,16 +67,12 @@ pub async fn suppress_on<C: ConnectionTrait>(
                 actor_id: actor.into(),
                 source_id: source.source_id.clone(),
                 source_revision: revision,
-                origin_id: source.origin_id.clone(),
+                origin_id: source.origin_id,
                 cutoff_input_seq: cutoff,
                 control_generation: generation,
                 created_at_ms: now,
             };
-            if !existing.contains(&(
-                row.source_id.clone(),
-                row.source_revision,
-                row.origin_id.clone(),
-            )) {
+            if !existing.contains(&(row.source_id.clone(), row.source_revision, row.origin_id)) {
                 delta = delta.checked_add(metadata_bytes(&row)?).ok_or(
                     AssistantStoreError::Invalid("source suppression metadata overflow"),
                 )?;
@@ -139,7 +135,7 @@ pub async fn suppressed_on<C: ConnectionTrait>(
         &KnownMemorySource {
             source_id: dependency.source_id.clone(),
             revision: dependency.source_revision,
-            origin_id: dependency.origin_id.clone(),
+            origin_id: dependency.origin_id,
         },
     )
     .await
@@ -163,7 +159,7 @@ pub async fn known_row_on<C: ConnectionTrait>(
         .filter(suppression::Column::ActorId.eq(actor))
         .filter(suppression::Column::SourceId.eq(&source.source_id))
         .filter(suppression::Column::SourceRevision.eq(signed(source.revision)?))
-        .filter(suppression::Column::OriginId.eq(&source.origin_id))
+        .filter(suppression::Column::OriginId.eq(source.origin_id))
         .one(db)
         .await?;
     Ok(row)
@@ -198,13 +194,13 @@ fn known_condition(source: &KnownMemorySource) -> Result<Condition, AssistantSto
     Ok(Condition::all()
         .add(suppression::Column::SourceId.eq(&source.source_id))
         .add(suppression::Column::SourceRevision.eq(signed(source.revision)?))
-        .add(suppression::Column::OriginId.eq(&source.origin_id)))
+        .add(suppression::Column::OriginId.eq(source.origin_id)))
 }
 
 pub fn metadata_bytes(row: &suppression::Model) -> Result<i64, AssistantStoreError> {
-    let bytes = [&row.actor_id, &row.source_id, &row.origin_id]
+    let bytes = [&row.actor_id, &row.source_id]
         .iter()
-        .try_fold(5 * 8_usize, |sum, field| sum.checked_add(field.len()))
+        .try_fold(6 * 8_usize, |sum, field| sum.checked_add(field.len()))
         .ok_or(AssistantStoreError::Invalid(
             "source suppression size overflow",
         ))?;

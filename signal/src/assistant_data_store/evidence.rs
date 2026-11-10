@@ -124,7 +124,7 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     };
     let Some(primary) = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
     else {
@@ -215,7 +215,7 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         memory_accepted_input_seq: unsigned(memory_revision.accepted_input_seq)?,
         role,
         body: &row.body,
-        origin_id: &primary.origin_id,
+        origin_id: primary.id,
         origin_kind: kind,
         origin_deletion_generation: unsigned(primary.deletion_generation)?,
         origin_accepted_input_seq: unsigned(primary.accepted_input_seq)?,
@@ -258,12 +258,12 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     }
     let mut checked_origins = std::collections::BTreeSet::new();
     for source in &known {
-        if !checked_origins.insert(source.origin_id.as_str()) {
+        if !checked_origins.insert(source.origin_id) {
             continue;
         }
         let Some(known_origin) = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(actor))
-            .filter(origin::Column::OriginId.eq(&source.origin_id))
+            .filter(origin::Column::Id.eq(source.origin_id))
             .one(db)
             .await?
         else {
@@ -282,7 +282,7 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         }
         let Some(original) = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(actor))
-            .filter(origin::Column::OriginId.eq(&dependency.origin_id))
+            .filter(origin::Column::Id.eq(dependency.origin_id))
             .one(db)
             .await?
         else {
@@ -390,7 +390,7 @@ pub(crate) fn retained_origins_allowed_on<
         for saved in retained {
             let Some(original) = origin::Entity::find()
                 .filter(origin::Column::ActorId.eq(actor))
-                .filter(origin::Column::OriginId.eq(&saved.origin_id))
+                .filter(origin::Column::Id.eq(saved.origin_id))
                 .one(db)
                 .await?
             else {

@@ -287,7 +287,7 @@ async fn source_deletion_in_the_same_transaction_is_reselected_before_any_result
             origin::Column::DeletedAtMs,
             Expr::value(Some(frame.now as i64)),
         )
-        .filter(origin::Column::OriginId.eq(&frame.usage.history_dependencies[0].origin_id))
+        .filter(origin::Column::Id.eq(frame.usage.history_dependencies[0].origin_id))
         .exec(&txn)
         .await
         .unwrap();

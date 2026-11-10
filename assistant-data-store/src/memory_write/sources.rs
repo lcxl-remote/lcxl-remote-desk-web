@@ -89,7 +89,7 @@ pub async fn load_on<C: ConnectionTrait>(
     };
     let Some(input) = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
     else {
@@ -132,7 +132,6 @@ pub async fn load_on<C: ConnectionTrait>(
         || row.recorded_at_ms <= 0
         || row.recorded_at_ms > signed(context.now_unix_ms)?
         || proof.actor_id != *actor
-        || proof.origin_id != row.origin_id
         || proof.device_ref != row.device_ref
         || proof.accepted_input_seq != input.accepted_input_seq as u64
         || proof.source_policy != policy
@@ -160,7 +159,7 @@ pub async fn load_on<C: ConnectionTrait>(
     let dependency = HistoryDependency {
         source_id: row.source_id(),
         source_revision: row.revision as u64,
-        origin_id: row.origin_id.clone(),
+        origin_id: row.origin_id,
         origin_deletion_generation: input.deletion_generation as u64,
         policy_revision: policy.policy_revision,
         expires_at_unix_ms: None,
@@ -171,7 +170,7 @@ pub async fn load_on<C: ConnectionTrait>(
     let mut known = vec![KnownMemorySource {
         source_id: row.source_id(),
         revision: row.revision as u64,
-        origin_id: input.origin_id.clone(),
+        origin_id: input.id,
     }];
     known.extend(dependencies.into_iter().map(|source| KnownMemorySource {
         source_id: source.source_id,

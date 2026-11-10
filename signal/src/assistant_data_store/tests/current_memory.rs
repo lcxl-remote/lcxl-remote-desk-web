@@ -411,7 +411,7 @@ async fn a_source_policy_change_blocks_current_cache_replay_and_does_not_create_
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(&fixture.store.db)
         .await
         .unwrap()
@@ -423,7 +423,7 @@ async fn a_source_policy_change_blocks_current_cache_replay_and_does_not_create_
             origin::Column::PolicyJson,
             Expr::value(serde_json::to_string(&policy).unwrap()),
         )
-        .filter(origin::Column::OriginId.eq(original.origin_id))
+        .filter(origin::Column::Id.eq(original.id))
         .exec(&fixture.store.db)
         .await
         .unwrap();

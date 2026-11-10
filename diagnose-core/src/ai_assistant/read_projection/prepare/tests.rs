@@ -170,7 +170,7 @@ impl Fixture {
             history_dependencies: vec![HistoryDependency {
                 source_id: source,
                 source_revision: 1,
-                origin_id: native_ids::stable(Kind::AssistantOrigin, &name),
+                origin_id: native_ids::fixture_origin_id(&name),
                 origin_deletion_generation: 1,
                 policy_revision: 1,
                 expires_at_unix_ms: Some(10_000),

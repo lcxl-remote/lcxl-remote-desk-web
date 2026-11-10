@@ -15,7 +15,7 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub actor_id: String,
     #[sea_orm(indexed)]
-    pub origin_id: String,
+    pub origin_id: i64,
     pub role: String,
     #[sea_orm(column_type = "Text")]
     pub body: String,

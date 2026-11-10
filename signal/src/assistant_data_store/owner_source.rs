@@ -104,7 +104,7 @@ async fn owner_memory_source_on<C: ConnectionTrait + ConfigConnection>(
                     .filter(history::Column::Id.eq(
                         desk_assistant_data_store::source_rows::history(&key.source_id),
                     ))
-                    .filter(history::Column::OriginId.eq(&key.origin_id))
+                    .filter(history::Column::OriginId.eq(key.origin_id))
                     .one(db)
                     .await?
             && unsigned(original.revision)? == key.revision
@@ -192,7 +192,7 @@ pub(super) async fn memory_source_on<C: ConnectionTrait + ConfigConnection>(
     }
     let origin = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(db)
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
@@ -239,7 +239,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     }
     let Some(original) = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(actor))
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .one(db)
         .await?
     else {
@@ -269,7 +269,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     };
     if !history_policy_allowed(&policy, now)
         || proof.actor_id != actor
-        || proof.origin_id != row.origin_id
         || (proof.accepted_input_seq == 0 && !native_without_owner_input)
         || proof.accepted_input_seq != unsigned(original.accepted_input_seq)?
         || proof.device_ref != row.device_ref
@@ -302,7 +301,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
         }
         let Some(origin) = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(actor))
-            .filter(origin::Column::OriginId.eq(&dependency.origin_id))
+            .filter(origin::Column::Id.eq(dependency.origin_id))
             .one(db)
             .await?
         else {
@@ -364,7 +363,6 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     if doc.byte_start < 0
         || doc.byte_end < doc.byte_start
         || doc.byte_end - doc.byte_start != row.content.len() as i32
-        || doc.origin_id != row.origin_id
         || doc.device_ref != row.device_ref
         || doc.conversation_id != row.conversation_id
         || doc.root_conversation_id != row.root_conversation_id

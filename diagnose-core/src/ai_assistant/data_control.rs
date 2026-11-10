@@ -141,8 +141,8 @@ impl AssistantDataSession {
         }
         for dependency in &self.history_dependencies {
             desk_agent_protocol::ai_assistant::source::validate_source_id(&dependency.source_id)?;
-            desk_agent_protocol::ai_assistant::source::validate_source_id(&dependency.origin_id)?;
-            if dependency.source_revision == 0
+            if dependency.origin_id <= 0
+                || dependency.source_revision == 0
                 || dependency.origin_deletion_generation == 0
                 || dependency.policy_revision == 0
             {

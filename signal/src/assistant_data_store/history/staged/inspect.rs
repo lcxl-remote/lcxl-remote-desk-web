@@ -18,7 +18,10 @@ pub(super) async fn inspect_on(
     }
     let kind = enum_string(&capture.kind)?;
     let existing_origin = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&prepared.origin_id))
+        .filter(origin::Column::ActorId.eq(capture.actor_id))
+        .filter(origin::Column::ConversationId.eq(capture.conversation_id))
+        .filter(origin::Column::NativeId.eq(capture.native_id))
+        .filter(origin::Column::Kind.eq(&kind))
         .one(txn)
         .await?;
     if let Some(row) = &existing_origin
@@ -68,20 +71,23 @@ pub(super) async fn inspect_on(
     };
     let mut new_parts = Vec::new();
     let mut existing_ids = Vec::with_capacity(prepared.index.fragments.len());
+    // History rows exist only under an existing origin.
+    let origin_id = existing_origin.as_ref().map(|row| row.id);
     for (index, fragment) in prepared.index.fragments.iter().enumerate() {
         let body =
             &prepared.retained_content[fragment.byte_start as usize..fragment.byte_end as usize];
-        if let Some(row) = history::Entity::find()
-            .filter(history::Column::ActorId.eq(capture.actor_id))
-            .filter(history::Column::OriginId.eq(&prepared.origin_id))
-            .filter(history::Column::FragmentIndex.eq(
-                i32::try_from(fragment.fragment_index).map_err(|_| AdmissionFailure::Capacity)?,
-            ))
-            .one(txn)
-            .await?
+        if let Some(origin_id) = origin_id
+            && let Some(row) = history::Entity::find()
+                .filter(history::Column::ActorId.eq(capture.actor_id))
+                .filter(history::Column::OriginId.eq(origin_id))
+                .filter(
+                    history::Column::FragmentIndex.eq(i32::try_from(fragment.fragment_index)
+                        .map_err(|_| AdmissionFailure::Capacity)?),
+                )
+                .one(txn)
+                .await?
         {
             if row.actor_id != capture.actor_id
-                || row.origin_id != prepared.origin_id
                 || row.revision != signed(capture.revision)?
                 || row.content != body
                 || row.deleted_at_ms.is_some()

@@ -69,12 +69,6 @@ async fn index_current(frame: &Frame) -> fact::Model {
 }
 
 pub(super) async fn index_fact(store: &TestStore, row: &fact::Model) {
-    let source = evidence::Entity::find()
-        .filter(evidence::Column::MemoryId.eq(&row.memory_id))
-        .one(&store.db)
-        .await
-        .unwrap()
-        .unwrap();
     let projected = index_source(&format!(
         "{}\n{}",
         row.body,
@@ -95,7 +89,6 @@ pub(super) async fn index_fact(store: &TestStore, row: &fact::Model) {
             source_revision: Set(row.revision),
             device_ref: Set(row.device_ref.clone()),
             corpus_generation: Set(row.state_generation),
-            origin_id: Set(source.origin_id.clone()),
             root_conversation_id: Set("fixture-root".into()),
             conversation_id: Set("fixture-root".into()),
             fragment_index: Set(part.fragment_index as i32),
@@ -450,7 +443,7 @@ async fn source_export_policy_changes_block_a_cached_memory_without_fabricating_
         .usage
         .history_dependencies[0];
     let row = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(&frame.store.db)
         .await
         .unwrap()
@@ -462,7 +455,7 @@ async fn source_export_policy_changes_block_a_cached_memory_without_fabricating_
             origin::Column::PolicyJson,
             Expr::value(serde_json::to_string(&policy).unwrap()),
         )
-        .filter(origin::Column::OriginId.eq(&row.origin_id))
+        .filter(origin::Column::Id.eq(row.id))
         .exec(&frame.store.db)
         .await
         .unwrap();
@@ -583,13 +576,13 @@ async fn storage_views_apply_original_device_consent_and_keep_pending_facts_out_
     let (a, _, origin_a) = super::owner_memory::seed(&store, 1, "memory-view-A").await;
     let (b, _, origin_b) = super::owner_memory::seed(&store, 1, "memory-view-B").await;
     let original_a = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(origin_a))
+        .filter(origin::Column::Id.eq(origin_a))
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     let original_b = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(origin_b))
+        .filter(origin::Column::Id.eq(origin_b))
         .one(&store.db)
         .await
         .unwrap()
@@ -784,7 +777,7 @@ async fn one_thousand_independent_facts_keep_sparse_retrieval_bounded_and_readab
             None => super::owner_memory::seed(&store, 1, &label).await,
         };
         let original = origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(origin_id))
+            .filter(origin::Column::Id.eq(origin_id))
             .one(&store.db)
             .await
             .unwrap()

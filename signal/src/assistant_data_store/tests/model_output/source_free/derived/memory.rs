@@ -129,7 +129,7 @@ async fn later_source_policy_changes_do_not_rewrite_accepted_snapshot_policy() {
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(&store.db)
         .await
         .unwrap()

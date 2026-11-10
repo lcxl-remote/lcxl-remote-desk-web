@@ -4540,7 +4540,7 @@ async fn personal_input_writes_memory_only_for_the_selected_device() {
         .unwrap();
     assert!(evidence.source_device_json.is_none());
     let origin = agent_assistant_origin::Entity::find()
-        .filter(agent_assistant_origin::Column::OriginId.eq(evidence.origin_id))
+        .filter(agent_assistant_origin::Column::Id.eq(evidence.origin_id))
         .one(&db)
         .await
         .unwrap()

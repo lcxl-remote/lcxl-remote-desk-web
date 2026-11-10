@@ -22,7 +22,6 @@ pub struct Model {
     pub history_id: Option<i64>,
     pub source_revision: i64,
     pub corpus_generation: i64,
-    pub origin_id: String,
     #[sea_orm(indexed)]
     pub root_conversation_id: String,
     pub conversation_id: String,

@@ -22,7 +22,6 @@ pub enum Kind {
     Goal,
     StatusStep,
     Lineage,
-    AssistantOrigin,
     AssistantSearchDocument,
     Memory,
     MemoryJob,
@@ -67,7 +66,6 @@ impl Kind {
             Self::StatusStep => "step",
             Self::Lineage => "id",
             Self::AssistantSearchDocument => "sdoc",
-            Self::AssistantOrigin => "origin",
             Self::Memory => "mem",
             Self::MemoryJob => "mjob",
             Self::RetrievalEpisode => "lookup",
@@ -116,6 +114,16 @@ pub fn fixture_source_id(seed: &impl Serialize) -> String {
     let digest = Sha256::digest(input);
     let key = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) % 1_000_000_000;
     desk_agent_protocol::ai_assistant::source_ref::SourceRef::history(key as i64 + 1).to_string()
+}
+
+/// Deterministic origin row key for tests and fixtures. Production origin ids
+/// are `agent_assistant_origin` primary keys.
+#[doc(hidden)]
+pub fn fixture_origin_id(seed: &impl Serialize) -> i64 {
+    let input = serde_json::to_vec(&("fixture-origin", seed)).expect("fixture seed serialization");
+    let digest = Sha256::digest(input);
+    let key = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) % 1_000_000_000;
+    key as i64 + 1
 }
 
 /// Deterministic memory evidence source id for tests and fixtures.

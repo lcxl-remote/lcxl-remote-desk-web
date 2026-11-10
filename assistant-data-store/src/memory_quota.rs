@@ -148,12 +148,11 @@ pub fn version_metadata(row: &revision::Model) -> Result<i64, AssistantStoreErro
 }
 pub fn source_metadata(row: &source::Model) -> Result<i64, AssistantStoreError> {
     bytes(
-        11,
+        12,
         1,
         &[
             &row.memory_id,
             &row.actor_id,
-            &row.origin_id,
             &row.dependencies_json,
             &row.known_sources_json,
             &row.forget_sources_json,
@@ -174,7 +173,6 @@ pub fn document_metadata(row: &document::Model) -> Result<i64, AssistantStoreErr
             &row.device_ref,
             &row.source_kind,
             &row.source_id,
-            &row.origin_id,
             &row.root_conversation_id,
             &row.conversation_id,
         ],

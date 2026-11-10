@@ -75,7 +75,7 @@ impl Port {
             history_dependencies: vec![HistoryDependency {
                 source_id: source,
                 source_revision: 1,
-                origin_id: native_ids::stable(Kind::AssistantOrigin, &"loop-current-origin"),
+                origin_id: native_ids::fixture_origin_id(&"loop-current-origin"),
                 origin_deletion_generation: 1,
                 policy_revision: 1,
                 expires_at_unix_ms: None,
@@ -106,7 +106,7 @@ impl Port {
                 usage.roots[0].source_id = record.source_ids[0].clone();
                 usage.history_dependencies[0].source_id = record.source_ids[0].clone();
                 usage.history_dependencies[0].origin_id =
-                    native_ids::stable(Kind::AssistantOrigin, &("loop-current-origin", index));
+                    native_ids::fixture_origin_id(&("loop-current-origin", index));
                 candidates.push((record, usage));
             }
         }

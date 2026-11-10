@@ -29,7 +29,7 @@ pub(super) struct Frame {
     logical: Vec<String>,
     parent: DataEnvelope,
     destination: DestinationIdentity,
-    original: String,
+    original: i64,
     pub(super) now: u64,
     producer_id: String,
     model_request: desk_diagnose_core::seam::ModelRequest,
@@ -385,7 +385,7 @@ async fn final_original_session_raw_bytes_and_native_source_dependencies_are_res
                         origin::Column::DeletedAtMs,
                         Expr::value(Some(frame.now as i64)),
                     )
-                    .filter(origin::Column::OriginId.eq(&frame.original))
+                    .filter(origin::Column::Id.eq(frame.original))
                     .exec(&txn)
                     .await
                     .unwrap();

@@ -55,7 +55,7 @@ fn original_with_turn(
         desk_agent_protocol::ai_assistant::source::HistoryDependency {
             source_id: source_id.clone(),
             source_revision: 1,
-            origin_id: native_ids::stable(Kind::AssistantOrigin, &"owner-copy-origin"),
+            origin_id: native_ids::fixture_origin_id(&"owner-copy-origin"),
             origin_deletion_generation: 1,
             policy_revision: 1,
             expires_at_unix_ms: Some(5000),

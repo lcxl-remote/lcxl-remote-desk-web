@@ -281,7 +281,7 @@ pub async fn apply_on<C: ConnectionTrait>(
         let forget_sources = input
             .known
             .iter()
-            .filter(|source| source.origin_id == input.origin.origin_id)
+            .filter(|source| source.origin_id == input.origin.id)
             .cloned()
             .collect::<Vec<_>>();
         let proof = MemoryEvidenceRetentionProof::from_snapshot(&MemoryEvidenceSnapshot {
@@ -291,7 +291,7 @@ pub async fn apply_on<C: ConnectionTrait>(
             memory_accepted_input_seq: unsigned(next.accepted_input_seq)?,
             role: input.role,
             body: &input.body,
-            origin_id: &input.origin.origin_id,
+            origin_id: input.origin.id,
             origin_kind: kind,
             origin_deletion_generation: unsigned(input.origin.deletion_generation)?,
             origin_accepted_input_seq: unsigned(input.origin.accepted_input_seq)?,
@@ -310,7 +310,7 @@ pub async fn apply_on<C: ConnectionTrait>(
             memory_id: id.clone(),
             memory_revision: number,
             actor_id: write.actor.into(),
-            origin_id: input.origin.origin_id.clone(),
+            origin_id: input.origin.id,
             role: match input.role {
                 SourceRefRole::Evidence => "evidence",
                 SourceRefRole::Background => "background",
@@ -340,7 +340,6 @@ pub async fn apply_on<C: ConnectionTrait>(
             next: &next,
             removed: old.iter().map(|row| row.memory_id.clone()).collect(),
             text: &text,
-            source_origin_id: &primary.origin.origin_id,
             origin: &primary.origin,
             policy: write.policy,
             body_expiry: write

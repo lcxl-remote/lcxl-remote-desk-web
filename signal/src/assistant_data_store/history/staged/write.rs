@@ -74,8 +74,7 @@ pub(super) async fn write_on(
     for (part, _) in &new_parts {
         // Account UTF-8 metadata plus fixed-width scalar slots. Payload fields
         // and indexed terms have their own counters and are not hidden here.
-        metadata += (prepared.origin_id.len()
-            + capture.actor_id.len()
+        metadata += (capture.actor_id.len()
             + capture.device_ref.len()
             + capture.conversation_id.len()
             + capture.root_conversation_id.len()
@@ -87,7 +86,7 @@ pub(super) async fn write_on(
             + capture.statement_timezone.len()
             + state_json.as_ref().map_or(0, String::len)
             + native_time.basis.as_ref().map_or(0, String::len)
-            + 17 * 8) as i64;
+            + 18 * 8) as i64;
         metadata += part
             .terms
             .keys()
@@ -96,7 +95,6 @@ pub(super) async fn write_on(
         // The document row stores the formatted source id and its document id.
         metadata += (desk_agent_protocol::ai_assistant::source_ref::SourceRef::MAX_LEN
             + SEARCH_DOCUMENT_ID_LEN
-            + prepared.origin_id.len()
             + capture.root_conversation_id.len()
             + capture.conversation_id.len()
             + capture.device_ref.len()
@@ -104,8 +102,7 @@ pub(super) async fn write_on(
             + 12 * 8) as i64;
     }
     if existing_origin.is_none() {
-        metadata += (prepared.origin_id.len()
-            + capture.actor_id.len()
+        metadata += (capture.actor_id.len()
             + capture.device_ref.len()
             + capture.conversation_id.len()
             + capture.root_conversation_id.len()
@@ -196,36 +193,12 @@ pub(super) async fn write_on(
         ),
         None => None,
     };
-    if existing_origin.is_none() {
-        require_one(
-            origin::Entity::insert(origin::ActiveModel {
-                origin_id: Set(prepared.origin_id.clone()),
-                actor_id: Set(capture.actor_id.into()),
-                device_ref: Set(capture.device_ref.into()),
-                conversation_id: Set(capture.conversation_id.into()),
-                root_conversation_id: Set(capture.root_conversation_id.into()),
-                native_id: Set(capture.native_id.into()),
-                kind: Set(kind.clone()),
-                original_sha256: Set(original_sha256.clone()),
-                accepted_input_seq: Set(signed(capture.accepted_input_seq)?),
-                history_admitted: Set(true),
-                deletion_generation: Set(1),
-                deleted_at_ms: Set(None),
-                policy_json: Set(source_policy),
-                created_at_ms: Set(recorded),
-                statement_timezone: Set(capture.statement_timezone.into()),
-                ..Default::default()
-            })
-            .exec_without_returning(txn)
-            .await?,
-        )?;
-    } else if let Some(current) = existing_origin {
+    let origin_id = if let Some(current) = existing_origin {
         require_one(
             origin::Entity::update_many()
                 .col_expr(origin::Column::HistoryAdmitted, Expr::value(true))
                 .filter(origin::Column::Id.eq(current.id))
                 .filter(origin::Column::ActorId.eq(&current.actor_id))
-                .filter(origin::Column::OriginId.eq(&current.origin_id))
                 .filter(origin::Column::DeviceRef.eq(&current.device_ref))
                 .filter(origin::Column::ConversationId.eq(&current.conversation_id))
                 .filter(origin::Column::RootConversationId.eq(&current.root_conversation_id))
@@ -243,7 +216,29 @@ pub(super) async fn write_on(
                 .await?
                 .rows_affected,
         )?;
-    }
+        current.id
+    } else {
+        origin::Entity::insert(origin::ActiveModel {
+            actor_id: Set(capture.actor_id.into()),
+            device_ref: Set(capture.device_ref.into()),
+            conversation_id: Set(capture.conversation_id.into()),
+            root_conversation_id: Set(capture.root_conversation_id.into()),
+            native_id: Set(capture.native_id.into()),
+            kind: Set(kind.clone()),
+            original_sha256: Set(original_sha256.clone()),
+            accepted_input_seq: Set(signed(capture.accepted_input_seq)?),
+            history_admitted: Set(true),
+            deletion_generation: Set(1),
+            deleted_at_ms: Set(None),
+            policy_json: Set(source_policy),
+            created_at_ms: Set(recorded),
+            statement_timezone: Set(capture.statement_timezone.into()),
+            ..Default::default()
+        })
+        .exec(txn)
+        .await?
+        .last_insert_id
+    };
     let next_conversation = desk_diagnose_core::future::send_phase(|| {
         write_conversation_on(txn, capture, existing_conversation, recorded)
     })
@@ -251,7 +246,7 @@ pub(super) async fn write_on(
     let mut history_ids = Vec::with_capacity(new_parts.len());
     for (part, body) in new_parts {
         let history_id = history::Entity::insert(history::ActiveModel {
-            origin_id: Set(prepared.origin_id.clone()),
+            origin_id: Set(origin_id),
             actor_id: Set(capture.actor_id.into()),
             device_ref: Set(capture.device_ref.into()),
             conversation_id: Set(capture.conversation_id.into()),
@@ -307,7 +302,6 @@ pub(super) async fn write_on(
                 history_id: Set(Some(history_id)),
                 source_revision: Set(signed(capture.revision)?),
                 corpus_generation: Set(admitted_generation),
-                origin_id: Set(prepared.origin_id.clone()),
                 root_conversation_id: Set(capture.root_conversation_id.into()),
                 conversation_id: Set(capture.conversation_id.into()),
                 fragment_index: Set(i32::try_from(part.fragment_index).map_err(|_| AdmissionFailure::Capacity)?),

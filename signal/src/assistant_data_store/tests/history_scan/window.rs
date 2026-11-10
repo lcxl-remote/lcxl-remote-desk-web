@@ -326,7 +326,7 @@ async fn invalid_or_deleted_original_anchors_do_not_silently_fall_back_to_other_
         .unwrap();
     origin::Entity::update_many()
         .col_expr(origin::Column::DeletedAtMs, Expr::value(Some(2000_i64)))
-        .filter(origin::Column::OriginId.eq(row.origin_id))
+        .filter(origin::Column::Id.eq(row.origin_id))
         .exec(&store.db)
         .await
         .unwrap();

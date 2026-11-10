@@ -120,7 +120,7 @@ async fn current_body_or_source_changes_before_original_send_admission_roll_back
             let source = &proof.usage.history_dependencies[0];
             origin::Entity::update_many()
                 .col_expr(origin::Column::DeletedAtMs, Expr::value(1_i64))
-                .filter(origin::Column::OriginId.eq(&source.origin_id))
+                .filter(origin::Column::Id.eq(source.origin_id))
                 .exec(&txn)
                 .await
                 .unwrap();

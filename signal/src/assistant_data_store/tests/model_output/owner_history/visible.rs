@@ -115,7 +115,7 @@ async fn late_source_changes_do_not_withdraw_the_already_accepted_answer_copy() 
             .unwrap()
             .unwrap();
         let original = origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(&origin_id))
+            .filter(origin::Column::Id.eq(origin_id))
             .one(&store.db)
             .await
             .unwrap()

@@ -15,7 +15,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::PaginatorTrait;
 
-pub(super) async fn seed(store: &TestStore, actor: i32, label: &str) -> (String, String, String) {
+pub(super) async fn seed(store: &TestStore, actor: i32, label: &str) -> (String, String, i64) {
     let body = format!("Prefer Chinese for {label}");
     seed_with_body(store, actor, label, &body).await
 }
@@ -25,7 +25,7 @@ pub(super) async fn seed_with_body(
     actor: i32,
     label: &str,
     body: &str,
-) -> (String, String, String) {
+) -> (String, String, i64) {
     store
         .settings(actor, &AssistantDataPolicy::default())
         .await
@@ -54,9 +54,7 @@ pub(super) async fn seed_with_body(
     .await
     .unwrap();
     let policy = desk_diagnose_core::ai_assistant::source::owner_text_policy(1, false);
-    let origin_id = native_ids::stable(Kind::AssistantOrigin, &(actor.as_str(), label));
-    origin::ActiveModel {
-        origin_id: Set(origin_id.clone()),
+    let origin_id = origin::ActiveModel {
         actor_id: Set(actor.clone()),
         device_ref: Set(device_ref.clone()),
         conversation_id: Set(format!("conversation-{label}")),
@@ -74,13 +72,14 @@ pub(super) async fn seed_with_body(
     }
     .insert(&store.db)
     .await
-    .unwrap();
+    .unwrap()
+    .id;
     let memory_id = native_ids::stable(Kind::Memory, &(actor.as_str(), label));
     let source_id = native_ids::fixture_memory_source_id(&(label, "evidence"));
     let known = KnownMemorySource {
         source_id: native_ids::fixture_source_id(&(label, "original")),
         revision: 1,
-        origin_id: origin_id.clone(),
+        origin_id,
     };
     let body = body.to_owned();
     fact::ActiveModel {
@@ -109,7 +108,7 @@ pub(super) async fn seed_with_body(
         memory_id: Set(memory_id.clone()),
         memory_revision: Set(1),
         actor_id: Set(actor.clone()),
-        origin_id: Set(origin_id.clone()),
+        origin_id: Set(origin_id),
         role: Set("evidence".into()),
         body: Set("I prefer Chinese".into()),
         retained_bytes: Set("I prefer Chinese".len() as i32),
@@ -184,7 +183,7 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
         .unwrap()
         .unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&source.origin_id))
+        .filter(origin::Column::Id.eq(source.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -210,7 +209,7 @@ pub(super) async fn rebuild_evidence_proof(store: &TestStore, source_id: &str) {
         memory_accepted_input_seq: unsigned(version.accepted_input_seq).unwrap(),
         role: SourceRefRole::Evidence,
         body: &source.body,
-        origin_id: &original.origin_id,
+        origin_id: original.id,
         origin_kind: AssistantSourceKind::Input,
         origin_deletion_generation: unsigned(original.deletion_generation).unwrap(),
         origin_accepted_input_seq: unsigned(original.accepted_input_seq).unwrap(),
@@ -321,7 +320,7 @@ async fn delete_revokes_evidence_and_replay_preserves_generations_and_original_h
         .unwrap();
     assert_eq!(source.revoked_at_ms, Some(1000));
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -412,7 +411,7 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
     let dependency = HistoryDependency {
         source_id: native_ids::fixture_source_id(&"producer"),
         source_revision: 1,
-        origin_id: other_origin.clone(),
+        origin_id: other_origin,
         origin_deletion_generation: 1,
         policy_revision: 1,
         expires_at_unix_ms: None,
@@ -442,7 +441,7 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
             origin::Column::DeletedAtMs,
             sea_orm::sea_query::Expr::value(1000),
         )
-        .filter(origin::Column::OriginId.eq(other_origin))
+        .filter(origin::Column::Id.eq(other_origin))
         .exec(&store.db)
         .await
         .unwrap();
@@ -458,7 +457,7 @@ async fn device_or_full_producer_dependency_revocation_hides_a_fact_before_clean
     assert!(list.memories.iter().all(|row| row.memory_id != memory_id));
     assert!(
         origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(origin_id))
+            .filter(origin::Column::Id.eq(origin_id))
             .one(&store.db)
             .await
             .unwrap()
@@ -546,7 +545,7 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         .unwrap();
     let known: Vec<KnownMemorySource> = serde_json::from_str(&evidence.known_sources_json).unwrap();
     let original = origin::Entity::find()
-        .filter(origin::Column::OriginId.eq(&evidence.origin_id))
+        .filter(origin::Column::Id.eq(evidence.origin_id))
         .one(&store.db)
         .await
         .unwrap()
@@ -558,7 +557,7 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
             origin::Column::HistoryAdmitted,
             sea_orm::sea_query::Expr::value(true),
         )
-        .filter(origin::Column::OriginId.eq(&original.origin_id))
+        .filter(origin::Column::Id.eq(original.id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -568,7 +567,6 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         actor_id: original.actor_id.clone(),
         device_ref: original.device_ref.clone(),
         accepted_input_seq: unsigned(original.accepted_input_seq).unwrap(),
-        origin_id: original.origin_id.clone(),
         original_envelope_id: "owner-input-envelope".into(),
         source_policy: policy,
         recorded_at_unix_ms: 1,
@@ -579,7 +577,7 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         id: Set(desk_assistant_data_store::source_rows::history(
             &known[0].source_id,
         )),
-        origin_id: Set(original.origin_id.clone()),
+        origin_id: Set(original.id),
         actor_id: Set(original.actor_id.clone()),
         device_ref: Set(original.device_ref.clone()),
         conversation_id: Set(original.conversation_id.clone()),
@@ -620,7 +618,6 @@ pub(super) async fn seed_original_history(store: &TestStore, source_id: &str) ->
         ))),
         source_revision: Set(1),
         corpus_generation: Set(1),
-        origin_id: Set(original.origin_id),
         root_conversation_id: Set(original.root_conversation_id),
         conversation_id: Set(original.conversation_id),
         fragment_index: Set(0),
@@ -800,7 +797,7 @@ async fn source_statement_timezone_does_not_follow_later_file_settings() {
             origin::Column::StatementTimezone,
             sea_orm::sea_query::Expr::value("Asia/Shanghai"),
         )
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -966,7 +963,7 @@ async fn rewritten_evidence_cannot_rebind_the_original_input() {
             origin::Column::AcceptedInputSeq,
             sea_orm::sea_query::Expr::value(99_i64),
         )
-        .filter(origin::Column::OriginId.eq(origin_id))
+        .filter(origin::Column::Id.eq(origin_id))
         .exec(&store.db)
         .await
         .unwrap();
@@ -1011,7 +1008,7 @@ async fn owner_original_navigation_requires_the_exact_declared_version_and_live_
                         origin::Column::DeletedAtMs,
                         sea_orm::sea_query::Expr::value(Some(999_i64)),
                     )
-                    .filter(origin::Column::OriginId.eq(origin_id))
+                    .filter(origin::Column::Id.eq(origin_id))
                     .exec(&store.db)
                     .await
                     .unwrap();

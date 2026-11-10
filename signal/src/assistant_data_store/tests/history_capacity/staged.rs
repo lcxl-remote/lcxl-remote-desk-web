@@ -4,7 +4,7 @@ use crate::entity::{
     agent_assistant_history_conversation as conversations,
     agent_assistant_search_document as documents,
 };
-use desk_diagnose_core::{ai_assistant::source::prepare_capture, chat::ChatMessage};
+use desk_diagnose_core::chat::ChatMessage;
 use sea_orm::ConnectionTrait;
 use sea_orm::ExprTrait;
 
@@ -367,9 +367,6 @@ async fn exercise_failed_unit(fixture: Fixture, failure: usize) {
     }
     let captures = fixture.captures();
     let refs = captures.iter().collect::<Vec<_>>();
-    let bad = prepare_capture(&captures[failure], &fixture.policy)
-        .unwrap()
-        .unwrap();
     let baseline = runtime_on(&fixture.store.db, "1").await.unwrap();
     let before = quota::Entity::find()
         .one(&fixture.store.db)
@@ -377,8 +374,8 @@ async fn exercise_failed_unit(fixture: Fixture, failure: usize) {
         .unwrap()
         .unwrap();
     fixture.store.db.execute_unprepared(&format!(
-        "CREATE TRIGGER reject_staged_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.origin_id='{}' BEGIN SELECT RAISE(ABORT, 'injected late history-index failure'); END",
-        bad.origin_id)).await.unwrap();
+        "CREATE TRIGGER reject_staged_index BEFORE INSERT ON agent_assistant_search_document WHEN NEW.history_id IN (SELECT id FROM agent_assistant_history WHERE native_id='{}') BEGIN SELECT RAISE(ABORT, 'injected late history-index failure'); END",
+        captures[failure].native_id)).await.unwrap();
     let txn = fixture.begin().await;
     let outcomes = capture_store::staged::prepare_many_on(&txn, &refs, &fixture.policy)
         .await
@@ -433,7 +430,7 @@ async fn exercise_failed_unit(fixture: Fixture, failure: usize) {
     );
     assert_eq!(
         origin::Entity::find()
-            .filter(origin::Column::OriginId.eq(bad.origin_id))
+            .filter(origin::Column::NativeId.eq(captures[failure].native_id))
             .count(&fixture.store.db)
             .await
             .unwrap(),

@@ -428,11 +428,15 @@ async fn prepare_native_status_on(
             .recorded_at_unix_ms
             .checked_add(u64::from(prepared.policy.history_retention_days) * 86_400_000)
             .ok_or(AssistantStoreError::Capacity)?;
-        let origin_id = status.projection.origin_id();
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let existing = crate::entity::agent_assistant_origin::Entity::find()
             .filter(crate::entity::agent_assistant_origin::Column::ActorId.eq(&expected.actor_id))
-            .filter(crate::entity::agent_assistant_origin::Column::OriginId.eq(origin_id))
+            .filter(
+                crate::entity::agent_assistant_origin::Column::ConversationId
+                    .eq(capture.conversation_id),
+            )
+            .filter(crate::entity::agent_assistant_origin::Column::NativeId.eq(capture.native_id))
+            .filter(crate::entity::agent_assistant_origin::Column::Kind.eq("native_status"))
             .one(db)
             .await?;
         if existing.is_none() && expires > unsigned(chrono::Utc::now().timestamp_millis())? {

@@ -144,7 +144,7 @@ async fn origin_dependencies_and_index_byte_spans_are_rechecked_before_creating_
         if damage_dependency {
             origin::Entity::update_many()
                 .col_expr(origin::Column::DeletedAtMs, Expr::value(Some(4000_i64)))
-                .filter(origin::Column::OriginId.eq(&base_view.source.row.origin_id))
+                .filter(origin::Column::Id.eq(base_view.source.row.origin_id))
                 .exec(&store.db)
                 .await
                 .unwrap();
