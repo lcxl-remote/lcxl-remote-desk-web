@@ -1393,6 +1393,7 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
                 parent.as_ref(),
                 receipt.text.as_bytes(),
                 "attachment-capacity",
+                &receipt.message_id,
             )?;
             session.conversation.push(receipt);
         } else if result.is_err() {
@@ -1502,6 +1503,7 @@ async fn append_reviewed_tool_result_inner(
                             authorized_source.as_ref(),
                             &image_bytes,
                             "image-body",
+                            &image_only.message_id,
                         )?;
                     image_only.image_data_url = None;
                     attachment.message = image_only;
@@ -1517,6 +1519,7 @@ async fn append_reviewed_tool_result_inner(
                             attachment.message.data_envelope.as_ref(),
                             body.text.as_bytes(),
                             "image-text",
+                            &body.message_id,
                         )?;
                     let parts = [image_part];
                     let mut delivered = crate::future::boxed(|| {
@@ -1572,6 +1575,7 @@ async fn append_reviewed_tool_result_inner(
                             message.data_envelope.as_ref(),
                             &bytes,
                             "image-reference",
+                            &message.message_id,
                         )?;
                     let message_id = message.message_id.clone();
                     session

@@ -525,13 +525,11 @@ fn authorize_review_sources(
     if prompt.len() > MAX_APPROVAL_CONTEXT_BYTES {
         return Err(ApprovalReviewError::InvalidContext);
     }
-    let digest = format!("{:x}", Sha256::digest(prompt.as_bytes()));
     let prompt_envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("approval-prompt-{}", candidate.candidate_id),
-        content: ContentRef::ImmutableBlob {
-            blob_id: candidate.candidate_id.clone(),
-            sha256: digest.clone(),
+        content: ContentRef::Projection {
+            projection: "approval-prompt".into(),
             size_bytes: prompt.len() as u64,
             media_type: "text/plain".into(),
         },
@@ -684,6 +682,7 @@ mod tests {
             Some(&original_envelope),
             reference.text.as_bytes(),
             "reference",
+            &reference.message_id,
         )
         .unwrap();
         reference.raw_result = Some(Box::new(delivery::RawResult {
@@ -705,9 +704,13 @@ mod tests {
             "read",
             r#"{"attachment_id":"ui-result","body":"current-ui-evidence"}"#,
         );
-        page.data_envelope =
-            delivery::projection_envelope(Some(&original_envelope), page.text.as_bytes(), "page")
-                .unwrap();
+        page.data_envelope = delivery::projection_envelope(
+            Some(&original_envelope),
+            page.text.as_bytes(),
+            "page",
+            &page.message_id,
+        )
+        .unwrap();
         page.attachment_read = Some(Box::new(model_read::ReadReceipt {
             input: model_read::Input {
                 attachment_id: "ui-result".into(),
@@ -928,6 +931,11 @@ mod tests {
         ] {
             let authorized = authorize_projected_source(&session, source).unwrap();
             assert!(authorized.prompt.contains(&owner.text));
+            // The prompt is generated once per candidate and carries no digest.
+            assert!(matches!(&authorized.prompt_envelope.content,
+                ContentRef::Projection { projection, size_bytes, .. }
+                    if projection == "approval-prompt"
+                        && *size_bytes == authorized.prompt.len() as u64));
             assert!(
                 authorized
                     .source_audit

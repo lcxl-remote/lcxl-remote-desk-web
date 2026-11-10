@@ -63,6 +63,7 @@ pub fn failed_delivery(
         original.data_envelope.as_ref(),
         content.as_bytes(),
         "delivery-error",
+        &original.message_id,
     )?;
     original.text = content;
     original.raw_result = Some(Box::new(proof));
@@ -72,10 +73,14 @@ pub fn failed_delivery(
 
 /// Derive bytes without broadening authority. The caller must first verify and
 /// authorize the original result, including its complete byte charge.
+/// `object_id` names the message or attachment that carries the projected bytes;
+/// each object is projected at most once per purpose, which keeps labels in one
+/// request distinct.
 pub fn projection_envelope(
     parent: Option<&DataEnvelope>,
     bytes: &[u8],
     purpose: &str,
+    object_id: &str,
 ) -> Result<Option<DataEnvelope>, AgentError> {
     let Some(parent) = parent else {
         return Ok(None);
@@ -83,15 +88,10 @@ pub fn projection_envelope(
     parent
         .validate()
         .map_err(|_| invalid("Invalid original result label"))?;
-    let hash = digest(bytes);
     let mut envelope = parent.clone();
-    envelope.envelope_id = format!(
-        "attachment-{purpose}-{}",
-        &digest(format!("{}:{hash}", parent.envelope_id).as_bytes())[..32]
-    );
-    envelope.content = ContentRef::ImmutableBlob {
-        blob_id: envelope.envelope_id.clone(),
-        sha256: hash.clone(),
+    envelope.envelope_id = format!("attachment-{purpose}-{object_id}");
+    envelope.content = ContentRef::Projection {
+        projection: format!("attachment-{purpose}"),
         size_bytes: bytes.len() as u64,
         media_type: "application/octet-stream".into(),
     };
@@ -332,6 +332,7 @@ pub async fn externalize_with(
             attachment_parent.as_ref(),
             &part.content,
             &part.metadata.part,
+            &part.metadata.attachment_id,
         )?;
     }
     let canonical = prepared
@@ -350,7 +351,12 @@ pub async fn externalize_with(
         slots: vec![],
         sha256: digest(canonical.as_bytes()),
         envelope: if prepared.template.is_some() {
-            projection_envelope(source.data_envelope.as_ref(), canonical.as_bytes(), "raw")?
+            projection_envelope(
+                source.data_envelope.as_ref(),
+                canonical.as_bytes(),
+                "raw",
+                &message.message_id,
+            )?
         } else {
             source.data_envelope.clone()
         },
@@ -415,6 +421,7 @@ pub async fn externalize_with(
         source.data_envelope.as_ref(),
         message.text.as_bytes(),
         "reference",
+        &message.message_id,
     )?;
     // A truncated text prefix cannot be a trusted full result for later actions.
     if !delivery
@@ -565,6 +572,74 @@ pub(crate) mod tests {
             },
             "now",
         )
+    }
+    #[test]
+    fn projections_are_named_by_their_carrier_without_a_digest() {
+        use desk_agent_protocol::data_lineage::{
+            ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
+            DestinationIdentity, RetentionBoundary, Sensitivity,
+        };
+        let destination = DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let parent = DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: "tool-result".into(),
+            content: ContentRef::Message {
+                message_id: "tool-message".into(),
+                size_bytes: 8,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "desktop.ui".into(),
+                source_tool_name: "inspect_desktop_ui".into(),
+                source_object_id: Some("call".into()),
+                source_envelope_ids: Vec::new(),
+            },
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: vec![destination.clone()],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            },
+        };
+        let first = projection_envelope(Some(&parent), b"same", "reference", "message-1")
+            .unwrap()
+            .unwrap();
+        let second = projection_envelope(Some(&parent), b"same", "reference", "message-2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.envelope_id, "attachment-reference-message-1");
+        assert!(
+            matches!(&first.content, ContentRef::Projection { projection, size_bytes, .. }
+            if projection == "attachment-reference" && *size_bytes == 4)
+        );
+        assert_eq!(first.content_sha256(), None);
+        assert_eq!(first.provenance.source_envelope_ids, vec!["tool-result"]);
+        // Equal bytes projected for two carriers stay distinct within one request.
+        crate::sink_authorizer::authorize_model_history(
+            &destination,
+            &[
+                crate::sink_authorizer::SinkInput {
+                    envelope: &first,
+                    bytes: b"same",
+                },
+                crate::sink_authorizer::SinkInput {
+                    envelope: &second,
+                    bytes: b"same",
+                },
+            ],
+            1,
+            crate::sink_authorizer::MAX_SINK_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            projection_envelope(None, b"same", "reference", "message-1").unwrap(),
+            None
+        );
     }
     #[tokio::test]
     async fn attachment_keeps_the_gateway_authority_admitted_when_it_was_stored() {

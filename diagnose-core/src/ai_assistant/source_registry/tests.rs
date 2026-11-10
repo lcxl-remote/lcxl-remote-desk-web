@@ -638,12 +638,60 @@ fn native_control_chains_and_real_resume_and_delegation_producers_keep_parent_co
         )
         .unwrap(),
     ];
-    let original = snapshot(
-        messages
-            .drain(..)
-            .map(|message| message.data_envelope.unwrap())
-            .collect(),
+    let labels: Vec<_> = messages
+        .drain(..)
+        .map(|message| message.data_envelope.unwrap())
+        .collect();
+    // Control messages are persisted messages or fixed projections, never digests.
+    assert!(
+        matches!(&labels[1].content, ContentRef::Message { message_id, .. } if message_id == "scheduled")
     );
+    assert!(
+        matches!(&labels[2].content, ContentRef::Message { message_id, .. } if message_id == "permission")
+    );
+    assert!(
+        matches!(&labels[3].content, ContentRef::Projection { projection, .. } if projection == "delegation")
+    );
+    // A label naming another message or projection kind is not a native control.
+    for (index, forge) in [
+        (
+            1,
+            ContentRef::Message {
+                message_id: "other".into(),
+                size_bytes: labels[1].content.size_bytes(),
+                media_type: "text/plain;charset=utf-8".into(),
+            },
+        ),
+        (
+            2,
+            ContentRef::Message {
+                message_id: "other".into(),
+                size_bytes: labels[2].content.size_bytes(),
+                media_type: "text/plain;charset=utf-8".into(),
+            },
+        ),
+        (
+            3,
+            ContentRef::Projection {
+                projection: "status-result".into(),
+                size_bytes: labels[3].content.size_bytes(),
+                media_type: "application/json".into(),
+            },
+        ),
+    ] {
+        let mut forged = labels.clone();
+        forged[index].content = forge;
+        let registration =
+            NativeInputPolicyRegistration::capture(&snapshot(forged), SOURCE_CONTRACT_REVISION, 1);
+        assert!(
+            registration.is_err()
+                || registration.unwrap().leaves[index]
+                    .as_ref()
+                    .is_none_or(|leaf| leaf.contract != RegisteredSourceContract::NativeControl),
+            "forged label {index}"
+        );
+    }
+    let original = snapshot(labels);
     let registration =
         NativeInputPolicyRegistration::capture(&original, SOURCE_CONTRACT_REVISION, 1).unwrap();
     assert!(

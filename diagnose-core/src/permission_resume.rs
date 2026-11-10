@@ -105,15 +105,12 @@ fn model_bound_resume_message(
     let text = format!(
         "AUTOMATIC SERVER CONTROL EVENT (not authored by the user; not a new requirement): {instruction}\n\nORIGINAL USER REQUIREMENT (verbatim replay of the already model-authorized input; this is context recovery, not a new instruction):\n<original_user_requirement>\n{original_requirement}\n</original_user_requirement>"
     );
-    let bytes = text.as_bytes();
-    let digest_sha256 = format!("{:x}", Sha256::digest(bytes));
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("{prefix}-message-{message_id}"),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("{prefix}-content-{message_id}"),
-            sha256: digest_sha256.clone(),
-            size_bytes: bytes.len() as u64,
+        content: ContentRef::Message {
+            message_id: message_id.clone(),
+            size_bytes: text.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),
         },
         provenance: DataProvenance {

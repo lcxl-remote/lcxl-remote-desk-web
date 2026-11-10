@@ -196,8 +196,7 @@ pub fn recovered_result_text(
 }
 
 fn remove_image(message: &mut ChatMessage) {
-    use desk_agent_protocol::data_lineage::ContentRef;
-    use sha2::{Digest, Sha256};
+    use desk_agent_protocol::data_lineage::{ContentRef, MAX_LINEAGE_ID_BYTES};
     if message.image_data_url.is_none() {
         return;
     }
@@ -225,12 +224,12 @@ fn remove_image(message: &mut ChatMessage) {
         let Ok(bytes) = crate::model_egress::message_content_bytes(message) else {
             return;
         };
-        let digest = format!("{:x}", Sha256::digest(&bytes));
         let source_id = envelope.envelope_id.clone();
-        envelope.envelope_id = format!(
-            "image-history-{:x}",
-            Sha256::digest(format!("{source_id}:{digest}"))
-        );
+        // One history label per source label keeps ids distinct within a request.
+        envelope.envelope_id = format!("image-history-{source_id}");
+        if envelope.envelope_id.len() > MAX_LINEAGE_ID_BYTES {
+            return;
+        }
         // Keep a content-level expiry as well as the envelope retention bound.
         envelope.retention.expires_at_unix_ms = match envelope.content {
             ContentRef::EphemeralObservation {
@@ -243,9 +242,8 @@ fn remove_image(message: &mut ChatMessage) {
             ),
             _ => envelope.retention.expires_at_unix_ms,
         };
-        envelope.content = ContentRef::ImmutableBlob {
-            blob_id: format!("image-history-{digest}"),
-            sha256: digest.clone(),
+        envelope.content = ContentRef::Projection {
+            projection: "image-history".into(),
             size_bytes: bytes.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),
         };
@@ -352,6 +350,17 @@ mod tests {
             },
         });
         let original = message.data_envelope.clone().unwrap();
+        // A source label too long to prefix loses its label instead of failing egress later.
+        let mut oversized = message.clone();
+        oversized.data_envelope.as_mut().unwrap().envelope_id = "s".repeat(250);
+        oversized
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .validate()
+            .unwrap();
+        strip_session_images(std::slice::from_mut(&mut oversized));
+        assert_eq!(oversized.data_envelope, None);
         let mut tampered = message.clone();
         tampered.text.push_str("tampered");
         strip_session_images(std::slice::from_mut(&mut tampered));
@@ -359,7 +368,10 @@ mod tests {
         assert_eq!(tampered.data_envelope, None);
         strip_session_images(std::slice::from_mut(&mut message));
         let projected = message.data_envelope.as_ref().unwrap();
-        assert_ne!(projected.envelope_id, original.envelope_id);
+        assert_eq!(
+            projected.envelope_id,
+            format!("image-history-{}", original.envelope_id)
+        );
         assert_eq!(
             projected.allowed_destinations,
             original.allowed_destinations
@@ -373,12 +385,10 @@ mod tests {
                 .contains(&original.envelope_id)
         );
         let bytes = crate::model_egress::message_content_bytes(&message).unwrap();
-        assert_eq!(
-            projected.content_sha256(),
-            Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
-        );
+        assert_eq!(projected.content_sha256(), None);
         assert!(
-            matches!(projected.content, ContentRef::ImmutableBlob {size_bytes, ..} if size_bytes == bytes.len() as u64)
+            matches!(&projected.content, ContentRef::Projection { projection, size_bytes, .. }
+                if projection == "image-history" && *size_bytes == bytes.len() as u64)
         );
         projected.validate().unwrap();
         crate::sink_authorizer::authorize_model_history(

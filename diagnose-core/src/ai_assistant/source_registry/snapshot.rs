@@ -345,13 +345,15 @@ fn native_control(source: &DataEnvelope) -> bool {
                         _ => false,
                     }
             }
-            "delegation_state" => blob.is_some_and(|(blob_id, _, media_type)| {
+            "delegation_state" => {
                 source
                     .envelope_id
                     .strip_prefix("delegation-")
-                    .is_some_and(|id| *blob_id == format!("delegation-message-{id}"))
-                    && media_type == "application/json"
-            }),
+                    .is_some_and(|id| !id.is_empty())
+                    && matches!(&source.content, ContentRef::Projection { projection, media_type, .. }
+                        if projection == crate::subagent::projection::DELEGATION_PROJECTION
+                            && media_type == "application/json")
+            }
             _ => false,
         }
     } else if provenance.source_provider_id == "assistant-runtime-control" {
@@ -365,10 +367,8 @@ fn native_control(source: &DataEnvelope) -> bool {
         };
         source.envelope_id == format!("{prefix}-message-{id}")
             && provenance.source_envelope_ids.len() == 1
-            && blob.is_some_and(|(blob_id, _, media_type)| {
-                *blob_id == format!("{prefix}-content-{id}")
-                    && media_type == "text/plain;charset=utf-8"
-            })
+            && matches!(&source.content, ContentRef::Message { message_id, media_type, .. }
+                if message_id == id && media_type == "text/plain;charset=utf-8")
     } else {
         false
     }

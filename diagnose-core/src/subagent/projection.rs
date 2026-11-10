@@ -12,21 +12,22 @@ use crate::{
     data_policy::{ConservativeDerivation, derive_conservatively},
 };
 
+/// Projection kind of server-derived delegation messages.
+pub const DELEGATION_PROJECTION: &str = "delegation";
+
 pub fn envelope(
     message_id: &str,
     text: &str,
     tool_name: &str,
     inputs: &[DataEnvelope],
 ) -> Result<DataEnvelope, AgentError> {
-    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
     let envelope_id = format!("delegation-{message_id}");
     let (envelope, _) = derive_conservatively(
         inputs,
         ConservativeDerivation {
             output_envelope_id: &envelope_id,
-            content: ContentRef::ImmutableBlob {
-                blob_id: format!("delegation-message-{message_id}"),
-                sha256: digest.clone(),
+            content: ContentRef::Projection {
+                projection: DELEGATION_PROJECTION.into(),
                 size_bytes: text.len() as u64,
                 media_type: "application/json".into(),
             },
@@ -258,6 +259,7 @@ mod tests {
             Some(&native),
             text.as_bytes(),
             "reference",
+            &externalized.conversation[2].message_id,
         )
         .unwrap()
         .unwrap();
