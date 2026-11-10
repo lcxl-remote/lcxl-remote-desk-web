@@ -107,9 +107,9 @@ pub fn is_published_input_label(source: &DataEnvelope) -> bool {
             source.allowed_destinations[0],
             DestinationIdentity::Model { .. }
         )
-        && matches!(&source.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
-            if blob_id == &format!("published-task-content-{key}") && sha256.len() == 64
-                && *size_bytes > 0 && media_type == "text/plain;charset=utf-8")
+        && matches!(&source.content, ContentRef::Message { message_id: content_id, size_bytes, media_type }
+            if content_id == message_id && *size_bytes > 0
+                && media_type == "text/plain;charset=utf-8")
 }
 
 /// The caller verifies current publication and occurrence authority. This label
@@ -131,10 +131,6 @@ pub fn model_bound_published_input(
         return Err(denied());
     }
     destination.validate().map_err(|_| denied())?;
-    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
-    if digest != contract.contract().prompt_sha256 {
-        return Err(denied());
-    }
     let identity =
         serde_json::to_vec(&(run_id, &contract.contract().schedule_id, contract.digest()))
             .map_err(|_| denied())?;
@@ -142,9 +138,8 @@ pub fn model_bound_published_input(
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("published-task-input-{key}"),
-        content: ContentRef::ImmutableBlob {
-            blob_id: format!("published-task-content-{key}"),
-            sha256: digest.clone(),
+        content: ContentRef::Message {
+            message_id: message_id.clone(),
             size_bytes: text.len() as u64,
             media_type: "text/plain;charset=utf-8".into(),
         },
@@ -210,13 +205,11 @@ mod tests {
     #[test]
     fn task_input_shape_does_not_authorize_arbitrary_provider_or_owner_labels() {
         let key = "a".repeat(64);
-        let hash = "b".repeat(64);
         let source = DataEnvelope {
             schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
             envelope_id: format!("published-task-input-{key}"),
-            content: ContentRef::ImmutableBlob {
-                blob_id: format!("published-task-content-{key}"),
-                sha256: hash,
+            content: ContentRef::Message {
+                message_id: "schedule-run-shape:input".into(),
                 size_bytes: 4,
                 media_type: "text/plain;charset=utf-8".into(),
             },
@@ -244,6 +237,11 @@ mod tests {
         assert!(!is_published_input_label(&forged));
         let mut forged = source.clone();
         forged.provenance.source_object_id = Some("ordinary-chat:input".into());
+        assert!(!is_published_input_label(&forged));
+        let mut forged = source.clone();
+        if let ContentRef::Message { message_id, .. } = &mut forged.content {
+            *message_id = "schedule-run-other:input".into();
+        }
         assert!(!is_published_input_label(&forged));
         let mut forged = source.clone();
         forged.retention.delete_with_run = false;

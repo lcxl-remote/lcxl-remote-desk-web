@@ -23,7 +23,7 @@ export default {
     "schedules.diff.permissions": "Permission rules changed",
     "schedules.diff.steps": "Task steps or destinations changed",
     "schedules.diff.exception_mode": "Exception handling changed",
-    "schedules.diff.prompt_sha256": "Task instructions changed",
+    "schedules.diff.task_revision": "Task instructions changed",
 
     "schedules.authorization.title": "Task authorization",
     "schedules.authorization.versions": "Authorization {{authorization}} / contract {{contract}} / requirement {{task}}",

@@ -27,7 +27,6 @@ pub struct TaskContract {
     pub task_revision: u64,
     pub contract_revision: u64,
     pub target_device_id: String,
-    pub prompt_sha256: String,
     pub permissions: Vec<TaskPermissionRule>,
     /// Steps are stored in execution order; dependencies can only reference earlier steps.
     pub steps: Vec<TaskFixedStep>,

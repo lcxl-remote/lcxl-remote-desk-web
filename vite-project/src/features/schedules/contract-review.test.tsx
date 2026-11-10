@@ -4,7 +4,7 @@ import { ContractReview } from './contract-review';
 import { ScheduleClient } from './client';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
-const review = { result: 'task_contract', task: { schedule_id: 'task-1' }, task_revision: 1, prompt_sha256: 'a'.repeat(64), contract_sha256: 'b'.repeat(64), contract: {
+const review = { result: 'task_contract', task: { schedule_id: 'task-1' }, task_revision: 1, contract_sha256: 'b'.repeat(64), contract: {
     schedule_id: 'task-1', contract_revision: 2, budget: { max_runs_per_utc_day: 4, max_calls_per_run: 10, max_model_tokens_per_run: 1000, max_runtime_seconds: 60 },
     steps: [{ step_id: 'send', binding: { kind: 'send_message', destination: { account_id: 'owner-account', profile_id: 'browser-profile', channel: 'email', scope: { kind: 'web_origin', origin: { kind: 'https', host_ascii: 'mail.google.com', port: 443 } }, recipients: [{ role: 'to', stable_id: 'recipient-1', canonical_address: 'test@example.invalid' }] } } }],
     permissions: [{ rule_id: 'send', tool_name: 'send_reviewed_message', automatic: { resources: ['mailbox:owner'], operations: ['send'] } }],

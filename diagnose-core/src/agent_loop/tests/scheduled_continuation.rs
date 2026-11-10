@@ -602,11 +602,10 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         fresh_session::{FreshSessionInput, initial_session},
     };
     use crate::session::TriggerOrigin;
-    use sha2::{Digest, Sha256};
     let prompt = "Produce the scheduled report";
     let contract = parse_contract(&serde_json::json!({
         "schema_version":1,"schedule_id":"task","task_revision":1,"contract_revision":1,
-        "target_device_id":"device","prompt_sha256":format!("{:x}", Sha256::digest(prompt.as_bytes())),
+        "target_device_id":"device",
         "permissions":[],"steps":[],"exception_mode":"deny",
         "budget":{"max_runs_per_utc_day":1,"max_calls_per_run":1,"max_model_tokens_per_run":1000,"max_runtime_seconds":60}
     }).to_string()).unwrap();

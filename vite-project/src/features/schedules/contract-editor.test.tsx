@@ -13,7 +13,7 @@ describe('contract destination identity', () => {
         const limits = { max_calls: 1, max_bytes_per_call: 1024, max_items_per_call: 1 };
         const scope = { resources: ['device:1'], operations: ['read'], export_destinations: [destination], limits };
         const review = { result: 'task_contract', task: { schedule_id: 'task-1', revision: 1 }, contract: {
-            schema_version: 1, schedule_id: 'task-1', task_revision: 1, contract_revision: 1, target_device_id: 'device-1', prompt_sha256: 'a'.repeat(64),
+            schema_version: 1, schedule_id: 'task-1', task_revision: 1, contract_revision: 1, target_device_id: 'device-1',
             budget: { max_runs_per_utc_day: 4, max_calls_per_run: 10, max_model_tokens_per_run: 1000, max_runtime_seconds: 60 },
             exception_mode: 'request_approval', steps: [], permissions: [{ rule_id: 'read', tool_name: 'read_system_info', input: { kind: 'exact', canonical_json: '{}' },
                 automatic: scope, approval_ceiling: { ...scope, export_destinations: [reordered] } }],

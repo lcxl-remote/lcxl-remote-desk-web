@@ -25,7 +25,6 @@ pub fn task_input_scope(contract: &ValidatedTaskContract) -> String {
         &task.schedule_id,
         &revision,
         &task.target_device_id,
-        &task.prompt_sha256,
     ] {
         hash.update((field.len() as u64).to_be_bytes());
         hash.update(field.as_bytes());
@@ -68,8 +67,6 @@ pub fn fixed_task_input_source(
         || !input.tool_calls.is_empty()
         || input.tool_call_id.is_some()
         || input.background_task_id.is_some()
-        || format!("{:x}", Sha256::digest(input.text.as_bytes()))
-            != contract.contract().prompt_sha256
     {
         return Err(InvalidFixedTaskInput);
     }

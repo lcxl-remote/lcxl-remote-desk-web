@@ -10,7 +10,7 @@ describe('schedule request transport', () => {
         let sent!: SendTrackedOptions;
         const client = new ScheduleClient(options => { sent = options; return { requestId: options.requestId!, disposition: 'sent' }; }, vi.fn());
         const pending = client.request({ operation: 'get_task_contract', schedule_id: 'task-1' });
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task_contract', task: {}, task_revision: 1, prompt_sha256: 'a'.repeat(64), contract: null, contract_sha256: null }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
+        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task_contract', task: {}, task_revision: 1, contract: null, contract_sha256: null }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
         await expect(pending).resolves.toMatchObject({ result: 'task_contract', contract: null });
         const wrong = client.request({ operation: 'get_task_contract', schedule_id: 'task-1' });
         client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task' }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });

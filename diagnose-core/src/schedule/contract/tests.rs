@@ -25,7 +25,6 @@ fn contract() -> TaskContract {
         task_revision: 1,
         contract_revision: 1,
         target_device_id: "device-1".into(),
-        prompt_sha256: "a".repeat(64),
         permissions: vec![TaskPermissionRule {
             rule_id: "observe".into(),
             provider_id: "device".into(),
@@ -976,8 +975,7 @@ fn fresh_task_sessions_have_independent_identity_and_no_rehearsal_state() {
     use crate::{chat::ChatRole, session::TriggerOrigin};
     use desk_agent_protocol::{AgentScope, ExecutionMode};
     let prompt = "Send the daily report";
-    let mut definition = contract();
-    definition.prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
+    let definition = contract();
     let definition = validate_contract(&definition).unwrap();
     let make = |run, text| {
         initial_session(
@@ -1029,7 +1027,6 @@ fn fresh_task_sessions_have_independent_identity_and_no_rehearsal_state() {
         assert_eq!(session.automation_turns_used, 0);
     }
     assert!(make("rehearsal-old", prompt).is_err());
-    assert!(make("schedule-run-first", "Changed task").is_err());
 }
 
 #[test]
@@ -1102,8 +1099,7 @@ fn fixed_task_input_is_verified_and_scoped_to_the_task_requirement() {
         schedule::rehearsal::fixed_input::{fixed_task_input_source, task_input_scope},
         session::PersistedAgentSession,
     };
-    let mut definition = contract();
-    definition.prompt_sha256 = format!("{:x}", Sha256::digest(b"fixed requirement"));
+    let definition = contract();
     let contract = validate_contract(&definition).unwrap();
     let mut session = PersistedAgentSession::new(
         "conversation",
@@ -1188,8 +1184,7 @@ fn rehearsal_graph_requires_each_original_read_even_when_it_has_known_parents() 
         seam::{ModelRequest, ToolRunOutput},
         session::PersistedAgentSession,
     };
-    let mut definition = contract();
-    definition.prompt_sha256 = format!("{:x}", Sha256::digest(b"fixed requirement"));
+    let definition = contract();
     let contract = validate_contract(&definition).unwrap();
     let destination = DestinationIdentity::Model {
         connection_id: "gateway".into(),
@@ -1388,9 +1383,8 @@ fn compressed_answer_preserves_original_read_scope() {
         seam::{ModelRequest, ToolRunOutput},
         session::PersistedAgentSession,
     };
-    let mut definition = contract();
+    let definition = contract();
     let prompt = "x".repeat(16000);
-    definition.prompt_sha256 = format!("{:x}", Sha256::digest(prompt.as_bytes()));
     let contract = validate_contract(&definition).unwrap();
     let policy = ModelEgressPolicy {
         destination: DestinationIdentity::Model {

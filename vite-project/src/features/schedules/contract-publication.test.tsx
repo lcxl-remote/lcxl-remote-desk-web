@@ -6,9 +6,9 @@ import { ContractPublication } from './contract-publication';
 import { ScheduleClient, ScheduleRequestError } from './client';
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
 type Review = Extract<ScheduleManagementResponse, { result: 'task_contract' }>;
-const review = { result: 'task_contract', task_revision: 1, prompt_sha256: 'a'.repeat(64), contract_sha256: 'b'.repeat(64),
+const review = { result: 'task_contract', task_revision: 1, contract_sha256: 'b'.repeat(64),
     task: { schedule_id: 'task', revision: 3, kind: 'fresh_task', status: 'draft', target_device_id: 'device', active_run_id: null },
-    contract: { contract_revision: 2, task_revision: 1, target_device_id: 'device', prompt_sha256: 'a'.repeat(64) },
+    contract: { contract_revision: 2, task_revision: 1, target_device_id: 'device' },
 } as Review;
 const rehearsal = { result: 'task_rehearsal', task: review.task, rehearsal: { schedule_id: 'task', task_revision: 1, status: 'completed', rehearsal_id: 'guided-run' } };
 function setup(request: ReturnType<typeof vi.fn>, value = review) {

@@ -144,7 +144,6 @@ impl ScheduleStore {
             || task.kind != "fresh_task"
             || i64::try_from(input.task_revision).ok() != Some(task.task_revision)
             || input.target_device_id != task.target_device_id
-            || input.prompt_sha256 != digest(&task.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -272,7 +271,6 @@ impl ScheduleStore {
         if contract.digest() != input.contract_sha256
             || contract.contract().task_revision != task.task_revision as u64
             || contract.contract().target_device_id != task.target_device_id
-            || contract.contract().prompt_sha256 != digest(&task.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }

@@ -17359,10 +17359,6 @@ export type TaskContract = {
     /**
      * @type string
     */
-    prompt_sha256: string;
-    /**
-     * @type string
-    */
     schedule_id: string;
     /**
      * @minLength 0
@@ -18478,10 +18474,6 @@ export type ScheduleManagementResponse = ({
     */
     contract_sha256?: string | null;
     previous_contract?: (null | TaskContract);
-    /**
-     * @type string
-    */
-    prompt_sha256: string;
     /**
      * @type string
     */

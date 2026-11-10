@@ -137,8 +137,6 @@ pub async fn resume_claimed_fresh_task_permission_turn(
         || !session.unclosed_tool_call_ids().is_empty()
         || original.role != ChatRole::User
         || original.message_id != format!("{run_id}:input")
-        || format!("{:x}", Sha256::digest(original.text.as_bytes()))
-            != contract.contract().prompt_sha256
         || session.current_turn_id.as_deref() != Some(format!("{run_id}-turn").as_str())
         || !crate::schedule::permission_wait::approved(&session, approval_reference, now)
     {

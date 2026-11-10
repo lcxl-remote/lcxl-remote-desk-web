@@ -515,7 +515,6 @@ async fn exact_contract_coverage_requires_observed_input_and_allows_omitting_exp
         task_revision: task.task_revision as u64,
         contract_revision: 1,
         target_device_id: task.target_device_id.clone(),
-        prompt_sha256: digest(&task.prompt),
         permissions: vec![TaskPermissionRule {
             rule_id: "read".into(),
             provider_id: observed.provider_id.clone(),
@@ -881,7 +880,6 @@ async fn model_sources_fixture(compressed: bool) {
         task_revision: rehearsal.task_revision as u64,
         contract_revision: 1,
         target_device_id: rehearsal.target_device_id.clone(),
-        prompt_sha256: digest(&rehearsal.prompt),
         permissions: vec![],
         steps: vec![],
         exception_mode: TaskExceptionMode::Deny,

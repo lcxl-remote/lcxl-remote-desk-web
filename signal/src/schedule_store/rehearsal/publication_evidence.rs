@@ -103,7 +103,6 @@ impl ScheduleStore {
         if definition.schedule_id != task.schedule_id
             || i64::try_from(definition.task_revision).ok() != Some(task.task_revision)
             || definition.target_device_id != task.target_device_id
-            || definition.prompt_sha256 != digest(&task.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }

@@ -705,7 +705,6 @@ async fn publication_evidence_binds_completed_rehearsal_to_exact_task() {
         task_revision: task.task_revision as u64,
         contract_revision: 1,
         target_device_id: task.target_device_id.clone(),
-        prompt_sha256: digest(&task.prompt),
         permissions: vec![],
         steps: vec![],
         exception_mode: desk_agent_protocol::schedule::contract::TaskExceptionMode::Deny,
@@ -727,7 +726,7 @@ async fn publication_evidence_binds_completed_rehearsal_to_exact_task() {
     .unwrap();
     assert_ne!(proof.evidence_sha256, bound.evidence_sha256);
     let mut different_definition = definition.clone();
-    different_definition.prompt_sha256 = "b".repeat(64);
+    different_definition.task_revision += 1;
     assert!(
         ScheduleStore::publication_contract_scope_evidence_on(
             &txn,

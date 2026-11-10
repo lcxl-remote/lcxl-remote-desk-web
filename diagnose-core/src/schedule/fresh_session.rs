@@ -34,8 +34,6 @@ pub fn initial_session(
             .locale
             .is_some_and(|locale| locale.is_empty() || locale.len() > 64)
         || chrono::DateTime::parse_from_rfc3339(input.now).is_err()
-        || format!("{:x}", Sha256::digest(input.prompt.as_bytes()))
-            != contract.contract().prompt_sha256
     {
         return Err("invalid fresh task session identity");
     }

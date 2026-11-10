@@ -662,7 +662,6 @@ async fn contract_response(
     owner: i32,
     task: row::Model,
 ) -> Result<Response, ScheduleStoreError> {
-    use sha2::{Digest, Sha256};
     if task.kind != "fresh_task" || task.status == "deleted" {
         return Err(ScheduleStoreError::Conflict);
     }
@@ -744,7 +743,6 @@ async fn contract_response(
         authorization,
         task_revision: u64::try_from(task.task_revision)
             .map_err(|_| ScheduleStoreError::Invalid)?,
-        prompt_sha256: format!("{:x}", Sha256::digest(&task.prompt)),
         task: Box::new(view(db, owner, task).await?),
         contract,
         contract_sha256,

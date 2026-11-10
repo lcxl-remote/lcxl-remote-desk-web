@@ -241,7 +241,6 @@ pub fn validate_contract(input: &TaskContract) -> Result<ValidatedTaskContract, 
     id(&input.target_device_id)?;
     revision(input.task_revision)?;
     revision(input.contract_revision)?;
-    digest(&input.prompt_sha256)?;
     let budget = &input.budget;
     if !super::policy::valid_budget(budget) {
         return Err(TaskContractError::InvalidLimits);

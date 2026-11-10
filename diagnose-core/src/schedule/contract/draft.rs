@@ -240,7 +240,6 @@ mod tests {
             task_revision: 1,
             contract_revision: 1,
             target_device_id: "1".into(),
-            prompt_sha256: "a".repeat(64),
             permissions: vec![],
             steps: vec![],
             exception_mode: TaskExceptionMode::Deny,

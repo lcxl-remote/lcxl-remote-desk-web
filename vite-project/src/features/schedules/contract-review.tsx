@@ -94,7 +94,7 @@ export function ContractReview({ client, scheduleId, connected, onPublished }: {
     </div>;
 }
 
-const contractChanges = ['budget', 'permissions', 'steps', 'exception_mode', 'prompt_sha256'] as const;
+const contractChanges = ['budget', 'permissions', 'steps', 'exception_mode', 'task_revision'] as const;
 function ContractContents({ contract }: { contract: NonNullable<Review['contract']> }) {
     const { t } = useTranslation();
     return <>

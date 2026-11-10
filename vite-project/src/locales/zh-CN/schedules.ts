@@ -23,7 +23,7 @@ export default {
     "schedules.diff.permissions": "权限规则已变化",
     "schedules.diff.steps": "任务步骤或目标已变化",
     "schedules.diff.exception_mode": "例外处理方式已变化",
-    "schedules.diff.prompt_sha256": "任务要求已变化",
+    "schedules.diff.task_revision": "任务要求已变化",
 
     "schedules.authorization.title": "任务授权",
     "schedules.authorization.versions": "授权 {{authorization}} / 契约 {{contract}} / 要求 {{task}}",

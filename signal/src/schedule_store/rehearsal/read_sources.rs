@@ -119,7 +119,6 @@ impl ScheduleStore {
             || task.task_revision != source.task_revision
             || definition.target_device_id != source.target_device_id
             || task.target_device_id != source.target_device_id
-            || definition.prompt_sha256 != digest(&source.prompt)
             || task.prompt != source.prompt
         {
             return Err(ScheduleStoreError::Conflict);

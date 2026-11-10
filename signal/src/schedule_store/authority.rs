@@ -1,6 +1,6 @@
 //! Current parent authority read under the same task fence as publication and revocation.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
-use super::{ScheduleStore, ScheduleStoreError, digest, entity};
+use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::{capability_grant::TaskGrantProvenance, schedule::SchedulePauseReason};
@@ -340,7 +340,6 @@ impl ScheduleStore {
             || parent.expires_at.is_some_and(|deadline| deadline <= now)
             || contract.contract().task_revision != task.task_revision as u64
             || contract.contract().target_device_id != device
-            || contract.contract().prompt_sha256 != digest(&task.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }

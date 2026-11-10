@@ -227,7 +227,6 @@ pub enum ScheduleManagementResponse {
         previous_contract: Option<Box<contract::TaskContract>>,
         task: Box<ScheduleView>,
         task_revision: u64,
-        prompt_sha256: String,
         /// Public device reference; the opaque digest binds the server's stored contract.
         contract: Option<Box<contract::TaskContract>>,
         contract_sha256: Option<String>,

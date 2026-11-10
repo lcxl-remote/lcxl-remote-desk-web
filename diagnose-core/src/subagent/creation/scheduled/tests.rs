@@ -14,7 +14,6 @@ use desk_agent_protocol::{
     data_lineage::DestinationIdentity,
     schedule::contract::{TaskBudget, TaskContract, TaskExceptionMode},
 };
-use sha2::{Digest, Sha256};
 
 const RUN: &str = "schedule-run-test";
 const PROMPT: &str = "Inspect the published report and cite the observed facts.";
@@ -50,7 +49,6 @@ fn fixture_with_tokens(
         task_revision: 2,
         contract_revision: 3,
         target_device_id: "device-test".into(),
-        prompt_sha256: format!("{:x}", Sha256::digest(PROMPT.as_bytes())),
         permissions: Vec::new(),
         steps: Vec::new(),
         exception_mode: TaskExceptionMode::Deny,
@@ -202,7 +200,7 @@ fn scheduled_evidence_cannot_be_attached_to_a_user_or_another_occurrence() {
 #[test]
 fn initial_capture_does_not_replace_an_existing_label_or_claim() {
     let (source, session, _) = fixture();
-    for case in 0..7 {
+    for case in 0..6 {
         let mut changed = session.clone();
         match case {
             0 => {
@@ -215,8 +213,7 @@ fn initial_capture_does_not_replace_an_existing_label_or_claim() {
             2 => changed.current_request_id = Some("schedule-run-other".into()),
             3 => changed.trigger_origin = crate::session::TriggerOrigin::User,
             4 => changed.active_control_connection_id = Some("browser-controller".into()),
-            5 => changed.conversation[0].text.push('x'),
-            6 => {
+            5 => {
                 changed.agent_role = crate::subagent::AgentRole::SubAgent {
                     binding: Box::new(crate::subagent::DelegatedTaskBinding {
                         targets: Vec::new(),
@@ -251,10 +248,17 @@ fn initial_capture_does_not_replace_an_existing_label_or_claim() {
 }
 
 #[test]
-fn published_label_binds_exact_prompt_definition_occurrence_and_model() {
+fn published_label_binds_definition_occurrence_and_model() {
     let (source, _, _) = fixture();
     let contract = source.validate().unwrap();
     let message = model_bound_published_input(RUN, PROMPT, &contract, destination()).unwrap();
+    let label = message.data_envelope.as_ref().unwrap();
+    assert!(matches!(
+        &label.content,
+        desk_agent_protocol::data_lineage::ContentRef::Message { message_id, size_bytes, .. }
+            if *message_id == message.message_id && *size_bytes == PROMPT.len() as u64
+    ));
+    assert!(label.content_sha256().is_none());
     validate_published_input(&message, RUN, &contract, &destination()).unwrap();
     assert!(
         validate_published_input(&message, "schedule-run-other", &contract, &destination())
@@ -267,9 +271,6 @@ fn published_label_binds_exact_prompt_definition_occurrence_and_model() {
         profile_revision: 3,
     };
     assert!(validate_published_input(&message, RUN, &contract, &changed_destination).is_err());
-    assert!(
-        model_bound_published_input(RUN, "a different prompt", &contract, destination()).is_err()
-    );
     let mut different = contract.contract().clone();
     different.contract_revision += 1;
     let different = validate_contract(&different).unwrap();

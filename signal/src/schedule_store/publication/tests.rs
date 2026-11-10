@@ -44,7 +44,6 @@ fn definition(task: &entity::Model) -> TaskContract {
         task_revision: task.task_revision as u64,
         contract_revision: 999,
         target_device_id: task.target_device_id.clone(),
-        prompt_sha256: digest(&task.prompt),
         permissions: vec![],
         steps: vec![],
         exception_mode: TaskExceptionMode::Deny,

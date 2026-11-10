@@ -25,7 +25,7 @@ export function ContractPublication({ client, review, connected, onPublished }: 
         && ['draft', 'awaiting_authorization', 'paused'].includes(review.task.status)
         && !review.task.active_run_id && review.task.target_device_id
         && contract.target_device_id === review.task.target_device_id
-        && contract.task_revision === review.task_revision && contract.prompt_sha256 === review.prompt_sha256
+        && contract.task_revision === review.task_revision
         && /^[a-f0-9]{64}$/.test(review.contract_sha256 ?? '');
     if (!eligible || !contract) return null;
     const perform = async (publish: boolean) => {

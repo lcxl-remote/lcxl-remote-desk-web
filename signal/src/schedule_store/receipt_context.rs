@@ -1,6 +1,6 @@
 //! Historical identity for receipt verification. Never usable for execution admission.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
-use super::{ScheduleStoreError, digest, entity};
+use super::{ScheduleStoreError, entity};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::capability_grant::TaskGrantProvenance;
@@ -76,7 +76,6 @@ impl TaskReceiptContext {
             || parent.expires_at.is_some_and(|expiry| expiry <= started)
             || i64::try_from(contract.contract().task_revision).ok() != Some(snapshot.task_revision)
             || contract.contract().target_device_id != snapshot.target_device_id
-            || contract.contract().prompt_sha256 != digest(&snapshot.prompt)
         {
             return Err(ScheduleStoreError::Conflict);
         }

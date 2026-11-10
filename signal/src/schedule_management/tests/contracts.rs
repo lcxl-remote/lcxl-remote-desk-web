@@ -23,7 +23,6 @@ async fn contract_management_preserves_public_target_and_requires_current_owner_
     ));
     let Response::TaskContract {
         task_revision,
-        prompt_sha256,
         contract,
         ..
     } = manage(&db, 1, get()).await.unwrap()
@@ -37,7 +36,6 @@ async fn contract_management_preserves_public_target_and_requires_current_owner_
         task_revision,
         contract_revision: 0,
         target_device_id: task.target_device_id.clone().unwrap(),
-        prompt_sha256,
         permissions: vec![],
         steps: vec![],
         exception_mode: TaskExceptionMode::Deny,
@@ -61,6 +59,13 @@ async fn contract_management_preserves_public_target_and_requires_current_owner_
     assert!(matches!(
         manage(&db, 2, save(definition.clone())).await,
         Err(ScheduleStoreError::NotFound)
+    ));
+    // The task revision binds the contract to the reviewed requirement text.
+    let mut stale = definition.clone();
+    stale.task_revision += 1;
+    assert!(matches!(
+        manage(&db, 1, save(stale)).await,
+        Err(ScheduleStoreError::Conflict)
     ));
     let Response::TaskContract {
         task: saved,
