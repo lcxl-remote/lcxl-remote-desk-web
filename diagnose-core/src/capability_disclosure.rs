@@ -346,7 +346,7 @@ pub fn capability_name_index_prompt(
         "unavailable_now": unavailable_now,
     });
     let prompt = format!(
-        "This server-authored capability index contains names only. Advertised definitions are not execution authority; advertised_state describes current eligibility. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Calling a tool without a matching grant asks the owner for approval. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
+        "This server-authored capability index contains names only. Advertised definitions are not execution authority; advertised_state describes current eligibility. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Calling a tool without a matching grant waits for the owner's approval and then runs. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
         serde_json::to_string(&index).expect("name index is serializable")
     );
     if prompt.len() > MAX_CAPABILITY_INDEX_BYTES {
@@ -797,7 +797,7 @@ mod tests {
             capability_name_index_prompt(&registry, &inventory, &[], &candidates, &BTreeSet::new())
                 .unwrap();
         assert!(!index.contains("permission_input_mode"));
-        assert!(index.contains("asks the owner for approval"));
+        assert!(index.contains("waits for the owner's approval and then runs"));
         let details = detail_entries(
             &registry,
             &inventory,

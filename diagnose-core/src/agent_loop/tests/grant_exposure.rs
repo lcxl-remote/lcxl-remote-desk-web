@@ -837,11 +837,21 @@ fn tool_result<'a>(session: &'a PersistedAgentSession, id: &str) -> &'a str {
 }
 
 #[tokio::test]
-async fn a_direct_call_without_any_grant_pauses_as_its_own_proposal() {
+async fn an_approved_direct_call_runs_once_without_the_model_repeating_it() {
+    decided_direct_call(true).await;
+}
+
+#[tokio::test]
+async fn a_refused_direct_call_is_closed_without_the_model_repeating_it() {
+    decided_direct_call(false).await;
+}
+
+async fn decided_direct_call(approved: bool) {
     let (session, providers, snapshot, inventory, target, scope) = call_time_case(true);
+    let requests = Rc::new(RefCell::new(vec![]));
     let model = ScriptModel {
-        turns: RefCell::new([load_read(), direct_read("read")].into()),
-        requests: Rc::new(RefCell::new(vec![])),
+        turns: RefCell::new([load_read(), direct_read("read"), answer("done")].into()),
+        requests: requests.clone(),
     };
     let tools = GrantTools {
         snapshot: RefCell::new(snapshot),
@@ -868,21 +878,86 @@ async fn a_direct_call_without_any_grant_pauses_as_its_own_proposal() {
         panic!("{outcome:?}")
     };
     assert_eq!(tools.reads.get(), 0, "nothing ran before approval");
+    {
+        let mut stored = session.inner.borrow_mut();
+        let stored = stored.as_mut().unwrap();
+        let [request] = stored.permission_requests.as_slice() else {
+            panic!("one proposal")
+        };
+        assert_eq!(request.request_id, request_id);
+        assert_eq!(request.items[0].item_id, "read");
+        assert_eq!(request.items[0].tool_name, "inspect_desktop_session");
+        // The paused call keeps no result and is not reported as running.
+        assert!(
+            !stored
+                .conversation
+                .iter()
+                .any(|message| message.tool_call_id.as_deref() == Some("read"))
+        );
+        assert!(stored.unclosed_tool_call_ids().is_empty());
+        assert_eq!(
+            crate::permission_tools::proposing_call(stored, &request_id)
+                .map(|(message, call)| stored.conversation[message].tool_calls[call].id.as_str()),
+            Some("read")
+        );
+        // The owner approves; the host releases the call in its resume claim.
+        stored
+            .permission_decisions
+            .push(crate::dynamic_run::PermissionDecisionProjection {
+                request_id: request_id.clone(),
+                input_revision: stored.input_revision,
+                actor: crate::dynamic_run::PermissionDecisionActor::Owner,
+                items: vec![crate::dynamic_run::PermissionItemDisposition {
+                    item_id: "read".into(),
+                    approved,
+                    actor: crate::dynamic_run::PermissionDecisionActor::Owner,
+                }],
+            });
+        assert!(stored.release_awaiting_permission(&request_id).unwrap());
+    }
+    tools.snapshot.borrow_mut().grants[0].remaining_uses = 1;
+    resume_agent_turn(
+        &deps,
+        ClaimTurnParams {
+            current_pdp_scope: claim().current_pdp_scope,
+            trigger_origin: crate::session::TriggerOrigin::PermissionDecision,
+            ..claim()
+        },
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tools.reads.get(),
+        usize::from(approved),
+        "runs only when approved"
+    );
     let stored = session.inner.borrow();
     let stored = stored.as_ref().unwrap();
-    let [request] = stored.permission_requests.as_slice() else {
-        panic!("one proposal")
+    let expected = if approved {
+        "immutable observation"
+    } else {
+        "not executed: the owner refused this call"
     };
-    assert_eq!(request.request_id, request_id);
-    assert_eq!(request.items[0].item_id, "read");
-    assert_eq!(request.items[0].tool_name, "inspect_desktop_session");
-    let result: serde_json::Value = serde_json::from_str(tool_result(stored, "read")).unwrap();
-    assert_eq!(result["status"], "pending_user_decision");
-    assert_eq!(result["executed"], false);
+    assert!(tool_result(stored, "read").contains(expected));
     assert_eq!(
-        crate::permission_tools::proposing_call(&stored.conversation, &request_id)
-            .map(|(message, call)| stored.conversation[message].tool_calls[call].id.as_str()),
-        Some("read")
+        stored
+            .conversation
+            .iter()
+            .filter(|message| message.tool_call_id.as_deref() == Some("read"))
+            .count(),
+        1
+    );
+    assert!(stored.released_permission_call.is_none());
+    // One model request after approval, already holding the call's result.
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[2]
+            .messages
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("read")
+                && message.text.contains(expected))
     );
 }
 
@@ -922,7 +997,13 @@ async fn a_host_input_mismatch_is_explained_once_before_a_new_proposal() {
     let stored = session.inner.borrow();
     let stored = stored.as_ref().unwrap();
     assert!(tool_result(stored, "first").starts_with("approved_input_mismatch"));
-    assert!(tool_result(stored, "second").contains("pending_user_decision"));
+    assert_eq!(
+        stored
+            .awaiting_permission
+            .as_ref()
+            .map(|waiting| waiting.tool_call_id.as_str()),
+        Some("second")
+    );
     let [request] = stored.permission_requests.as_slice() else {
         panic!("one proposal")
     };

@@ -17,7 +17,7 @@ import {
     SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED,
 } from './constants';
 import type { SignalingSubscriber } from './use-desk-signaling';
-import { useAiAssistantChat } from './use-ai-assistant-chat';
+import { projectPersistedSnapshot, useAiAssistantChat } from './use-ai-assistant-chat';
 import { deskErrorCodeEnum } from '@/services/types';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
@@ -2713,4 +2713,24 @@ it('upgrades a returned tool result when a newer snapshot carries its durable ou
         vi.unstubAllGlobals();
         vi.useRealTimers();
     }
+});
+
+it('shows a direct call waiting for approval as pending, then its real result', () => {
+    const call = { id: 'paused', name: 'inspect_desktop_session', argumentsJson: '{}' };
+    const request = { requestId: 'request', inputRevision: 1, state: 'pending', items: [{ itemId: 'paused' }] };
+    const waiting = projectPersistedSnapshot({
+        messages: [{ id: 'assistant', role: 'assistant', text: '', toolCalls: [call] }],
+        permissionRequests: [request],
+    } as never);
+    expect(waiting.tools[0]).toMatchObject({ callId: 'paused', status: 'running', permissionReview: { state: 'pending' } });
+
+    const done = projectPersistedSnapshot({
+        messages: [
+            { id: 'assistant', role: 'assistant', text: '', toolCalls: [call] },
+            { id: 'result', role: 'tool', toolCallId: 'paused', toolOk: true, text: '{"ReadContext":{}}' },
+        ],
+        permissionRequests: [{ ...request, state: 'approved' }],
+    } as never);
+    expect(done.tools[0].status).toBe('ok');
+    expect(done.tools[0].permissionReview).toBeUndefined();
 });

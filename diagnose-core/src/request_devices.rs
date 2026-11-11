@@ -537,9 +537,9 @@ pub(crate) fn command_tool(
         .capability_for_tool(crate::command_confirmation::COMMAND_TOOL)?
         .registered_tool();
     add_target_selector(&mut tool, !has_single_target(session));
-    tool.spec.description.push_str(
-        "\nEach command is approved when called. After approval, call again with the same arguments and target_ref.",
-    );
+    tool.spec
+        .description
+        .push_str("\nEach command is approved when called and runs once after approval.");
     Some((tool, approved))
 }
 

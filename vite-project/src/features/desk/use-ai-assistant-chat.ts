@@ -312,6 +312,12 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
     let tools: AiAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
     const permissions = new Map(snapshot.permissionRequests?.map(request => [request.requestId, request]));
+    // A direct call waiting for approval has no result yet; its request item
+    // carries the call id, so the row shows the pending decision instead of
+    // a running tool.
+    const waitingCalls = new Map(snapshot.permissionRequests
+        ?.filter(request => request.state === 'pending' || request.state === 'needs_revalidation')
+        .flatMap(request => request.items.map(item => [item.itemId, request] as const)));
     for (const message of snapshot.messages) {
         const goalReceipt = projectGoalReviewReceipt(message);
         if (goalReceipt) messages.push(goalReceipt);
@@ -328,9 +334,11 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
         }
         for (const call of message.toolCalls ?? []) {
             messages.push({ id: `tool-call-${call.id}`, role: 'tool_call', toolCallId: call.id, turnId: message.turnId, text: '', contextBoundaryIds: [message.id] });
+            const waiting = waitingCalls.get(call.id);
             tools = upsertTool(tools, {
                 callId: call.id,
                 name: call.name,
+                ...(waiting && { permissionReview: { state: waiting.state, source: waiting.decision?.source } }),
                 status: 'running',
                 argumentsJson: call.argumentsJson,
                 output: null,

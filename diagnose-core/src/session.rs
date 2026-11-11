@@ -23,7 +23,7 @@ pub use executions::{BackgroundExecution, UnknownExecution};
 
 use std::collections::HashSet;
 
-use desk_agent_protocol::AgentScope;
+use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatMessage, ChatRole, TokenUsage};
@@ -665,6 +665,14 @@ pub struct PersistedAgentSession {
     /// Concrete AI review refusals per tool on the current chain, reset with it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub review_denials: std::collections::BTreeMap<String, u32>,
+    /// A direct call paused for its own approval. It has no result yet and is
+    /// not reported as unclosed: nothing is running for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_permission: Option<AwaitingPermission>,
+    /// The paused call released by its approval resume; the loop dispatches it
+    /// before calling the model. From release on it is an ordinary open call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_permission_call: Option<AwaitingPermission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_control_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -746,6 +754,13 @@ pub struct PersistedAgentSession {
     pub updated_at: String,
     /// Optimistic-concurrency version (DB CAS on the manager).
     pub version: i64,
+}
+
+/// One direct call and the approval request it is waiting for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwaitingPermission {
+    pub tool_call_id: String,
+    pub request_id: String,
 }
 
 /// Why a turn could not be claimed.
@@ -1556,6 +1571,8 @@ impl PersistedAgentSession {
             chain_id: String::new(),
             automation_turns_used: 0,
             review_denials: Default::default(),
+            awaiting_permission: None,
+            released_permission_call: None,
             active_control_connection_id: None,
             current_request_id: None,
             current_turn_id: None,
@@ -1980,6 +1997,10 @@ impl PersistedAgentSession {
         {
             return Err("child input must be adjusted through its durable task control");
         }
+        self.close_awaiting_permission(
+            "not executed: a new owner message replaced this request before approval; call it again if still needed",
+        )
+        .map_err(|_| "paused permission call is missing")?;
         if self.surface == AgentSessionSurface::AiAssistant {
             // Durable input stores advance input_revision before resetting the
             // focus. Compare the previous focus epoch so old parent waits and
@@ -2371,6 +2392,10 @@ impl PersistedAgentSession {
         if self.main_stopped || !self.turn_state.can_claim() {
             return Err(TurnClaimError::Busy);
         }
+        // Any claim other than its own approval resume (which released it
+        // first) ends the wait: the call did not run and may be called again.
+        self.close_awaiting_permission(AWAITING_PERMISSION_INTERRUPTED)
+            .map_err(|_| TurnClaimError::Busy)?;
         let now = now.into();
         if self.main_coordination.is_some() {
             let now_ms = chrono::DateTime::parse_from_rfc3339(&now)
@@ -3043,7 +3068,109 @@ impl PersistedAgentSession {
     /// [`verdict`]: RecoveryVerdict
     /// [`SessionSeam`]: crate::seam::SessionSeam
     pub fn unclosed_tool_call_ids(&self) -> Vec<String> {
-        unclosed_tool_call_ids(&self.conversation)
+        let mut open = unclosed_tool_call_ids(&self.conversation);
+        if let Some(waiting) = &self.awaiting_permission {
+            open.retain(|id| *id != waiting.tool_call_id);
+        }
+        open
+    }
+
+    /// Record that `tool_call_id` waits for `request_id` without a result.
+    pub fn pause_for_permission(&mut self, tool_call_id: &str, request_id: &str) {
+        self.awaiting_permission = Some(AwaitingPermission {
+            tool_call_id: tool_call_id.into(),
+            request_id: request_id.into(),
+        });
+    }
+
+    /// Index just past the call group that issued `tool_call_id`: the assistant
+    /// message and the results that directly follow it.
+    fn call_group_end(&self, tool_call_id: &str) -> Option<usize> {
+        let index = self.conversation.iter().rposition(|message| {
+            message.role == crate::chat::ChatRole::Assistant
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id == tool_call_id)
+        })?;
+        let calls = &self.conversation[index].tool_calls;
+        let mut end = index + 1;
+        while self.conversation.get(end).is_some_and(|message| {
+            message
+                .tool_call_id
+                .as_deref()
+                .is_some_and(|id| calls.iter().any(|call| call.id == id))
+        }) {
+            end += 1;
+        }
+        Some(end)
+    }
+
+    /// Give the paused call its only result, `text`, at the end of its call
+    /// group so the group stays contiguous, and drop the marker. Later turns
+    /// treat it like any other call that did not run.
+    pub fn close_awaiting_permission(&mut self, text: &str) -> Result<(), AgentError> {
+        let Some(waiting) = self.awaiting_permission.take() else {
+            return Ok(());
+        };
+        let invalid = || AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "paused permission call is missing".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        };
+        let end = self
+            .call_group_end(&waiting.tool_call_id)
+            .ok_or_else(invalid)?;
+        // A reused call id may have results from earlier turns; only results
+        // after the latest issuing message belong to the paused call.
+        let issuing = self.conversation[..end]
+            .iter()
+            .rposition(|message| message.role == crate::chat::ChatRole::Assistant)
+            .ok_or_else(invalid)?;
+        if self.conversation[issuing + 1..]
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some(waiting.tool_call_id.as_str()))
+        {
+            return Ok(());
+        }
+        let parent = self.conversation[..end]
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::chat::ChatRole::Assistant)
+            .and_then(|message| message.data_envelope.clone());
+        let message_id = format!("permission-pause-closed-{}", waiting.tool_call_id);
+        let mut message =
+            crate::chat::ChatMessage::tool_result(message_id, &waiting.tool_call_id, text);
+        message.turn_id = self.conversation[end - 1].turn_id.clone();
+        message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            parent.as_ref(),
+            &waiting.tool_call_id,
+            text,
+            "permission_pause_closed",
+        )?;
+        self.conversation.insert(end, message);
+        Ok(())
+    }
+
+    /// Release the paused call for the approval resume of `request_id`. It is
+    /// released only while its call group still ends the conversation; if other
+    /// messages arrived meanwhile, it is closed and the model calls it again.
+    pub fn release_awaiting_permission(&mut self, request_id: &str) -> Result<bool, AgentError> {
+        let Some(waiting) = self
+            .awaiting_permission
+            .as_ref()
+            .filter(|waiting| waiting.request_id == request_id)
+        else {
+            return Ok(false);
+        };
+        if self.call_group_end(&waiting.tool_call_id) == Some(self.conversation.len()) {
+            self.released_permission_call = self.awaiting_permission.take();
+            return Ok(true);
+        }
+        self.close_awaiting_permission(AWAITING_PERMISSION_INTERRUPTED)?;
+        Ok(false)
     }
 
     /// Recover an orphaned **active** session (its lease expired and was taken over)
@@ -3209,6 +3336,10 @@ fn recovery_message_id(tool_call_id: &str) -> String {
 /// Find tool-call ids that have no matching tool-result message — an assistant
 /// tool call left unanswered when a turn was interrupted mid-execution. Preserves
 /// first-seen order and de-duplicates.
+/// Result of a paused call whose wait ended without its approval resume.
+pub const AWAITING_PERMISSION_INTERRUPTED: &str =
+    "not executed: the wait for approval ended before this call ran; call it again if still needed";
+
 fn unclosed_tool_call_ids(conversation: &[crate::chat::ChatMessage]) -> Vec<String> {
     let answered: std::collections::HashSet<&str> = conversation
         .iter()
@@ -3317,6 +3448,114 @@ fn clone_initial_scope(scope: &AgentScope) -> AgentScope {
 mod tests {
     use super::*;
     use crate::chat::ChatMessage;
+
+    /// A paused group: `paused` waits for approval, `later` was not started.
+    fn paused_group() -> PersistedAgentSession {
+        let mut state = session();
+        let call = |id: &str| crate::chat::ToolCallRef {
+            id: id.into(),
+            name: "inspect_desktop_session".into(),
+            arguments_json: "{}".into(),
+        };
+        state.conversation.push(ChatMessage::assistant_tool_calls(
+            "assistant",
+            String::new(),
+            vec![call("paused"), call("later")],
+        ));
+        state.conversation.push(ChatMessage::tool_result(
+            "later-result",
+            "later",
+            "not executed",
+        ));
+        state.pause_for_permission("paused", "request");
+        state
+    }
+
+    fn results_for(state: &PersistedAgentSession, id: &str) -> Vec<usize> {
+        state
+            .conversation
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.tool_call_id.as_deref() == Some(id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn a_paused_call_is_not_open_and_is_released_only_at_the_conversation_end() {
+        let mut state = paused_group();
+        assert!(state.unclosed_tool_call_ids().is_empty());
+        assert!(!state.release_awaiting_permission("other").unwrap());
+        assert!(state.release_awaiting_permission("request").unwrap());
+        assert!(state.awaiting_permission.is_none());
+        // Released, it is an ordinary open call the resume dispatches.
+        assert_eq!(state.unclosed_tool_call_ids(), ["paused"]);
+
+        // A message after the group means the wait was interrupted.
+        let mut state = paused_group();
+        state
+            .conversation
+            .push(ChatMessage::text("completion", ChatRole::User, "result"));
+        assert!(!state.release_awaiting_permission("request").unwrap());
+        assert!(state.released_permission_call.is_none());
+        assert_eq!(
+            results_for(&state, "paused"),
+            [2],
+            "closed inside its group"
+        );
+        assert_eq!(state.conversation[3].message_id, "completion");
+    }
+
+    #[test]
+    fn a_reused_call_id_from_an_earlier_turn_does_not_hide_the_paused_call() {
+        let mut earlier = session();
+        earlier.conversation.push(ChatMessage::assistant_tool_calls(
+            "earlier",
+            String::new(),
+            vec![crate::chat::ToolCallRef {
+                id: "paused".into(),
+                name: "inspect_desktop_session".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        earlier
+            .conversation
+            .push(ChatMessage::tool_result("earlier-result", "paused", "done"));
+        let mut state = paused_group();
+        earlier.conversation.append(&mut state.conversation);
+        state.conversation = earlier.conversation;
+        state.close_awaiting_permission("not executed").unwrap();
+        assert_eq!(results_for(&state, "paused"), [1, 4]);
+    }
+
+    #[test]
+    fn any_other_claim_or_new_input_closes_the_paused_call_inside_its_group() {
+        let mut state = paused_group();
+        state
+            .begin_turn(
+                "turn",
+                None,
+                None,
+                state.policy_revision,
+                state.scope_snapshot.clone(),
+                "2026-11-11T00:00:00Z",
+            )
+            .unwrap();
+        assert!(state.awaiting_permission.is_none());
+        assert_eq!(results_for(&state, "paused"), [2]);
+        assert!(
+            state.conversation[2]
+                .text
+                .starts_with(AWAITING_PERMISSION_INTERRUPTED)
+        );
+
+        let mut state = paused_group();
+        let next = state.input_revision + 1;
+        state.begin_focus_epoch(next, Vec::new()).unwrap();
+        assert!(state.awaiting_permission.is_none());
+        assert_eq!(results_for(&state, "paused"), [2]);
+        assert!(state.conversation[2].text.contains("new owner message"));
+    }
     #[test]
     fn boxed_decode_preserves_full_validation_and_the_exact_stored_state() {
         let original = session();

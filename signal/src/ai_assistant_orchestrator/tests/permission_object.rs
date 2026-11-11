@@ -161,16 +161,26 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     let capability = registry.capability_for_tool(read_name).unwrap();
     let mut replies = vec![
         // The direct read pauses as its own approval request.
+        // The direct read pauses as its own approval request; once approved
+        // the server runs it, so the model answers next without repeating it.
         tool_reply_with_id("call-proposal", read_name, serde_json::json!({})),
-        tool_reply(read_name, serde_json::json!({})),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
     if matches!(
         change,
         Some("readiness" | "legacy" | "live_after" | "live_target" | "scheduled_revoke")
     ) {
-        replies[2] = replies[2].replace("object-read-complete", "object-read-unavailable");
+        replies[1] = replies[1].replace("object-read-complete", "object-read-unavailable");
     }
+    // A scheduled continuation claims the decision instead of the approval
+    // resume: the wait is closed and the model calls the read again.
+    if matches!(
+        mode,
+        ResumeMode::Scheduled | ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop
+    ) {
+        replies.insert(1, tool_reply(read_name, serde_json::json!({})));
+    }
+    let answer_index = replies.len() - 1;
     let expect_title = !matches!(
         mode,
         ResumeMode::Scheduled | ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop
@@ -179,7 +189,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         let mut bodies = Vec::new();
         let mut title = None;
         for (index, reply) in replies.into_iter().enumerate() {
-            if index == 2 && expect_title {
+            if index == answer_index && expect_title {
                 let (answer, naming) = capture_openai_answer_with_title(&listener, &reply).await;
                 bodies.push(answer);
                 title = Some(naming);
@@ -869,9 +879,11 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies.len(), answer_index + 1);
         assert_eq!(title.is_some(), expect_title);
-        assert!(!String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"));
+        assert!(
+            !String::from_utf8_lossy(&bodies[answer_index]).contains("synthetic-original-marker")
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(25), socket.next())
                 .await
@@ -908,7 +920,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies.len(), answer_index + 1);
         assert!(title.is_none());
         assert!(
             bodies
@@ -1048,7 +1060,7 @@ tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec!
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(bodies.len(), 3);
+            assert_eq!(bodies.len(), answer_index + 1);
             assert!(title.is_some());
             assert_eq!(
                 receipt_count,
@@ -1202,10 +1214,10 @@ tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec!
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies.len(), answer_index + 1);
     assert_eq!(title.is_some(), expect_title);
     assert_eq!(
-        String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"),
+        String::from_utf8_lossy(&bodies[answer_index]).contains("synthetic-original-marker"),
         change != Some("live_after")
     );
     assert!(
@@ -1238,21 +1250,21 @@ tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec!
     let durable =
         desk_diagnose_core::session::PersistedAgentSession::decode_json(&durable.state_json)
             .unwrap();
-    let bridge = durable
-        .conversation
-        .iter()
-        .find(|message| {
-            desk_diagnose_core::permission_resume::is_permission_resume_message(message)
-        })
-        .unwrap();
+    // A released call's own result continues the request with no resume
+    // bridge; a scheduled continuation keeps its bridge and a repeated call.
     assert_eq!(
-        bridge
-            .data_envelope
-            .as_ref()
-            .unwrap()
-            .provenance
-            .source_envelope_ids
-            .len(),
+        durable
+            .conversation
+            .iter()
+            .any(desk_diagnose_core::permission_resume::is_permission_resume_message),
+        answer_index > 1
+    );
+    assert_eq!(
+        durable
+            .conversation
+            .iter()
+            .filter(|message| message.tool_call_id.as_deref() == Some("call-proposal"))
+            .count(),
         1
     );
     if scanner {

@@ -1546,25 +1546,34 @@ fn same_permission_action(
         && left.launch_confirmation == right.launch_confirmation
 }
 
-/// Locate the assistant call whose result recorded `request_id` as a new
-/// pending proposal: an explicit `request_permissions` call or a direct tool
-/// call paused for approval. Returns (message index, call index).
+/// Locate the assistant call that proposed `request_id`: an explicit
+/// `request_permissions` call whose result recorded it, or the direct call it
+/// was synthesized from (its first item id is that call's id). Returns
+/// (message index, call index).
 pub fn proposing_call(
-    conversation: &[crate::chat::ChatMessage],
+    session: &crate::session::PersistedAgentSession,
     request_id: &str,
 ) -> Option<(usize, usize)> {
-    let (result_index, call_id) =
-        conversation
-            .iter()
-            .enumerate()
-            .find_map(|(index, message)| {
-                let call_id = message.tool_call_id.as_deref()?;
-                let value: serde_json::Value = serde_json::from_str(&message.text).ok()?;
-                (value.get("status")?.as_str()? == "pending_user_decision"
-                    && value.get("request_id")?.as_str()? == request_id)
-                    .then_some((index, call_id))
-            })?;
-    conversation[..result_index]
+    let conversation = &session.conversation;
+    let call_id = conversation
+        .iter()
+        .find_map(|message| {
+            let call_id = message.tool_call_id.as_deref()?;
+            let value: serde_json::Value = serde_json::from_str(&message.text).ok()?;
+            (value.get("status")?.as_str()? == "pending_user_decision"
+                && value.get("request_id")?.as_str()? == request_id)
+                .then_some(call_id)
+        })
+        .or_else(|| {
+            session
+                .permission_requests
+                .iter()
+                .find(|request| request.request_id == request_id)?
+                .items
+                .first()
+                .map(|item| item.item_id.as_str())
+        })?;
+    conversation
         .iter()
         .enumerate()
         .rev()
@@ -1717,13 +1726,6 @@ fn synthesized_reason(conversation: &[crate::chat::ChatMessage], call_id: &str) 
         end -= 1;
     }
     text[..end].into()
-}
-
-/// The paused direct call's result, identical to a published task's pause.
-/// Only a later decision can mint a grant.
-pub(crate) fn call_pending_result(request_id: &str, item_count: usize) -> serde_json::Value {
-    json!({"status":"pending_user_decision", "request_id":request_id,
-        "item_count":item_count, "authority":"none", "executed":false})
 }
 
 /// Source label of a direct call's permission control result.

@@ -171,11 +171,24 @@ async fn run_desktop_history_case(
             read_name,
             if read_name == "inspect_desktop_ui" { serde_json::json!({"queries":["Calendar"]}) } else { serde_json::json!({}) },
         ),
-        tool_reply(read_name, if read_name == "inspect_desktop_ui" { serde_json::json!({"queries":["Calendar"]}) } else { serde_json::json!({}) }),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
-    if !approve {
-        replies.remove(2);
+    // An approval resume runs the paused call itself. A goal continuation or a
+    // new owner message closes the wait instead, so the model calls the read
+    // again there.
+    let repeats = goal_route || ordinary_followup;
+    if repeats && approve {
+        replies.insert(
+            2,
+            tool_reply(
+                read_name,
+                if read_name == "inspect_desktop_ui" {
+                    serde_json::json!({"queries":["Calendar"]})
+                } else {
+                    serde_json::json!({})
+                },
+            ),
+        );
     }
     if concrete {
         replies[0] = tool_reply(
@@ -195,11 +208,14 @@ async fn run_desktop_history_case(
         };
         // The first UI call pauses for its application approval; the same
         // call runs after approval.
+        let at = replies.len() - 1;
         replies.insert(
-            3,
+            at,
             tool_reply_with_id("call-ui-permission", "execute_ui_actions", ui_input.clone()),
         );
-        replies.insert(4, tool_reply("execute_ui_actions", ui_input));
+        if repeats {
+            replies.insert(at + 1, tool_reply("execute_ui_actions", ui_input));
+        }
     }
     if goal_route {
         *replies.last_mut().unwrap() = tool_reply(
@@ -893,12 +909,16 @@ async fn run_desktop_history_case(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(bodies.len(), if concrete { 6 } else { 4 });
+    let repeated = usize::from(repeats);
+    assert_eq!(
+        bodies.len(),
+        3 + repeated + usize::from(concrete) * (1 + repeated)
+    );
     for body in &bodies {
         let request: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(request["max_tokens"], 128_000);
     }
-    let model_body = String::from_utf8_lossy(&bodies[3]);
+    let model_body = String::from_utf8_lossy(&bodies[2 + repeated]);
     if read_name == "inspect_desktop_ui" {
         assert!(model_body.contains("DesktopUiInspect"));
         assert!(!model_body.contains("synthetic-original-marker"));

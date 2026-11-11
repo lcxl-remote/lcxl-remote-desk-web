@@ -26,6 +26,8 @@ pub fn stop_main_session(
         .checked_add(1)
         .filter(|value| *value <= i64::MAX as u64)
         .ok_or("main lease exhausted")?;
+    next.close_awaiting_permission("not executed: the owner stopped generation before approval")
+        .map_err(|_| "paused permission call is missing")?;
     let content = "tool result unavailable after the owner stopped generation; do not infer success, nonexecution, or permission to retry";
     for call_id in next.unclosed_tool_call_ids() {
         let label = next

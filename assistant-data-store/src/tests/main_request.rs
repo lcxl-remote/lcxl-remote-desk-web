@@ -174,6 +174,13 @@ fn native_subagent_wait_and_ready_resume_retain_the_original_slot() {
     assert!(queue::holds_input_slot(&session));
     session.ready_subagent_wait = None;
     assert!(!queue::holds_input_slot(&session));
+    // A call waiting for approval, then released to run, keeps input queued.
+    session.pause_for_permission("call", "request");
+    assert!(queue::holds_input_slot(&session));
+    session.released_permission_call = session.awaiting_permission.take();
+    assert!(queue::holds_input_slot(&session));
+    session.released_permission_call = None;
+    assert!(!queue::holds_input_slot(&session));
 }
 
 #[tokio::test]

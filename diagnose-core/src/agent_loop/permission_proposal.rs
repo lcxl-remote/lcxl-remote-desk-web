@@ -2,6 +2,7 @@
 use super::*;
 
 /// Turn-local inputs the permission planner needs besides the session itself.
+#[derive(Clone, Copy)]
 pub(super) struct ProposalContext<'a> {
     pub authority: Option<&'a crate::grant_disclosure::GrantDisclosureSnapshot>,
     pub request_devices: &'a [crate::request_devices::RequestDevice],
@@ -295,26 +296,25 @@ pub(super) async fn propose<F: FnMut() -> String>(
                 deps.session_seam.save(session).await?;
                 return Ok(None);
             }
-            let content = if synthesized {
-                crate::permission_tools::call_pending_result(
-                    &request.request_id,
-                    request.items.len(),
-                )
-            } else {
-                serde_json::json!({
-                    "status": "pending_user_decision",
-                    "request_id": request.request_id,
-                    "item_count": request.items.len(),
-                    "authority": "none"
-                })
-            }
+            // A direct call keeps no result while it waits: its approval
+            // resume runs it, and any other continuation closes it first.
+            let content = serde_json::json!({
+                "status": "pending_user_decision",
+                "request_id": request.request_id,
+                "item_count": request.items.len(),
+                "authority": "none"
+            })
             .to_string();
-            let result_envelope = derive_internal_tool_result_envelope(
-                parent_envelope,
-                &call.id,
-                &content,
-                source_name,
-            )?;
+            let result_envelope = if synthesized {
+                None
+            } else {
+                derive_internal_tool_result_envelope(
+                    parent_envelope,
+                    &call.id,
+                    &content,
+                    source_name,
+                )?
+            };
             let event_seq = session
                 .last_event_seq
                 .checked_add(1)
@@ -356,9 +356,11 @@ pub(super) async fn propose<F: FnMut() -> String>(
                 safe_for_model: false,
                 error_code: None,
             })?;
-            let mut message = ChatMessage::tool_result(mint(), &call.id, content);
-            message.data_envelope = result_envelope;
-            session.conversation.push(message);
+            if !synthesized {
+                let mut message = ChatMessage::tool_result(mint(), &call.id, content);
+                message.data_envelope = result_envelope;
+                session.conversation.push(message);
+            }
             append_unstarted_tool_results(
                 session,
                 remaining,
@@ -367,6 +369,9 @@ pub(super) async fn propose<F: FnMut() -> String>(
                 "not executed: waiting for user permission decision",
                 "permission_pause_tool_call",
             )?;
+            if synthesized {
+                session.pause_for_permission(&call.id, &request.request_id);
+            }
             session
                 .add_permission_request(request.clone())
                 .map_err(|error| AgentError {

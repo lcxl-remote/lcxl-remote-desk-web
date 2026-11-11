@@ -794,6 +794,12 @@ async fn drive_claimed_inner(
     // Append the user input or server control bridge, when supplied, and persist
     // before the first model call. Completion-only turns use the existing tail.
     let mut newer_user_inputs_after_request = 0_u64;
+    // A released paused call is itself the continuation: its result follows its
+    // call group directly, so the permission-resume bridge is not appended.
+    let to_append = to_append.filter(|message| {
+        session.released_permission_call.is_none()
+            || !crate::permission_resume::is_permission_resume_message(message)
+    });
     if let Some(message) = to_append {
         let message = message.with_turn_id(turn_id.clone());
         if let Some(position) = session
@@ -4452,6 +4458,8 @@ async fn run_wait<F: FnMut() -> String>(
 mod tests;
 
 mod permission_proposal;
+mod read_call;
+mod released_dispatch;
 mod task_permission;
 
 async fn read_conversation_attachment(

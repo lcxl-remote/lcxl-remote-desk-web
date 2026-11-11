@@ -207,6 +207,10 @@ pub fn holds_input_slot(session: &PersistedAgentSession) -> bool {
         || session.subagent_wait.is_some()
         || session.ready_subagent_wait.is_some()
         || session.ready_subagent_notification.is_some()
+        // A call waiting for approval, or released to run, is still in flight:
+        // new owner input queues behind it.
+        || session.awaiting_permission.is_some()
+        || session.released_permission_call.is_some()
         || session.permission_requests.iter().any(|permission| {
             permission.input_revision == session.input_revision
                 && permission.state

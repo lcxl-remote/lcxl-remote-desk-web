@@ -1142,9 +1142,8 @@ pub fn preflight_review_capacity(
     if requires_owner_decision(request) {
         return Ok(());
     }
-    if let Some(proposal) =
-        crate::permission_tools::proposing_call(&session.conversation, &request.request_id)
-            .map(|(message, _)| &session.conversation[message])
+    if let Some(proposal) = crate::permission_tools::proposing_call(session, &request.request_id)
+        .map(|(message, _)| &session.conversation[message])
     {
         let bytes = crate::model_egress::message_content_bytes(proposal)
             .map_err(|_| ApprovalReviewError::InvalidContext)?;
@@ -1706,7 +1705,7 @@ fn skipped_calls_for_authority(
     let mut skipped = Vec::new();
     for request_id in requests {
         let Some((index, call_index)) =
-            crate::permission_tools::proposing_call(&session.conversation, request_id)
+            crate::permission_tools::proposing_call(session, request_id)
         else {
             continue;
         };

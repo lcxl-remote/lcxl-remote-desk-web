@@ -100,10 +100,9 @@ pub fn authorize_permission_review_egress(
     let user = session
         .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
-    let action_source =
-        crate::permission_tools::proposing_call(&session.conversation, &request.request_id)
-            .map(|(message, _)| &session.conversation[message])
-            .ok_or(ApprovalReviewError::InvalidContext)?;
+    let action_source = crate::permission_tools::proposing_call(session, &request.request_id)
+        .map(|(message, _)| &session.conversation[message])
+        .ok_or(ApprovalReviewError::InvalidContext)?;
 
     let mut source_ids = BTreeSet::new();
     source_ids.insert(user.message_id.as_str());
@@ -284,7 +283,8 @@ pub fn authorize_source_review_egress(
         .iter()
         .find(|message| {
             message.role == ChatRole::Assistant
-                && message.turn_id.as_deref() == Some(binding.turn_id)
+                && (message.turn_id.as_deref() == Some(binding.turn_id)
+                    || released_by_approval(session, binding.tool_call_id))
                 && message
                     .tool_calls
                     .iter()
@@ -343,6 +343,15 @@ pub fn authorize_source_review_egress(
         now_unix_ms,
         source_ids,
     )
+}
+
+/// The call an approval resume released was issued in the turn that paused
+/// for that approval, not in the resume turn that now runs it.
+fn released_by_approval(session: &PersistedAgentSession, tool_call_id: &str) -> bool {
+    session
+        .released_permission_call
+        .as_ref()
+        .is_some_and(|released| released.tool_call_id == tool_call_id)
 }
 
 pub fn validate_source_review_current(
@@ -405,7 +414,8 @@ pub fn validate_source_review_current(
         .iter()
         .find(|message| {
             message.role == ChatRole::Assistant
-                && message.turn_id.as_deref() == Some(binding.turn_id)
+                && (message.turn_id.as_deref() == Some(binding.turn_id)
+                    || released_by_approval(session, binding.tool_call_id))
                 && message
                     .tool_calls
                     .iter()

@@ -2161,39 +2161,8 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             reply("command-selected")
         })
         .await;
-        if stream_resume {
-            capture_one_openai_request_with_reply(&listener, |body| {
-                let request: Value = serde_json::from_slice(body).unwrap();
-                let [tool] = request["tools"].as_array().unwrap().as_slice() else {
-                    panic!("only the approved command should be offered during resume");
-                };
-                assert_eq!(tool["function"]["name"], "exec_command");
-                assert_eq!(request["tool_choice"], "required");
-                memory_sse(json!({"tool_calls":[{"index":0,"id":"unrelated-read","type":"function","function":{
-                    "name":"read_system_info","arguments":"{\"target_ref\":\"command-selected\"}"
-                }}]}), "tool_calls")
-            }).await;
-        }
-        capture_one_openai_request_with_reply(&listener, |body| {
-            let request: Value = serde_json::from_slice(body).unwrap();
-            let spec = request["tools"].as_array().unwrap().iter()
-                .find(|tool| tool["function"]["name"] == "exec_command")
-                .unwrap_or_else(|| panic!("approved command is missing: {request}"));
-            if stream_resume {
-                assert_eq!(request["tools"].as_array().unwrap().len(), 1);
-                assert!(request["messages"].as_array().unwrap().iter().any(|message| {
-                    message["role"] == "tool"
-                        && message["tool_call_id"] == "unrelated-read"
-                        && message["content"].as_str().is_some_and(|text| text.contains("tool_not_advertised"))
-                }));
-            }
-            assert!(spec["function"]["parameters"]["properties"].get("target_ref").is_some());
-            assert!(!spec["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
-            memory_sse(json!({"tool_calls":[{"index":0,"id":"execute-selected","type":"function","function":{
-                "name":"exec_command","arguments":json!({"target_ref":"command-selected",
-                    "shell":"bash","command":"df -h","timeout_ms":1000,"io_mode":"non_interactive"}).to_string()
-            }}]}), "tool_calls")
-        }).await;
+        // Once approved, the server runs the paused command itself; the model
+        // is neither forced nor asked to call it again.
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             if background {
@@ -3290,40 +3259,11 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 // The direct call carries the device; its missing grant becomes the proposal.
                 let mut direct = directory_exact.as_ref().unwrap_or(&exact).clone();
                 direct["target_ref"] = json!(target);
-                tool_reply_with_id("call-proposal", name, direct)
+                tool_reply_with_id(&format!("proposal-{name}"), name, direct)
             })
             .await;
-            capture_one_openai_request_with_reply(&listener, |body| {
-                let request: Value = serde_json::from_slice(body).unwrap();
-                let advertised = request["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|t| t["function"]["name"] == name)
-                    .unwrap_or_else(|| panic!("{name} was not restored"));
-                assert!(
-                    advertised["function"]["parameters"]["properties"]
-                        .get("target_ref")
-                        .is_some()
-                );
-                assert!(
-                    !advertised["function"]["parameters"]["required"]
-                        .as_array()
-                        .is_some_and(|required| required.contains(&json!("target_ref")))
-                );
-                assert_eq!(
-                    advertised["function"]["parameters"]["properties"]
-                        .get("window_id")
-                        .is_some(),
-                    name == "read_current_screen",
-                );
-                let mut arguments = directory_exact.clone().unwrap_or_else(|| exact.clone());
-                if !live {
-                    arguments["target_ref"] = json!(target);
-                }
-                tool_reply(name, arguments)
-            })
-            .await;
+            // Once approved, the server runs the paused read; the next model
+            // request already carries its result.
             capture_one_openai_request_with_reply(&listener, |body| {
                 let request: Value = serde_json::from_slice(body).unwrap();
                 let messages = request["messages"].to_string();
@@ -3723,7 +3663,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 .messages
                 .iter()
                 .find(|message| {
-                    message.tool_call_id.as_deref() == Some("call-inspect_files")
+                    message.tool_call_id.as_deref() == Some("proposal-inspect_files")
                         && message.tool_ok == Some(true)
                 })
                 .expect("verified directory listing");
@@ -4214,6 +4154,8 @@ async fn targetless_web_decision_resumes_the_original_model_turn_without_a_host(
                 "arguments":json!({"url":"https://docs.example.invalid/guide"}).to_string(),
             }}]}), "tool_calls")
         }).await;
+        // Once approved, the server fetches the page itself; the model's next
+        // request already carries the paused call's result.
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             assert_targetless_web_tools(&request, true);
@@ -4223,25 +4165,7 @@ async fn targetless_web_decision_resumes_the_original_model_turn_without_a_host(
                     .unwrap()
                     .iter()
                     .any(|message| {
-                        message["role"] == "user" && message["content"] == "Read the public guide"
-                    })
-            );
-            super::permission_object::tool_reply(
-                "fetch_public_web_page",
-                json!({"url":"https://docs.example.invalid/guide"}),
-            )
-        })
-        .await;
-        capture_one_openai_request_with_reply(&listener, |body| {
-            let request: Value = serde_json::from_slice(body).unwrap();
-            assert!(
-                request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| {
-                        message["role"] == "tool"
-                            && message["tool_call_id"] == "call-fetch_public_web_page"
+                        message["role"] == "tool" && message["tool_call_id"] == "request-web-read"
                     })
             );
             memory_sse(
@@ -5242,19 +5166,8 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool
             tool_reply_with_id("call-proposal", name, exact.clone())
         })
         .await;
-        capture_one_openai_request_with_reply(&listener, |body| {
-            let request: Value = serde_json::from_slice(body).unwrap();
-            assert!(
-                request["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|tool| tool["function"]["name"] == name),
-                "{request}"
-            );
-            tool_reply(name, exact.clone())
-        })
-        .await;
+        // Once approved, the server runs the paused call; the model sees its
+        // result next without calling it again.
         if !artifact {
             capture_one_openai_request_with_reply(&listener, |body| {
                 let request: Value = serde_json::from_slice(body).unwrap();
@@ -5264,8 +5177,7 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool
                     .iter()
                     .rev()
                     .find(|message| {
-                        message["role"] == "tool"
-                            && message["tool_call_id"] == "call-browser_open_page"
+                        message["role"] == "tool" && message["tool_call_id"] == "call-proposal"
                     })
                     .expect("the model received the selected device's browser receipt");
                 let text = result["content"].as_str().unwrap();

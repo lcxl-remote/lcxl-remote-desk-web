@@ -565,6 +565,11 @@ impl SignalAgentSessionStore {
         {
             return Err(ClaimError::Busy);
         }
+        // Release the call this approval paused, in the same claim transaction:
+        // only this resume dispatches it, and a failed claim rolls the release back.
+        session
+            .release_awaiting_permission(request_id)
+            .map_err(|_| ClaimError::Backend(invalid()))?;
         session
             .begin_turn(
                 params.turn_id.clone(),
