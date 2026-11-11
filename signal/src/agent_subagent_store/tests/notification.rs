@@ -98,51 +98,36 @@ pub(super) async fn answer(
 }
 
 #[tokio::test]
-async fn completion_updates_the_original_projection_without_claiming_a_new_turn() {
-    let db = database().await;
-    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
-    let store = SubAgentStore::new(db.clone());
-    let task = store
-        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
-        .await
-        .unwrap();
-    super::main_tools::complete_child(&db, &task.task_id).await;
-    let before = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq("root"))
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    let projection = store.main_projection_for_turn(&parent).await.unwrap();
-    let payload: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
-    assert!(
-        payload["runtime_delegation_state"]["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value["task"]["task_id"] == task.task_id
-                && value["task"]["state"] == "completed")
-    );
-    assert!(
-        store
-            .parent_runtime_candidate("root", "1", "1")
+async fn a_finished_required_request_wakes_the_idle_parent_and_an_optional_one_does_not() {
+    for required in [true, false] {
+        let db = database().await;
+        let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+        let store = SubAgentStore::new(db.clone());
+        let task = store
+            .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
             .await
-            .unwrap()
-            .is_none()
-    );
-    let after = session_row::Entity::find_by_id(before.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(before, after);
-    release_parent(&db, &mut parent).await;
-    let before = session_row::Entity::find_by_id(before.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    for _ in 0..3 {
+            .unwrap();
+        if !required {
+            // The same request admitted as optional work.
+            let row = group_row::Entity::find().one(&db).await.unwrap().unwrap();
+            let mut group = decode_group(&row).unwrap();
+            group.required_task_ids.retain(|id| id != &task.task_id);
+            crate::agent_subagent_store::budget::replace_group_on(&db, &row, &group, 1)
+                .await
+                .unwrap();
+        }
+        super::main_tools::complete_child(&db, &task.task_id).await;
+        let projection = store.main_projection_for_turn(&parent).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
+        assert!(
+            payload["runtime_delegation_state"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value["task"]["task_id"] == task.task_id
+                    && value["task"]["state"] == "completed")
+        );
+        // A running parent turn is never interrupted.
         assert!(
             store
                 .parent_runtime_candidate("root", "1", "1")
@@ -150,30 +135,36 @@ async fn completion_updates_the_original_projection_without_claiming_a_new_turn(
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            store
-                .root_wait_candidates(0, 32)
-                .await
-                .unwrap()
-                .0
-                .is_empty()
-        );
-    }
-    let after = session_row::Entity::find_by_id(before.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(before, after);
-    assert!(parent.ready_subagent_notification.is_none());
-    assert!(
-        inbox::Entity::find()
-            .all(&db)
+        release_parent(&db, &mut parent).await;
+        let selected = !store
+            .root_wait_candidates(0, 32)
             .await
             .unwrap()
+            .0
+            .is_empty();
+        assert_eq!(selected, required);
+        let candidate = store
+            .parent_runtime_candidate("root", "1", "1")
+            .await
+            .unwrap();
+        assert_eq!(candidate.is_some(), required);
+        let stored = super::paused_permission::session(&db, "root").await;
+        if !required {
+            assert!(stored.ready_subagent_notification.is_none());
+            continue;
+        }
+        let notification = stored.ready_subagent_notification.as_ref().unwrap();
+        assert_eq!(notification.events.len(), 1);
+        assert_eq!(notification.events[0].task_id, task.task_id);
+        let message = stored
+            .conversation
             .iter()
-            .all(|event| event.model_notified_at_ms.is_none())
-    );
+            .find(|message| message.message_id == notification.message_id)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&message.text).unwrap();
+        assert_eq!(payload["tasks"][0]["task_id"], task.task_id);
+        assert!(payload["tasks"][0].get("failure_reason").is_some());
+    }
 }
 
 #[tokio::test]

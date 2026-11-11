@@ -402,6 +402,14 @@ pub(crate) async fn prepare_notification_on(
     };
     let group = decode_group(&source)?;
     let now = chrono::Utc::now();
+    // An ordinary conversation is only woken after a turn that ended normally.
+    if matches!(
+        group.source,
+        desk_diagnose_core::subagent::DelegationSource::UserInput { .. }
+    ) && parent.turn_state != TurnState::Idle
+    {
+        return Ok(false);
+    }
     if !group.can_interpret(parent.input_revision, parent.control_revision)
         || now.timestamp_millis() >= group.limits.deadline_ms
         || !(matches!(
@@ -446,6 +454,10 @@ pub(crate) async fn prepare_notification_on(
             if !run.state.is_terminal()
                 || run.state_revision as i64 != candidate.state_revision
                 || run.binding.group_id != group.group_id
+                || (matches!(
+                    group.source,
+                    desk_diagnose_core::subagent::DelegationSource::UserInput { .. }
+                ) && !group.required_task_ids.contains(&run.binding.task_id))
             {
                 continue;
             }
@@ -466,7 +478,10 @@ pub(crate) async fn prepare_notification_on(
                 task_id: run.binding.task_id.clone(),
                 state_revision: run.state_revision,
             });
-            tasks.push(run.summary());
+            let mut task = serde_json::to_value(run.summary()).map_err(|_| invalid())?;
+            // The server's failure code tells why a request ended without a report.
+            task["failure_reason"] = serde_json::json!(run.failure_reason);
+            tasks.push(task);
         }
         if events.is_empty() {
             return Ok(false);
@@ -521,7 +536,7 @@ pub(crate) async fn prepare_notification_on(
 
 /// Drop a spent or obsolete wake without changing report history. A retryable
 /// provider failure keeps the original marker and its durable retry time.
-pub(crate) async fn prepare_workbench_wake_on(
+pub(crate) async fn prepare_parent_wake_on(
     txn: &DatabaseTransaction,
     parent: &mut PersistedAgentSession,
 ) -> Result<Option<(DelegationGroup, CreationEnvelope)>, DbErr> {
@@ -536,13 +551,14 @@ pub(crate) async fn prepare_workbench_wake_on(
                 return Ok(None);
             }
             if let Some(source) = ready_notification_source_on(txn, parent).await? {
-                if workbench_wake_waits_for_batch_on(
-                    txn,
-                    parent,
-                    &source.1.model_destination,
-                    chrono::Utc::now().timestamp_millis(),
-                )
-                .await?
+                if parent.has_workbench_report_notification()
+                    && workbench_wake_waits_for_batch_on(
+                        txn,
+                        parent,
+                        &source.1.model_destination,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .await?
                 {
                     return Ok(None);
                 }

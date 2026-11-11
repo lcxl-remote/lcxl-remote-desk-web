@@ -7,6 +7,34 @@ pub(super) use desk_assistant_data_store::worker_request::is_worker_head_on;
 
 type RootWaitPage = (Vec<group_row::Model>, Option<i64>);
 
+/// An idle ordinary conversation is woken when a required request of its
+/// current delegation group finished and the parent has not been told yet.
+/// Other finished requests reach the parent at its next model call.
+fn required_terminal_wakes(
+    session: &PersistedAgentSession,
+    row: &group_row::Model,
+    terminals: &[desk_assistant_data_store::worker_report::PendingTerminal],
+) -> Result<bool, DbErr> {
+    // A parent whose last turn failed or was stopped is not revived.
+    if session.turn_state != desk_diagnose_core::session::TurnState::Idle
+        || session.agent_role.workbench_request_id().is_some()
+        || session.ready_subagent_notification.is_some()
+        || session.delegation_group_id.as_deref() != Some(row.group_id.as_str())
+    {
+        return Ok(false);
+    }
+    let group = decode_group(row)?;
+    Ok(matches!(
+        group.source,
+        desk_diagnose_core::subagent::DelegationSource::UserInput { .. }
+    ) && terminals.iter().any(|terminal| {
+        terminal.group_id == row.group_id
+            && group.required_task_ids.contains(&terminal.task_id)
+            && terminal.parent_input_revision == session.input_revision as i64
+            && terminal.parent_control_revision == session.control_revision as i64
+    }))
+}
+
 impl SubAgentStore {
     pub async fn queued_task_candidates(
         &self,
@@ -79,6 +107,11 @@ impl SubAgentStore {
                 chrono::Utc::now().timestamp_millis(),
             )
             .await?;
+            let terminals = desk_assistant_data_store::worker_report::pending_terminal_events_on(
+                &self.db,
+                rows.iter().map(|row| row.group_id.clone()),
+            )
+            .await?;
             let mut seen = std::collections::BTreeSet::new();
             let mut candidates = Vec::new();
             for row in rows {
@@ -109,7 +142,8 @@ impl SubAgentStore {
                         || (session.agent_role.workbench_request_id().is_some()
                             && session.delegation_group_id.as_deref()
                                 == Some(row.group_id.as_str())
-                            && wake_groups.contains(&row.group_id)))
+                            && wake_groups.contains(&row.group_id))
+                        || required_terminal_wakes(&session, &row, &terminals)?)
                 {
                     candidates.push(row);
                 }
@@ -235,10 +269,10 @@ impl SubAgentStore {
         }
         let source = if session.ready_subagent_wait.is_some() {
             super::parent_wait::ready_parent_source_on(&txn, &session).await?
-        } else if session.agent_role.workbench_request_id().is_some() {
-            super::notification::prepare_workbench_wake_on(&txn, &mut session).await?
         } else {
-            None
+            // A workbench report or a finished required request of an ordinary
+            // conversation wakes the idle parent through one server notification.
+            super::notification::prepare_parent_wake_on(&txn, &mut session).await?
         };
         let Some((group, source)) = source else {
             txn.commit().await?;

@@ -93,7 +93,7 @@ pub(crate) async fn ready_parent_source_on(
     txn: &crate::config::connection::DatabaseTransaction,
     parent: &PersistedAgentSession,
 ) -> Result<Option<(DelegationGroup, CreationEnvelope)>, DbErr> {
-    if parent.has_workbench_report_notification() {
+    if parent.ready_subagent_wait.is_none() && parent.ready_subagent_notification.is_some() {
         return super::notification::ready_notification_source_on(txn, parent).await;
     }
     Ok(ready_wait_source_on(txn, parent)

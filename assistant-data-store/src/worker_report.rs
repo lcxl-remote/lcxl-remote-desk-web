@@ -409,6 +409,41 @@ pub async fn pending_wake_groups_on(
         .await
 }
 
+/// A finished delegated request the parent has not been told about yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTerminal {
+    pub group_id: String,
+    pub task_id: String,
+    pub parent_input_revision: i64,
+    pub parent_control_revision: i64,
+}
+
+/// Terminal state events of these groups that no parent turn has delivered,
+/// observed or interpreted. They are server facts and carry no report text.
+pub async fn pending_terminal_events_on(
+    db: &impl ConnectionTrait,
+    groups: impl IntoIterator<Item = String>,
+) -> Result<Vec<PendingTerminal>, DbErr> {
+    Ok(inbox::Entity::find()
+        .filter(inbox::Column::GroupId.is_in(groups))
+        .filter(inbox::Column::EventKind.is_in(["completed", "failed", "cancelled"]))
+        .filter(inbox::Column::NotificationAttemptedTurnId.is_null())
+        .filter(inbox::Column::ModelNotifiedAtMs.is_null())
+        .filter(inbox::Column::ModelObservedAtMs.is_null())
+        .filter(inbox::Column::InterpretedAtMs.is_null())
+        .filter(inbox::Column::WakeRetiredAtMs.is_null())
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| PendingTerminal {
+            group_id: row.group_id,
+            task_id: row.task_id,
+            parent_input_revision: row.parent_input_revision,
+            parent_control_revision: row.parent_control_revision,
+        })
+        .collect())
+}
+
 /// Select new wake candidates or reload the exact records of a prepared wake.
 /// Delivery and interpretation are tracked separately on the same reports.
 pub async fn wake_reports_on<C: ConnectionTrait>(

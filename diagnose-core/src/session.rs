@@ -1653,8 +1653,10 @@ impl PersistedAgentSession {
             && (self.subagent_result_only || self.ready_subagent_notification.is_some())
     }
 
+    /// A main conversation has a ready subtask result: an explicit wait that
+    /// became ready, or a server notification of finished delegated work.
     pub fn has_ready_subagent_completion(&self) -> bool {
-        self.ready_subagent_wait.is_some() || self.has_workbench_report_notification()
+        self.ready_subagent_wait.is_some() || self.ready_subagent_notification.is_some()
     }
 
     pub fn has_workbench_report_notification(&self) -> bool {
