@@ -229,19 +229,16 @@ impl TaskCreationEnvelope {
     }
 }
 
-/// The requesting assistant message is already labeled from the actual model
-/// input. Its label keeps omitted, compacted and sensitive input restrictions.
-pub fn task_context(
-    source: CreationEnvelope,
-    parent: &PersistedAgentSession,
+/// The lineage of the assistant message that issued `call`. Newest first: a
+/// provider may reuse a call ID in a later turn.
+fn caller_envelope<'a>(
+    parent: &'a PersistedAgentSession,
     call: &crate::chat::ToolCall,
-    child_id: &str,
-    request: &super::tools::SpawnRequest,
-) -> Result<TaskCreationEnvelope, AgentError> {
-    source.validate()?;
-    let caller = parent
+) -> Option<&'a DataEnvelope> {
+    parent
         .conversation
         .iter()
+        .rev()
         .find(|message| {
             message.role == ChatRole::Assistant
                 && message.tool_calls.iter().any(|reference| {
@@ -256,6 +253,19 @@ pub fn task_context(
                 })
         })
         .and_then(|message| message.data_envelope.as_ref())
+}
+
+/// The requesting assistant message is already labeled from the actual model
+/// input. Its label keeps omitted, compacted and sensitive input restrictions.
+pub fn task_context(
+    source: CreationEnvelope,
+    parent: &PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    child_id: &str,
+    request: &super::tools::SpawnRequest,
+) -> Result<TaskCreationEnvelope, AgentError> {
+    source.validate()?;
+    let caller = caller_envelope(parent, call)
         .ok_or_else(|| super::invalid("delegation request has no committed model lineage"))?;
     task_context_from_source(source, parent, child_id, request, Some(caller))
 }
@@ -798,5 +808,56 @@ impl CreationEnvelope {
             );
         }
         Ok(inputs)
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    #[test]
+    fn a_reused_call_id_takes_the_newest_issuing_message_lineage() {
+        let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "test".into(),
+            connection_revision: 1,
+            model_id: "test".into(),
+            profile_revision: 1,
+        };
+        let mut parent = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-11-10T00:00:00Z",
+        );
+        let call = crate::chat::ToolCall {
+            id: "call_0".into(),
+            name: super::super::tools::SPAWN.into(),
+            arguments_json: r#"{"task":"check"}"#.into(),
+        };
+        for turn in ["older", "newer"] {
+            let label = crate::model_message_labels::model_bound_user_message(
+                turn.into(),
+                turn.into(),
+                destination.clone(),
+            )
+            .unwrap();
+            let mut message = ChatMessage::assistant_tool_calls(
+                format!("{turn}-assistant"),
+                String::new(),
+                vec![call.to_ref()],
+            );
+            message.data_envelope = label.data_envelope;
+            parent.conversation.push(message);
+        }
+        let newest = parent.conversation[1].data_envelope.as_ref();
+        assert!(newest.is_some());
+        assert_eq!(caller_envelope(&parent, &call), newest);
     }
 }

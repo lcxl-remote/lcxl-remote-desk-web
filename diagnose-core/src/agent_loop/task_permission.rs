@@ -33,16 +33,11 @@ pub(super) async fn pause<F: FnMut() -> String>(
             .map(move |original| (message, original))
     });
     let (parent, original) = originals.next().ok_or_else(invalid)?;
+    // `call` is resolved in this process from that stored call; the request's
+    // canonical input below binds the exact approved arguments.
     if parent.role != ChatRole::Assistant
         || originals.next().is_some()
         || original.name != call.name
-        || !crate::ui_model_ids::same_call_input_with_references(
-            &call.name,
-            &original.arguments_json,
-            &call.arguments_json,
-            Some(&session.ui_references),
-            &crate::result_model_ids::locators(&session.conversation),
-        )
     {
         return Err(invalid());
     }

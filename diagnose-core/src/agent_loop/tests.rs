@@ -9526,7 +9526,7 @@ async fn exercise_scheduled_permission_pause() {
     );
     let observation = observation_batch.input(0);
     let initial_events = recorder.0.lock().unwrap().len();
-    for mode in 0..7 {
+    for mode in 0..8 {
         let mut invalid_session = session.clone();
         let mut invalid_request = request.clone();
         let mut invalid_call = resolved.clone();
@@ -9539,7 +9539,18 @@ async fn exercise_scheduled_permission_pause() {
             3 => invalid_session.permission_requests.push(request.clone()),
             4 => invalid_call.arguments_json = r#"{"changed":true}"#.into(),
             5 => invalid_call.name = "read_process_list".into(),
-            _ => invalid_session.conversation[0].role = ChatRole::User,
+            // Changed arguments now fail on the canonical binding, not on a
+            // re-check of the in-process resolution.
+            6 => invalid_session.conversation[0].role = ChatRole::User,
+            _ => {
+                let mut other = ChatMessage::text("other", ChatRole::Assistant, "");
+                other.tool_calls = vec![crate::chat::ToolCallRef {
+                    id: original.id.clone(),
+                    name: "read_process_list".into(),
+                    arguments_json: "{}".into(),
+                }];
+                invalid_session.conversation.push(other);
+            }
         }
         let before = invalid_session.clone();
         assert!(
