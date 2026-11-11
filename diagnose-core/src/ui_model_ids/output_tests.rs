@@ -798,3 +798,72 @@ fn model_tool_copies_omit_canonicalization_keywords_but_keep_byte_limits() {
         crate::model_observability::InputIssue::Length
     );
 }
+
+#[test]
+fn the_gateway_sees_original_arguments_and_paired_notices_on_the_wire_only() {
+    let mut assistant = ChatMessage::assistant_tool_calls(
+        "assistant",
+        String::new(),
+        vec![
+            crate::chat::ToolCallRef {
+                id: "json".into(),
+                name: "inspect_desktop_ui".into(),
+                arguments_json: "{}".into(),
+            },
+            crate::chat::ToolCallRef {
+                id: "text".into(),
+                name: "read_terminal_output".into(),
+                arguments_json: "{}".into(),
+            },
+        ],
+    );
+    assistant.normalized_inputs.insert(
+        "json".into(),
+        crate::model_input::lenient::NormalizedInput {
+            original: r#"{"verbose":true}"#.into(),
+            notice: "Ignored unsupported input fields: verbose.".into(),
+        },
+    );
+    assistant.normalized_inputs.insert(
+        "text".into(),
+        crate::model_input::lenient::NormalizedInput {
+            original: r#"{"limit":null}"#.into(),
+            notice: "Null optional fields were treated as omitted: limit.".into(),
+        },
+    );
+    let json_result = ChatMessage::tool_result("r1", "json", r#"{"nodes":[]}"#);
+    let text_result = ChatMessage::tool_result("r2", "text", "plain output");
+    let untouched = ChatMessage::tool_result("r3", "other", r#"{"ok":true}"#);
+    let request = ModelRequest::text_only(
+        vec![
+            assistant,
+            json_result.clone(),
+            text_result.clone(),
+            untouched.clone(),
+        ],
+        ResponseFormatSpec::None,
+    );
+    let projected = project_request(&request);
+    assert_eq!(
+        projected.messages[0].tool_calls[0].arguments_json,
+        r#"{"verbose":true}"#
+    );
+    assert_eq!(
+        projected.messages[0].tool_calls[1].arguments_json,
+        r#"{"limit":null}"#
+    );
+    assert_eq!(request.messages[0].tool_calls[0].arguments_json, "{}");
+    let json: Value = serde_json::from_str(&projected.messages[1].text).unwrap();
+    assert_eq!(
+        json["input_notice"],
+        "Ignored unsupported input fields: verbose."
+    );
+    assert_eq!(json["nodes"], json!([]));
+    assert_eq!(
+        projected.messages[2].text,
+        "plain output\nNull optional fields were treated as omitted: limit."
+    );
+    assert!(!projected.messages[3].text.contains("input_notice"));
+    assert_eq!(request.messages[1].text, json_result.text);
+    assert_eq!(request.messages[2].text, text_result.text);
+}

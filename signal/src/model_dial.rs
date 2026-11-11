@@ -1567,6 +1567,7 @@ impl OpenAiStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                normalized_inputs: Default::default(),
                 context_observation: None,
                 thinking_prefix: None,
                 cache_projection: None,
@@ -1981,6 +1982,7 @@ impl AnthropicStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                normalized_inputs: Default::default(),
                 context_observation: Some(self.context_observation),
                 thinking_prefix: None,
                 cache_projection: None,

@@ -898,11 +898,47 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
             }
         }
     }
+    // The gateway sees the model's own arguments; the server executed the
+    // normalized copy, and the paired result says which fields it dropped.
+    let normalized = request
+        .messages
+        .iter()
+        .flat_map(|message| message.normalized_inputs.clone())
+        .collect::<std::collections::HashMap<_, _>>();
+    if !normalized.is_empty() {
+        for message in &mut request.messages {
+            for call in &mut message.tool_calls {
+                if let Some(input) = normalized.get(&call.id) {
+                    call.arguments_json = input.original.clone();
+                }
+            }
+            if message.role == ChatRole::Tool
+                && let Some(input) = message
+                    .tool_call_id
+                    .as_ref()
+                    .and_then(|id| normalized.get(id))
+            {
+                attach_input_notice(message, &input.notice);
+            }
+        }
+    }
     for tool in &mut request.tools {
         project_tool(tool);
         strip_server_keywords(&mut tool.parameters_schema);
     }
     request
+}
+
+/// Tell the model which of its input fields the server ignored or treated as
+/// omitted. Only the wire copy changes; stored results keep their bytes.
+fn attach_input_notice(message: &mut ChatMessage, notice: &str) {
+    if let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(&message.text) {
+        object.insert("input_notice".into(), Value::String(notice.into()));
+        message.text = Value::Object(object).to_string();
+    } else {
+        message.text.push('\n');
+        message.text.push_str(notice);
+    }
 }
 
 /// Remove schema keywords that only drive server-side canonicalization from a

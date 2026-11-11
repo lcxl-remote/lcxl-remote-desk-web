@@ -2533,6 +2533,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     );
                                 }
                                 message.data_envelope = turn.provider_meta.data_envelope.clone();
+                                message.normalized_inputs =
+                                    turn.provider_meta.normalized_inputs.clone();
                                 message.reasoning = turn
                                     .provider_meta
                                     .display_reasoning

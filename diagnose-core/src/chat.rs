@@ -183,8 +183,9 @@ pub fn frame_context_summary(text: &str) -> String {
 
 /// A tool call as carried on an assistant message when the conversation is
 /// replayed to the model. `id` pairs with the [`ChatRole::Tool`] result message's
-/// [`ChatMessage::tool_call_id`]; `arguments_json` is the raw JSON the model
-/// emitted (kept as a string so a re-serialization never perturbs it).
+/// [`ChatMessage::tool_call_id`]; `arguments_json` is the model's JSON after the
+/// host's one-time input normalization (kept as a string so later
+/// re-serialization never perturbs it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRef {
     pub id: String,
@@ -245,6 +246,13 @@ pub struct ChatMessage {
     /// Server-owned control observations bound to this exact model response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_controls: Option<Box<crate::model_controls::FrozenModelControls>>,
+    /// Original arguments and notices for tool calls the host normalized, keyed
+    /// by call ID. The model gateway sees the original arguments; every server
+    /// consumer uses `tool_calls`. Outside the output envelope, which binds
+    /// only text and tool calls.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub normalized_inputs:
+        std::collections::BTreeMap<String, crate::model_input::lenient::NormalizedInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_read: Option<Box<crate::conversation_attachment::model_read::ReadReceipt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,6 +275,7 @@ impl ChatMessage {
     /// A plain text message (no image, no tool linkage).
     pub fn text(message_id: impl Into<String>, role: ChatRole, text: impl Into<String>) -> Self {
         Self {
+            normalized_inputs: Default::default(),
             prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
@@ -323,6 +332,7 @@ impl ChatMessage {
         replay_disposition: ReplayDisposition,
     ) -> Self {
         Self {
+            normalized_inputs: Default::default(),
             prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
@@ -369,6 +379,7 @@ impl ChatMessage {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            normalized_inputs: Default::default(),
             prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
@@ -398,6 +409,7 @@ impl ChatMessage {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            normalized_inputs: Default::default(),
             prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
@@ -431,6 +443,7 @@ impl ChatMessage {
     ) -> Self {
         let background_task_id = background_task_id.into();
         Self {
+            normalized_inputs: Default::default(),
             prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
@@ -482,8 +495,9 @@ pub enum ToolChoice {
 }
 
 /// A tool call parsed out of a model turn (the model's request to run a tool).
-/// `arguments_json` is the raw JSON string the model produced; the loop parses it
-/// only after [`classify_model_turn`] confirms the turn is well-formed.
+/// `arguments_json` is the model's JSON string, normalized once by the host
+/// before the output envelope binds it; the loop parses it only after
+/// [`classify_model_turn`] confirms the turn is well-formed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,

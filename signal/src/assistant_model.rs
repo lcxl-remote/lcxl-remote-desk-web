@@ -298,6 +298,10 @@ impl ModelSeam for MeteredModel {
                 return Err(error);
             }
         };
+        desk_diagnose_core::model_input::lenient::normalize_model_turn(
+            &mut turn,
+            &authorized.request,
+        );
         if let Some(context) = &mut turn.provider_meta.context_observation {
             context.call_id = receipt_id.clone();
         }

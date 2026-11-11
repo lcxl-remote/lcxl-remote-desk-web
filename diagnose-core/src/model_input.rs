@@ -3,6 +3,8 @@ use crate::chat::ToolSpec;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::OnceLock};
 
+pub mod lenient;
+
 fn tools() -> &'static BTreeMap<String, ToolSpec> {
     static TOOLS: OnceLock<BTreeMap<String, ToolSpec>> = OnceLock::new();
     TOOLS.get_or_init(|| {
@@ -862,7 +864,9 @@ fn check_at(
                 return Err(FormatError::new(
                     Issue::UnknownField,
                     &format!("{schema_path}.*"),
-                    format!("Invalid input at {path}.{key}: unknown field"),
+                    format!(
+                        "Invalid input at {path}.{key}: unknown field; remove it (unknown fields are only ignored for read-only tools, never where they could change a target, scope or effect)"
+                    ),
                 ));
             } else if schema["additionalProperties"].is_object() {
                 check_at(

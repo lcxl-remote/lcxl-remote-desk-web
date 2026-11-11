@@ -161,7 +161,11 @@ impl ModelSeam for MeteredSignalModel {
             );
         }
         let observation = request.observation.clone();
-        let turn = self.inner.call(request, sink).await?;
+        let tools = desk_diagnose_core::model_input::lenient::agent_tools(&request);
+        let mut turn = self.inner.call(request, sink).await?;
+        if let Some(tools) = tools {
+            desk_diagnose_core::model_input::lenient::normalize_turn_tools(&mut turn, &tools);
+        }
         record_metered(observation.as_ref());
         Ok(turn)
     }
@@ -633,3 +637,6 @@ async fn resume_completion_turn_inner(
         None => resume_agent_turn(&deps, claim, &mut sink).await,
     }
 }
+
+#[cfg(test)]
+mod tests;

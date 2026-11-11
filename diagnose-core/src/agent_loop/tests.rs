@@ -1243,6 +1243,65 @@ async fn model_format_errors_stop_dispatch_and_allow_a_corrected_call() {
     );
 }
 
+#[tokio::test]
+async fn host_normalized_inputs_are_stored_and_reach_the_next_request() {
+    let sess = MemSession::default();
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let mut first = tool_use_args("good", "sysinfo", "{}");
+    first.provider_meta.normalized_inputs.insert(
+        "good".into(),
+        crate::model_input::lenient::NormalizedInput {
+            original: r#"{"verbose":true}"#.into(),
+            notice: "Ignored unsupported input fields: verbose.".into(),
+        },
+    );
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptModel {
+        turns: RefCell::new([first, answer("done")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "{\"os\":\"macOS\"}".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("user", ChatRole::User, "read the OS"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let stored = sess.inner.borrow().clone().unwrap();
+    assert!(stored.conversation.iter().any(|message| {
+        message
+            .normalized_inputs
+            .get("good")
+            .is_some_and(|input| input.notice == "Ignored unsupported input fields: verbose.")
+    }));
+    let wire = crate::ui_model_ids::project_request(&requests.borrow()[1]);
+    let call = wire
+        .messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .find(|call| call.id == "good")
+        .unwrap();
+    assert_eq!(call.arguments_json, r#"{"verbose":true}"#);
+    let result = wire
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("good"))
+        .unwrap();
+    assert!(
+        result
+            .text
+            .contains("Ignored unsupported input fields: verbose."),
+        "{}",
+        result.text
+    );
+}
+
 struct Collector(Rc<RefCell<String>>);
 impl TurnSink for Collector {
     fn on_text_delta(&mut self, delta: &str) {

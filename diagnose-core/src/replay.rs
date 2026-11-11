@@ -205,11 +205,18 @@ pub struct ProviderResponseMeta {
     /// the request passed the model sink gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+    /// Original arguments and notices for tool calls the host normalized, keyed
+    /// by call ID. Outside the output envelope; the loop copies them onto the
+    /// message.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub normalized_inputs:
+        std::collections::BTreeMap<String, crate::model_input::lenient::NormalizedInput>,
 }
 
 impl Default for ProviderResponseMeta {
     fn default() -> Self {
         Self {
+            normalized_inputs: Default::default(),
             context_observation: None,
             thinking_prefix: None,
             cache_projection: None,

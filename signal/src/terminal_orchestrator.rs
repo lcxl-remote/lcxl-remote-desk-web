@@ -159,7 +159,11 @@ async fn dial_configured_request(
         context.attribution.surface = desk_diagnose_core::model_observability::Surface::Terminal;
     }
     let observation = request.observation.clone();
-    let turn = seam.call(request, sink).await?;
+    let tools = desk_diagnose_core::model_input::lenient::agent_tools(&request);
+    let mut turn = seam.call(request, sink).await?;
+    if let Some(tools) = tools {
+        desk_diagnose_core::model_input::lenient::normalize_turn_tools(&mut turn, &tools);
+    }
     record_metered(observation.as_ref());
     // Return the model name so the caller can stamp AI provenance on the answer.
     Ok((turn, config.model.clone(), observation))
