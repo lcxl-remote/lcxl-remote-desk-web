@@ -131,3 +131,105 @@ async fn application_catalog_passes_observation_gate_and_reaches_remote_dispatch
     };
     assert_eq!(failure.error.kind, AgentErrorKind::InvalidInput);
 }
+
+/// A launch without its own approved request becomes a call-time proposal in
+/// an interactive session; nothing is resolved or dispatched for it.
+#[tokio::test]
+async fn an_unapproved_launch_asks_for_approval_instead_of_failing() {
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    let scope = desk_agent_protocol::AgentScope {
+        granted: vec![],
+        mode: desk_agent_protocol::ExecutionMode::ConfirmEachAction,
+        expires_at: None,
+        policy_name: None,
+    };
+    let mut session = desk_diagnose_core::session::PersistedAgentSession::new(
+        "run",
+        "owner",
+        "device",
+        desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        scope.clone(),
+        "1970-01-01T00:00:00Z",
+    );
+    session.surface = desk_diagnose_core::session::AgentSessionSurface::AiAssistant;
+    session.begin_focus_epoch(1, Vec::new()).unwrap();
+    session.input_revision = 1;
+    let now = chrono::DateTime::from_timestamp_millis(1).unwrap();
+    crate::entity::agent_session::ActiveModel {
+        conversation_id: Set(session.conversation_id.clone()),
+        actor_id: Set(session.actor_id.clone()),
+        device_id: Set(session.device_id.clone()),
+        conversation_schema_version: Set(Some(i32::from(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+        ))),
+        state_json: Set(session.encode_json_for_storage().unwrap()),
+        version: Set(session.version),
+        lease_token: Set(session.lease_token as i64),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let tools = SignalAiAssistantTools::new(
+        db,
+        desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+        Arc::new(SharedConnectionMap::default()),
+        Arc::new(SignalRemoteToolPendingStore::default()),
+        "host".into(),
+        "device".into(),
+        "owner".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        vec![],
+        vec![],
+        vec![],
+        None,
+        None,
+        "open Calculator".into(),
+        "run".into(),
+        "turn".into(),
+        desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        1,
+        vec![],
+        30_000,
+    );
+    let call = ToolCall {
+        id: "launch".into(),
+        name: desk_diagnose_core::application_launch::TOOL_NAME.into(),
+        arguments_json:
+            r#"{"target":{"kind":"macos_bundle","value":"/System/Applications/Calculator.app"}}"#
+                .into(),
+    };
+    let ctx = ExecContext {
+        assistant_turn_fence: None,
+        conversation_id: "run".into(),
+        turn_id: "turn".into(),
+        tool_call_id: "launch".into(),
+        actor_id: "owner".into(),
+        policy_revision: desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        scope,
+        connection_id: None,
+    };
+    let outcome = tools
+        .authorize_and_execute_semantic_action_inner(&call, &ctx)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(ExecOutcome::GrantRequired {
+                input_mismatch: false
+            })
+        ),
+        "{outcome:?}"
+    );
+}

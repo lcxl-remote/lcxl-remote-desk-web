@@ -2701,6 +2701,26 @@ impl SignalAiAssistantTools {
     ) -> Result<ExecOutcome, AgentError> {
         #[cfg(test)]
         crate::stack_probe::observe(&self.run_id, "tool_execute");
+        // A launch is approved through its own exact request. Without one, a
+        // call-time approval session proposes it instead of failing the call.
+        if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
+            let session =
+                desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                    .await?;
+            if session.trigger_origin.uses_call_time_approval()
+                && desk_diagnose_core::application_launch::find_approved_binding(
+                    &session,
+                    &self.target_device_id,
+                    call,
+                    self.readiness_revision,
+                )?
+                .is_none()
+            {
+                return Ok(ExecOutcome::GrantRequired {
+                    input_mismatch: false,
+                });
+            }
+        }
         let execution =
             desk_diagnose_core::future::boxed(|| self.prepare_semantic_action(call, ctx)).await?;
         execution.await

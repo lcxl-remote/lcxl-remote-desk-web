@@ -253,6 +253,18 @@ pub fn approved_binding_on_device(
     call: &crate::chat::ToolCall,
     readiness_revision: u64,
 ) -> Result<LaunchApprovalBinding, desk_agent_protocol::AgentError> {
+    find_approved_binding(session, device_id, call, readiness_revision)?
+        .ok_or_else(|| permission_error("Application launch needs a current exact owner approval"))
+}
+
+/// The persisted approval for this exact launch, or `None` when no decision
+/// covers it yet. A call-time approval session proposes it instead of failing.
+pub fn find_approved_binding(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    call: &crate::chat::ToolCall,
+    readiness_revision: u64,
+) -> Result<Option<LaunchApprovalBinding>, desk_agent_protocol::AgentError> {
     use crate::dynamic_run::PermissionRequestState;
     let input: LaunchApplicationRequest = serde_json::from_str(&call.arguments_json)
         .map_err(|_| permission_error("Invalid launch input"))?;
@@ -289,12 +301,10 @@ pub fn approved_binding_on_device(
             binding
                 .revalidate(subject, &input, binding.identity())
                 .map_err(permission_error)?;
-            return Ok(binding.clone());
+            return Ok(Some(binding.clone()));
         }
     }
-    Err(permission_error(
-        "Application launch needs a current exact owner approval",
-    ))
+    Ok(None)
 }
 
 fn permission_error(message: impl Into<String>) -> desk_agent_protocol::AgentError {
