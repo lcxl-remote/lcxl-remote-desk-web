@@ -391,8 +391,11 @@ fn replace_schema_reference(object: &mut Value, field: &str, id_key: &str) {
     if properties.remove(field).is_none() {
         return;
     }
-    properties.insert(id_key.into(), json!({"type":"string","minLength":1,"maxLength":256,
-        "description":"Copy an ID from a current verified browser observation; the server restores and validates the full reference."}));
+    properties.insert(
+        id_key.into(),
+        json!({"type":"string","minLength":1,"maxLength":256,
+        "description":"ID from the current browser observation."}),
+    );
     if let Some(required) = object.get_mut("required").and_then(Value::as_array_mut) {
         for item in required {
             if item == field {

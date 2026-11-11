@@ -528,7 +528,7 @@ fn project_schema_field(schema: &mut Value, native: &str, model: &str) {
             .as_array()
             .is_some_and(|variants| variants.iter().any(|variant| variant["type"] == "null"))
     });
-    properties.insert(model.into(), json!({"type":if nullable {json!(["string","null"])} else {json!("string")},"minLength":1,"maxLength":512,"description":"Copy the object ID from the matching verified document or preview observation. The server restores the exact reference."}));
+    properties.insert(model.into(), json!({"type":if nullable {json!(["string","null"])} else {json!("string")},"minLength":1,"maxLength":512,"description":"Object ID from the matching document or preview observation."}));
     if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
         for key in required {
             if key == native {

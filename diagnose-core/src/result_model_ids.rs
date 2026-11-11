@@ -628,7 +628,7 @@ fn replace_fields(schema: &mut Value, removed: &[&str], field: &str) {
     for name in removed {
         properties.remove(*name);
     }
-    properties.insert(field.into(), json!({"type":"string","minLength":1,"maxLength":32,"description":"Copy the typed short ID from a verified result in this conversation. The server restores the exact original evidence; never invent an ID."}));
+    properties.insert(field.into(), json!({"type":"string","minLength":1,"maxLength":32,"description":"Short ID of a verified result in this conversation."}));
     if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
         required.retain(|value| !removed.iter().any(|name| value == name));
         if !required.contains(&json!(field)) {

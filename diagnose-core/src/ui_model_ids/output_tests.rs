@@ -748,3 +748,53 @@ fn memory_history_model_view_keeps_native_ids_versions_and_recording_times() {
     assert_eq!(result["versions"][0]["recorded_at_unix_ms"], 1234);
     assert!(result["versions"][0].get("context").is_none());
 }
+
+#[test]
+fn model_tool_copies_omit_canonicalization_keywords_but_keep_byte_limits() {
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let mut request = ModelRequest::text_only(vec![], ResponseFormatSpec::None);
+    request.tools = crate::permission_tools::permission_planning_tool_registry()
+        .into_iter()
+        .map(|tool| tool.spec)
+        .chain(
+            registry
+                .registered_tools()
+                .into_iter()
+                .filter(|tool| tool.spec.name == "read_process_list")
+                .map(|tool| tool.spec),
+        )
+        .collect();
+    assert!(request.tools.iter().any(|tool| {
+        tool.parameters_schema
+            .to_string()
+            .contains("x-canonical-omit-default")
+    }));
+    let projected = project_request(&request);
+    let wire = serde_json::to_string(&projected.tools).unwrap();
+    assert!(!wire.contains("x-canonical-omit-default"));
+    assert!(wire.contains("\"default\":\"cpu_desc\""));
+    assert!(wire.contains("x-maxUtf8Bytes"));
+
+    // Server validation still uses the unstripped projection and its byte limit.
+    let permission = request
+        .tools
+        .iter()
+        .find(|tool| tool.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME)
+        .unwrap();
+    let mut validated = permission.clone();
+    project_tool(&mut validated);
+    let check = |reason: String| {
+        crate::model_input::validate_format_reported(
+            &validated.name,
+            &validated.parameters_schema,
+            &json!({"items":[{"tool_name":"read_process_list","reason":reason,"exact_input":{}}]}),
+        )
+    };
+    check("测".repeat(100)).unwrap();
+    let long = "测".repeat(crate::dynamic_run::MAX_PERMISSION_REASON_BYTES / 3 + 1);
+    assert!(long.chars().count() <= 1024);
+    assert_eq!(
+        check(long).unwrap_err().issue,
+        crate::model_observability::InputIssue::Length
+    );
+}

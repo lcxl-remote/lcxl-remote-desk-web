@@ -3699,6 +3699,28 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_permission_descriptor_fits_the_reviewer_limit() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let mut checked = 0;
+        for provider in registry.providers() {
+            for capability in &provider.capabilities {
+                let Some(surface) = capability.wire.surfaces.first().copied() else {
+                    continue;
+                };
+                let mut item = permission_request().items.remove(0);
+                item.tool_name = capability.wire.tool_name.clone();
+                item.provider_id = provider.wire.provider_id.clone();
+                item.expected_effect = capability.wire.effect;
+                let (descriptor, _) = trusted_permission_descriptor(&registry, &item, surface)
+                    .unwrap_or_else(|_| panic!("{}", item.tool_name));
+                assert!(descriptor.len() <= 32 * 1_024, "{}", item.tool_name);
+                checked += 1;
+            }
+        }
+        assert!(checked > 40);
+    }
+
+    #[test]
     fn other_permission_descriptors_keep_the_registered_native_contract() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let capability = registry.capability_for_tool("launch_application").unwrap();

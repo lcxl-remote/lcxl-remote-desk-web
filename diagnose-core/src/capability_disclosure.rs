@@ -392,6 +392,7 @@ fn detail_entries(
                 let candidate = permission_candidates.iter().find(|tool| tool.name() == name)?;
                 let mut model_spec = candidate.spec.clone();
                 crate::ui_model_ids::project_tool(&mut model_spec);
+                crate::ui_model_ids::strip_server_keywords(&mut model_spec.parameters_schema);
                 let selected = crate::request_devices::has_target_selector(&model_spec);
                 if selected {
                     let schema = &mut model_spec.parameters_schema;
@@ -829,6 +830,29 @@ mod tests {
             &["execute_ui_actions".into()],
         );
         assert_eq!(details[0]["permission_input_mode"], "application_scope");
+
+        let process = tools
+            .iter()
+            .find(|tool| tool.name() == "read_process_list")
+            .unwrap();
+        assert!(
+            process
+                .spec
+                .parameters_schema
+                .to_string()
+                .contains("x-canonical-omit-default")
+        );
+        let details = detail_entries(
+            &registry,
+            &inventory,
+            &[],
+            std::slice::from_ref(process),
+            &BTreeSet::new(),
+            &["read_process_list".into()],
+        );
+        let schema = details[0]["input_schema"].to_string();
+        assert!(schema.contains("\"default\":\"cpu_desc\""));
+        assert!(!schema.contains("x-canonical-omit-default"));
     }
 
     #[test]

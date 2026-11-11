@@ -392,12 +392,19 @@ pub(crate) fn project_read_spec(spec: &mut crate::chat::ToolSpec) {
     if !has_target_selector(spec) {
         return;
     }
-    spec.description = match spec.name.as_str() {
-        "read_current_screen" => "Capture one display or an observed window on the selected device. For a window, use window_id from a desktop observation on the same device. For a display, omit display if there is only one, or copy a display identifier from inspect_desktop_session on the same target_ref. Use the same target and input when requesting permission and making the approved call. The image requires a model that supports images.".into(),
-        "inspect_desktop_session" => "Inspect the interactive desktop session and list displays on the selected device. Use a returned display ID only on that same device. display_list_error means enumeration failed.".into(),
-        "inspect_desktop_ui" => "Observe the UI on the selected device. Use root_id from a desktop observation on the same device, or omit it to observe the foreground UI. Use queries with localized and English search terms. Use element_id and element_only to read a specific observed control on that device. Set allow_unfiltered only when a targeted search is insufficient.".into(),
+    let note = match spec.name.as_str() {
+        "read_current_screen" => {
+            " On the selected device, copy window_id or display only from observations with the same target_ref, and use the same target and input when requesting permission and making the approved call."
+        }
+        "inspect_desktop_session" => " Use a returned display ID only with the same target_ref.",
+        "inspect_desktop_ui" => {
+            " Use root_id and element_id only from observations with the same target_ref."
+        }
         _ => return,
     };
+    if !spec.description.ends_with(note) {
+        spec.description.push_str(note);
+    }
 }
 
 pub(crate) fn add_target_selector(tool: &mut RegisteredTool, required: bool) {
