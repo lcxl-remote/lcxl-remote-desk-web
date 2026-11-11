@@ -137,3 +137,69 @@ async fn schema_reopen_preserves_committed_assistant_rows_and_metadata_charge() 
         .is_some()
     );
 }
+
+#[tokio::test]
+async fn reports_follow_the_owner_model_within_one_gateway_after_backfill() {
+    use crate::entity::agent_subagent_inbox as inbox;
+    use sea_orm::{ActiveModelTrait, QueryOrder, Set};
+    let store = setup().await;
+    let old = destination("old-model");
+    let row = |event: &str, stored: Option<String>| inbox::ActiveModel {
+        event_id: Set(event.into()),
+        root_conversation_id: Set("root".into()),
+        group_id: Set("group".into()),
+        task_id: Set("task".into()),
+        actor_id: Set("1".into()),
+        device_id: Set(String::new()),
+        state_revision: Set(1),
+        report_seq: Set(Some(1)),
+        report_model_destination: Set(stored),
+        event_kind: Set("report_completed".into()),
+        event_json: Set("{}".into()),
+        parent_input_revision: Set(1),
+        parent_control_revision: Set(1),
+        created_at: Set(1),
+        ..Default::default()
+    };
+    // A row written before reports stored their gateway identity.
+    row("legacy", Some(serde_json::to_string(&old).unwrap()))
+        .insert(&store.db)
+        .await
+        .unwrap();
+    row("protected", None).insert(&store.db).await.unwrap();
+    assert_eq!(
+        worker_report::normalize_report_gateways_on(&store.db)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        worker_report::normalize_report_gateways_on(&store.db)
+            .await
+            .unwrap(),
+        0
+    );
+    let stored: Vec<_> = inbox::Entity::find()
+        .order_by_asc(inbox::Column::Id)
+        .all(&store.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.report_model_destination)
+        .collect();
+    // The owner's current model on the same gateway matches the stored value.
+    let current = worker_report::report_gateway(&destination("new-model")).unwrap();
+    assert_eq!(stored, [Some(current.clone()), None]);
+    let mut other_connection = destination("new-model");
+    if let desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+        connection_revision,
+        ..
+    } = &mut other_connection
+    {
+        *connection_revision = 2;
+    }
+    assert_ne!(
+        worker_report::report_gateway(&other_connection).unwrap(),
+        current
+    );
+}

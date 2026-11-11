@@ -376,24 +376,37 @@ async fn reused_worker_projects_only_retained_history_for_the_current_model() {
             .contains(&answer.summary)
     );
 
+    // The same gateway keeps the report readable after a model or profile
+    // change; another connection revision does not.
+    let mut same_gateway = destination();
     let mut other_destination = destination();
-    if let DestinationIdentity::Model {
-        profile_revision, ..
-    } = &mut other_destination
+    if let (
+        DestinationIdentity::Model {
+            profile_revision, ..
+        },
+        DestinationIdentity::Model {
+            connection_revision,
+            ..
+        },
+    ) = (&mut same_gateway, &mut other_destination)
     {
         *profile_revision += 1;
+        *connection_revision += 1;
     }
-    assert!(
-        desk_assistant_data_store::worker_report::retained_terminal_report_on(
-            &db,
-            &load(&db, &first.task_id).await,
-            &other_destination,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
+    for (current, readable) in [(&same_gateway, true), (&other_destination, false)] {
+        assert_eq!(
+            desk_assistant_data_store::worker_report::retained_terminal_report_on(
+                &db,
+                &load(&db, &first.task_id).await,
+                current,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            readable
+        );
+    }
     let expiry = chrono::Utc::now().timestamp_millis() - 1;
     let mut expired = saved.clone();
     expired.envelope.retention.expires_at_unix_ms = Some(expiry as u64);
@@ -668,6 +681,31 @@ async fn new_main_input_does_not_invalidate_an_existing_child_claim() {
             .await
             .unwrap(),
         SubAgentClaimOutcome::Blocked(SubAgentClaimBlock::NotReady)
+    ));
+}
+
+#[tokio::test]
+async fn a_child_follows_the_owner_model_within_the_same_gateway() {
+    let db = database().await;
+    let (parent, calls) = runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let run = load(&db, &task.task_id).await;
+    let current = DestinationIdentity::Model {
+        connection_id: "gateway".into(),
+        connection_revision: 1,
+        model_id: "another-model".into(),
+        profile_revision: 9,
+    };
+    assert!(matches!(
+        store
+            .claim_child(&claim_params(&run), &task.task_id, run.fence(), &current)
+            .await
+            .unwrap(),
+        SubAgentClaimOutcome::Claimed(_)
     ));
 }
 

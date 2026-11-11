@@ -113,7 +113,10 @@ impl SubAgentStore {
             .validate_task(&run.binding)
             .map_err(|_| invalid())?;
         if creation.source != decode_creation(&source)?
-            || creation.source.model_destination != *model_destination
+            || !desk_diagnose_core::model_egress::same_gateway(
+                model_destination,
+                &creation.source.model_destination,
+            )
             || group.source != run.binding.source
             || group.source_epoch != run.binding.source_epoch
             || run.fence() != expected

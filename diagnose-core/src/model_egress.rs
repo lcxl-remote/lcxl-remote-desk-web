@@ -77,6 +77,45 @@ impl AuthorizedModelRequest {
     }
 }
 
+/// Whether two model destinations use the same authorized gateway connection.
+/// A model or profile change within one gateway does not move data to another
+/// recipient; connection revisions fence endpoint, credential and account
+/// changes. Delegated work follows its owner's current model by this rule.
+pub fn same_gateway(current: &DestinationIdentity, previous: &DestinationIdentity) -> bool {
+    match (current, previous) {
+        (
+            DestinationIdentity::Model {
+                connection_id: current,
+                connection_revision: current_revision,
+                ..
+            },
+            DestinationIdentity::Model {
+                connection_id: previous,
+                connection_revision: previous_revision,
+                ..
+            },
+        ) => current == previous && current_revision == previous_revision,
+        _ => false,
+    }
+}
+
+/// The gateway part of a model destination, in one canonical form, for
+/// stored values that are matched by equality.
+pub fn gateway_identity(destination: &DestinationIdentity) -> Option<String> {
+    match destination {
+        DestinationIdentity::Model {
+            connection_id,
+            connection_revision,
+            ..
+        } => serde_json::to_string(&serde_json::json!({
+            "connection_id": connection_id,
+            "connection_revision": connection_revision,
+        }))
+        .ok(),
+        _ => None,
+    }
+}
+
 impl ModelEgressPolicy {
     /// A persisted receipt remains readable by the model that requested the
     /// exact tool call. This does not authorize another device invocation.
@@ -131,21 +170,7 @@ impl ModelEgressPolicy {
     /// data to another recipient. Connection revisions still fence endpoint,
     /// credential and account changes; model capabilities are checked separately.
     fn same_gateway(&self, destination: &DestinationIdentity) -> bool {
-        match (&self.destination, destination) {
-            (
-                DestinationIdentity::Model {
-                    connection_id: current,
-                    connection_revision: current_revision,
-                    ..
-                },
-                DestinationIdentity::Model {
-                    connection_id: previous,
-                    connection_revision: previous_revision,
-                    ..
-                },
-            ) => current == previous && current_revision == previous_revision,
-            _ => false,
-        }
+        same_gateway(&self.destination, destination)
     }
 
     pub(crate) fn has_gateway_authority(&self, envelope: &DataEnvelope) -> bool {
@@ -706,6 +731,32 @@ mod tests {
             byte_cap: MAX_SINK_BYTES,
             permission_resume: false,
         }
+    }
+
+    #[test]
+    fn delegated_work_follows_the_owner_model_only_within_one_gateway() {
+        let model = |revision: u64, model: &str, profile: i64| DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: revision,
+            model_id: model.into(),
+            profile_revision: profile,
+        };
+        assert!(same_gateway(&model(1, "a", 1), &model(1, "b", 2)));
+        assert!(!same_gateway(&model(1, "a", 1), &model(2, "a", 1)));
+        assert_eq!(
+            gateway_identity(&model(1, "a", 1)),
+            gateway_identity(&model(1, "b", 7))
+        );
+        assert_ne!(
+            gateway_identity(&model(1, "a", 1)),
+            gateway_identity(&model(2, "a", 1))
+        );
+        assert_eq!(
+            gateway_identity(&DestinationIdentity::WebResearch {
+                connector_id: "web".into()
+            }),
+            None
+        );
     }
 
     #[test]

@@ -169,7 +169,7 @@ pub fn authorized_child_permission_resume_message(
     }) {
         return Err(crate::subagent::invalid("child permission source expired"));
     }
-    if policy.destination != creation.source.model_destination {
+    if !crate::model_egress::same_gateway(&policy.destination, &creation.source.model_destination) {
         return Err(crate::subagent::invalid(
             "child permission model destination changed",
         ));

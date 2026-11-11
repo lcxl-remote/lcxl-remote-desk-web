@@ -131,7 +131,10 @@ pub(crate) async fn batch_report_read_scope_on(
     if !group.can_interpret(parent.input_revision, parent.control_revision)
         || group.source.workbench_id() != Some(workbench_id)
         || now_ms >= group.limits.deadline_ms
-        || decode_creation(&group_row)?.model_destination != *destination
+        || !desk_diagnose_core::model_egress::same_gateway(
+            destination,
+            &decode_creation(&group_row)?.model_destination,
+        )
     {
         return Ok(None);
     }

@@ -72,9 +72,51 @@ fn group_reports(group: &DelegationGroup) -> Result<sea_orm::Select<inbox::Entit
         .filter(inbox::Column::ReportSeq.is_not_null()))
 }
 
+/// Reports follow the owner's current model within one authorized gateway, as
+/// conversation history does.
 fn allows_projection(envelope: &DataEnvelope, destination: &DestinationIdentity) -> bool {
-    envelope.allowed_destinations.contains(destination)
+    envelope
+        .allowed_destinations
+        .iter()
+        .any(|allowed| desk_diagnose_core::model_egress::same_gateway(destination, allowed))
         && !(envelope.sensitivity == Sensitivity::Secret && destination.is_external())
+}
+
+/// Rewrite report destinations stored as a full model destination into their
+/// gateway identity. Idempotent; only full `DestinationIdentity` values change.
+pub async fn normalize_report_gateways_on(db: &impl ConnectionTrait) -> Result<u64, DbErr> {
+    let rows = inbox::Entity::find()
+        .filter(inbox::Column::ReportModelDestination.contains("\"kind\""))
+        .all(db)
+        .await?;
+    let mut changed = 0;
+    for row in rows {
+        let Some(stored) = row.report_model_destination.as_deref() else {
+            continue;
+        };
+        let Ok(destination) = serde_json::from_str::<DestinationIdentity>(stored) else {
+            continue;
+        };
+        let Some(gateway) = desk_diagnose_core::model_egress::gateway_identity(&destination) else {
+            continue;
+        };
+        inbox::Entity::update_many()
+            .col_expr(
+                inbox::Column::ReportModelDestination,
+                sea_orm::sea_query::Expr::value(gateway),
+            )
+            .filter(inbox::Column::Id.eq(row.id))
+            .filter(inbox::Column::ReportModelDestination.eq(stored))
+            .exec(db)
+            .await?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// The stored, equality-matched gateway of a report's model destination.
+pub fn report_gateway(destination: &DestinationIdentity) -> Result<String, DbErr> {
+    desk_diagnose_core::model_egress::gateway_identity(destination).ok_or_else(invalid)
 }
 
 fn projectable_reports(
@@ -94,9 +136,8 @@ fn projectable_at(
     destination: &DestinationIdentity,
     now_ms: i64,
 ) -> Result<sea_orm::Select<inbox::Entity>, DbErr> {
-    let destination_json = serde_json::to_string(destination).map_err(|_| invalid())?;
     Ok(retained_at(
-        query.filter(inbox::Column::ReportModelDestination.eq(destination_json)),
+        query.filter(inbox::Column::ReportModelDestination.eq(report_gateway(destination)?)),
         now_ms,
     ))
 }
@@ -311,7 +352,7 @@ pub(crate) fn batch_eligible(
     destination: &DestinationIdentity,
     now_ms: i64,
 ) -> Result<sea_orm::Select<inbox::Entity>, DbErr> {
-    let destination = serde_json::to_string(destination).map_err(|_| invalid())?;
+    let destination = report_gateway(destination)?;
     Ok(inbox::Entity::find()
         .filter(inbox::Column::WorkbenchId.eq(workbench))
         .filter(inbox::Column::ActorId.eq(actor))
@@ -569,9 +610,8 @@ pub async fn append_report_on<C: ConnectionTrait>(
     };
     let stored = StoredReport::new(report, sources).map_err(|_| invalid())?;
     let report_model_destination = allows_projection(&stored.envelope, model_destination)
-        .then(|| serde_json::to_string(model_destination))
-        .transpose()
-        .map_err(|_| invalid())?;
+        .then(|| report_gateway(model_destination))
+        .transpose()?;
     let report_expires_at_ms = stored
         .envelope
         .retention
@@ -808,4 +848,37 @@ pub async fn validate_terminal_observation_on(
         return Err(invalid());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+
+    fn destination(connection_revision: u64, model: &str) -> DestinationIdentity {
+        DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision,
+            model_id: model.into(),
+            profile_revision: 1,
+        }
+    }
+
+    #[test]
+    fn a_report_projects_to_another_model_only_on_the_same_gateway() {
+        let mut envelope: DataEnvelope = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "envelope_id": "report",
+            "content": {"kind": "projection", "projection": "delegation", "size_bytes": 1, "media_type": "application/json"},
+            "provenance": {"source_provider_id": "assistant.run_control", "source_tool_name": "delegated_worker_report", "source_object_id": null, "source_envelope_ids": []},
+            "sensitivity": "sensitive",
+            "allowed_destinations": [],
+            "retention": {"expires_at_unix_ms": null, "delete_with_run": true}
+        }))
+        .unwrap();
+        envelope.allowed_destinations = vec![destination(1, "old-model")];
+        assert!(allows_projection(&envelope, &destination(1, "new-model")));
+        assert!(!allows_projection(&envelope, &destination(2, "old-model")));
+        envelope.allowed_destinations.clear();
+        assert!(!allows_projection(&envelope, &destination(1, "old-model")));
+    }
 }

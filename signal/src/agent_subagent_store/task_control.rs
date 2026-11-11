@@ -381,10 +381,12 @@ async fn apply_task_control_with_source_on(
                 let label = match &adjustment_source {
                     Some(label) => {
                         label.validate().map_err(|_| invalid())?;
-                        if !label
-                            .allowed_destinations
-                            .contains(&creation.source.model_destination)
-                        {
+                        if !label.allowed_destinations.iter().any(|allowed| {
+                            desk_diagnose_core::model_egress::same_gateway(
+                                allowed,
+                                &creation.source.model_destination,
+                            )
+                        }) {
                             return Err(invalid());
                         }
                         label.clone()
@@ -588,11 +590,10 @@ pub(super) async fn reply_to_question_on(
     )
     .map_err(|_| invalid())?;
     let label = reply.data_envelope.as_ref().ok_or_else(invalid)?;
-    if !label
-        .allowed_destinations
-        .contains(&creation.source.model_destination)
-        || serde_json::to_vec(&reply).map_err(|_| invalid())?.len() as u64
-            > group.limits.max_context_bytes
+    if !label.allowed_destinations.iter().any(|allowed| {
+        desk_diagnose_core::model_egress::same_gateway(allowed, &creation.source.model_destination)
+    }) || serde_json::to_vec(&reply).map_err(|_| invalid())?.len() as u64
+        > group.limits.max_context_bytes
     {
         return Err(invalid());
     }

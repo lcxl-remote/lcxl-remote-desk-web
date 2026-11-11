@@ -344,7 +344,10 @@ impl SubAgentStore {
             return Ok(None);
         };
         if group.source.request_input_revision().is_none()
-            || source.model_destination != *destination
+            || !desk_diagnose_core::model_egress::same_gateway(
+                destination,
+                &source.model_destination,
+            )
         {
             return Ok(None);
         }

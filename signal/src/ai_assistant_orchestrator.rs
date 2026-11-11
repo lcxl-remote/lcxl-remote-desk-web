@@ -1388,7 +1388,10 @@ async fn prepare_composed_turn(
     };
     let actor_id = actor_user_id.to_string();
     if let Some(runtime) = &delegated
-        && destination != runtime.source().model_destination
+        && !desk_diagnose_core::model_egress::same_gateway(
+            &destination,
+            &runtime.source().model_destination,
+        )
     {
         return Err(model_rejected(
             "delegated task's frozen model destination changed",
@@ -1553,7 +1556,10 @@ async fn prepare_composed_turn(
         return Err(transport_error("delegated permission source changed"));
     }
     if let Some((creation, _)) = &permission_child_context
-        && creation.source.model_destination != destination
+        && !desk_diagnose_core::model_egress::same_gateway(
+            &destination,
+            &creation.source.model_destination,
+        )
     {
         return Err(model_rejected(
             "permission continuation changed the delegated model destination",

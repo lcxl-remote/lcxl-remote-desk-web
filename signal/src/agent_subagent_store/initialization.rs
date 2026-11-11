@@ -25,7 +25,7 @@ pub(crate) fn decode_creation(row: &group_row::Model) -> Result<CreationEnvelope
         || creation.parent_input_revision != group.parent_input_revision
         || creation.parent_control_revision > group.parent_control_revision
         || creation.group_id().map_err(|_| invalid())? != row.group_id
-        || creation.model_destination != model
+        || !desk_diagnose_core::model_egress::same_gateway(&model, &creation.model_destination)
     {
         return Err(invalid());
     }
