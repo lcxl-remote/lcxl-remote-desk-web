@@ -703,6 +703,27 @@ fn check_at(
                 .filter_map(|s| check_at(s, value, path, schema_path, depth + 1).err())
                 .collect();
             let matches = variants.len() - errors.len();
+            let missing = errors
+                .iter()
+                .map(|error| {
+                    error
+                        .message
+                        .strip_prefix(&format!("Invalid input at {path}."))
+                        .and_then(|rest| rest.strip_suffix(": missing required field"))
+                })
+                .collect::<Option<Vec<_>>>();
+            if matches == 0
+                && let Some(fields) = missing.filter(|fields| !fields.is_empty())
+            {
+                return Err(FormatError::new(
+                    Issue::Combination,
+                    schema_path,
+                    format!(
+                        "Invalid input at {path}: provide at least one of the fields {}",
+                        fields.join(", ")
+                    ),
+                ));
+            }
             if matches == 0 || (key == "oneOf" && matches != 1) {
                 return Err(FormatError::new(
                     Issue::Combination,
@@ -767,7 +788,15 @@ fn check_at(
         return Err(FormatError::new(
             Issue::Type,
             schema_path,
-            format!("Invalid input at {path}: expected type {}", schema["type"]),
+            format!(
+                "Invalid input at {path}: expected type {}{}",
+                schema["type"],
+                if value.is_null() {
+                    "; omit an optional field instead of passing null"
+                } else {
+                    ""
+                }
+            ),
         ));
     }
     if let Some(expected) = schema.get("const")
@@ -988,13 +1017,46 @@ pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> S
     let sample = example(&schema);
     format!(
         "tool error: {reason}. Tool: {name}. Required fields: {}. Structural example (replace placeholders with observed IDs and intended values): {sample}. Load the target Provider tool with describe_tools for field constraints before requesting permission (built-in conversation tools must not be loaded); correct the arguments rather than repeating them or asking the user to supply the format.",
-        schema.get("required").unwrap_or(&Value::Null)
+        schema
+            .get("required")
+            .map_or_else(|| "none".into(), Value::to_string)
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_names_alternative_fields_and_null_optional_values() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"queries":{"type":"array"},"allow_unfiltered":{"const":true},"io_mode":{"type":"string"}},
+            "anyOf":[{"required":["queries"]},{"required":["allow_unfiltered"]}]
+        });
+        let error = validate_format_reported("list_applications", &schema, &json!({})).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("provide at least one of the fields queries, allow_unfiltered"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("Required fields: none"));
+        let error = validate_format_reported(
+            "list_applications",
+            &schema,
+            &json!({"queries":[],"io_mode":null}),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("omit an optional field instead of passing null"),
+            "{}",
+            error.message
+        );
+    }
 
     #[test]
     fn launch_feedback_points_to_the_listed_target_instead_of_a_fixed_kind() {

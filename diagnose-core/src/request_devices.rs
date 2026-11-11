@@ -627,6 +627,14 @@ pub(crate) async fn plan_device_permission(
                 );
             }
             let [item] = items.as_slice() else {
+                if items
+                    .iter()
+                    .any(|item| item["tool_name"] == crate::command_confirmation::COMMAND_TOOL)
+                {
+                    return Err(crate::subagent::invalid(
+                        "Request exec_command alone in its own request_permissions call with the same target_ref; request the other items in a separate call",
+                    ));
+                }
                 return Err(invalid());
             };
             if !accepts_command_permissions(session)

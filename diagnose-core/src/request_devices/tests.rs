@@ -864,6 +864,44 @@ fn every_native_action_uses_the_registered_schema_and_original_device_projection
 }
 
 #[tokio::test]
+async fn a_command_mixed_with_device_items_is_asked_to_be_requested_alone() {
+    let session = session();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let descriptor = registry.capability_for_tool("browser_open_page").unwrap();
+    let mut devices = [device("a", vec![descriptor.wire.capability_id.clone()])];
+    devices[0].ready_capabilities = vec![Capability::BrowserPageObserve];
+    let reads = read_tools(&devices, &session, registry, true, None);
+    let call = tool(
+        REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+        json!({"target_ref":"a","items":[
+            {"tool_name":"browser_open_page","exact_input":{"target":{"url":"https://example.com/"}},"reason":"Open"},
+            {"tool_name":"exec_command","exact_input":{"shell":"bash","command":"pwd","timeout_ms":1000},"reason":"Run"}
+        ]}),
+    );
+    let error = plan_device_permission(
+        &NoDeviceCommands,
+        Some(registry),
+        Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
+        &session,
+        &devices,
+        &reads,
+        &call,
+        "mixed",
+        NOW,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("Request exec_command alone in its own request_permissions call"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
 async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
     let mut session = session();
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
