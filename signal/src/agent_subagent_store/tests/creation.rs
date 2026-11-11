@@ -18,7 +18,6 @@ pub(super) fn destination() -> DestinationIdentity {
 
 pub(super) fn spawn_request() -> SpawnRequest {
     SpawnRequest {
-        target_refs: Vec::new(),
         worker_id: None,
         name: "Independent investigation".into(),
         task: "Investigate one symptom".into(),

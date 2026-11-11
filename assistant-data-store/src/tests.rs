@@ -203,3 +203,116 @@ async fn reports_follow_the_owner_model_within_one_gateway_after_backfill() {
         current
     );
 }
+
+#[tokio::test]
+async fn a_delegated_child_follows_its_owner_conversation_devices() {
+    use desk_diagnose_core::dynamic_run::AssistantInputTarget;
+    use desk_diagnose_core::native_ids::{Kind, stable};
+    use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
+    use sea_orm::sea_query::{Alias, ColumnDef, Query, Table};
+    let store = setup().await;
+    // Both hosts store conversations with these subject columns.
+    store
+        .db
+        .execute(
+            &Table::create()
+                .table(Alias::new("agent_session"))
+                .col(
+                    ColumnDef::new(Alias::new("conversation_id"))
+                        .string()
+                        .not_null(),
+                )
+                .col(ColumnDef::new(Alias::new("actor_id")).string().not_null())
+                .col(ColumnDef::new(Alias::new("device_id")).string().not_null())
+                .col(ColumnDef::new(Alias::new("state_json")).text().not_null())
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+    let scope = desk_agent_protocol::AgentScope {
+        granted: vec![],
+        mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+        expires_at: None,
+        policy_name: None,
+    };
+    let device = |name: &str| AssistantInputTarget::fixed(name.into());
+    let owner_state = |devices: &[AssistantInputTarget], revision: u64| {
+        let mut owner = PersistedAgentSession::new("root", "owner", "", 1, scope.clone(), "now");
+        owner.surface = AgentSessionSurface::AiAssistant;
+        owner.input_revision = revision;
+        owner.bind_assistant_input_targets(devices).unwrap();
+        owner.encode_json_for_storage().unwrap()
+    };
+    let save_owner = |state: String| {
+        let db = store.db.clone();
+        async move {
+            db.execute(
+                &Query::delete()
+                    .from_table(Alias::new("agent_session"))
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+            db.execute(
+                &Query::insert()
+                    .into_table(Alias::new("agent_session"))
+                    .columns([
+                        Alias::new("conversation_id"),
+                        Alias::new("actor_id"),
+                        Alias::new("device_id"),
+                        Alias::new("state_json"),
+                    ])
+                    .values_panic(["root".into(), "owner".into(), "".into(), state.into()])
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        }
+    };
+    save_owner(owner_state(&[device("mac"), device("linux")], 1)).await;
+    let child = PersistedAgentSession::new_subagent(
+        stable(Kind::ChildConversation, &"child"),
+        "owner",
+        "",
+        1,
+        scope.clone(),
+        desk_diagnose_core::subagent::DelegatedTaskBinding {
+            root_conversation_id: "root".into(),
+            group_id: "group".into(),
+            task_id: stable(Kind::Task, &"task"),
+            source: desk_diagnose_core::subagent::DelegationSource::UserInput { input_revision: 1 },
+            targets: vec![device("mac"), device("linux")],
+            objective: "Compare".into(),
+            acceptance_criteria: vec!["Report".into()],
+            input_revision: 1,
+            control_revision: 1,
+            source_epoch: 1,
+            deadline_ms: 1_799_999_999_999,
+        },
+        "now",
+    )
+    .unwrap();
+    assert!(
+        device_roster::permits_current_target(&store.db, &child, "linux")
+            .await
+            .unwrap()
+    );
+    // The owner's next input drops Linux: the child can no longer use it.
+    save_owner(owner_state(&[device("mac")], 2)).await;
+    assert!(
+        !device_roster::permits_current_target(&store.db, &child, "linux")
+            .await
+            .unwrap()
+    );
+    assert!(
+        device_roster::permits_current_target(&store.db, &child, "mac")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        device_roster::current_request_devices(&store.db, &child)
+            .await
+            .unwrap(),
+        ["mac"]
+    );
+}

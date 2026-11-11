@@ -246,7 +246,8 @@ async fn create_request_on(
         crate::issue_connections::check_work_on(
             txn,
             held,
-            !request.target_refs.is_empty(),
+            held.assistant_request_targets()
+                .is_some_and(|targets| !targets.is_empty()),
             now.timestamp_millis(),
         )
         .await
@@ -322,9 +323,7 @@ async fn create_request_on(
                 admission_limits,
             )
             .map_err(|_| invalid())?;
-        let targets = creation
-            .select_targets(&request.target_refs)
-            .map_err(|_| invalid())?;
+        let targets = creation.request_targets(held).map_err(|_| invalid())?;
         if !targets.is_empty() {
             let live = desk_diagnose_core::future::boxed(|| {
                 desk_assistant_data_store::device_roster::current_request_devices(txn, held)

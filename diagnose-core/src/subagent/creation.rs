@@ -132,10 +132,11 @@ impl TaskCreationEnvelope {
             .map_err(|_| super::invalid("invalid delegated acceptance criteria"))?;
         if self.source.root_conversation_id != binding.root_conversation_id
             || self.source.source != binding.source
-            || binding
-                .targets
-                .iter()
-                .any(|target| !self.source.targets.contains(target))
+            || (!binding.source.follows_owner_devices()
+                && binding
+                    .targets
+                    .iter()
+                    .any(|target| !self.source.targets.contains(target)))
             || payload["delegated_task"].as_str() != Some(binding.objective.as_str())
             || criteria != binding.acceptance_criteria
         {
@@ -645,24 +646,19 @@ impl CreationEnvelope {
         Ok(creation)
     }
 
-    pub fn select_targets(
+    /// The devices a new request starts with: a device conversation's own
+    /// device, the owner's current devices, or a frozen execution target.
+    pub fn request_targets(
         &self,
-        refs: &[String],
+        owner: &crate::session::PersistedAgentSession,
     ) -> Result<Vec<crate::dynamic_run::AssistantInputTarget>, AgentError> {
-        if !self.device_id.is_empty() && refs.is_empty() {
+        if !self.device_id.is_empty() || !self.source.follows_owner_devices() {
             return Ok(self.targets.clone());
         }
-        refs.iter()
-            .map(|reference| {
-                self.targets
-                    .iter()
-                    .find(|target| &target.reference == reference)
-                    .cloned()
-                    .ok_or_else(|| {
-                        super::invalid("selected worker target is outside the original request")
-                    })
-            })
-            .collect()
+        owner
+            .assistant_request_targets()
+            .map(<[_]>::to_vec)
+            .ok_or_else(|| super::invalid("the owner request has no device scope"))
     }
 
     /// The group id is the unique identity of this delegation source, so a

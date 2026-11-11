@@ -1804,7 +1804,6 @@ mod tests {
                 id: "personal-worker-call".into(), name: tools::SPAWN.into(),
                 arguments_json: serde_json::json!({
                     "name":"Issue investigation","task":"Compare macOS and Linux",
-                    "target_refs":["mac", "linux"],
                     "acceptance_criteria":["Report per-device observations"],"required_for_completion":true
                 }).to_string(),
             };

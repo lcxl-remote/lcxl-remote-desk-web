@@ -95,7 +95,7 @@ fn binding() -> DelegatedTaskBinding {
 }
 
 #[test]
-fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
+fn personal_worker_follows_the_owner_devices_across_turns_and_adjustment() {
     use crate::dynamic_run::AssistantInputTarget;
     use desk_agent_protocol::data_lineage::DestinationIdentity;
 
@@ -139,11 +139,9 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
         },
     )
     .unwrap();
-    assert!(source.select_targets(&["another-device".into()]).is_err());
-    assert!(source.select_targets(&[]).unwrap().is_empty());
-    run.binding.targets = source
-        .select_targets(&["mac-b".into(), "linux".into()])
-        .unwrap();
+    // A new request starts with all of the owner's current devices.
+    run.binding.targets = source.request_targets(&parent).unwrap();
+    assert_eq!(run.binding.targets, devices);
     let mut worker = PersistedAgentSession::new_subagent(
         &run.child_conversation_id,
         &run.actor_id,
@@ -154,20 +152,20 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
         now,
     )
     .unwrap();
-    assert_eq!(
-        worker
-            .assistant_request_targets()
-            .unwrap()
-            .iter()
-            .map(|target| target.device_id.as_str())
-            .collect::<Vec<_>>(),
-        ["device-2", "device-3"]
-    );
-    assert_eq!(
-        worker.assistant_request_device_generation("device-2"),
-        Some(2)
-    );
+    assert!(worker.admits_assistant_device("device-1"));
+    // The owner removes one device and adds another; the next turn follows.
+    let added = AssistantInputTarget {
+        reference: "windows".into(),
+        device_id: "device-4".into(),
+        member_generation: Some(4),
+    };
+    let current = vec![devices[1].clone(), devices[2].clone(), added];
+    assert!(worker.refresh_subagent_targets(&current).unwrap());
+    assert!(!worker.refresh_subagent_targets(&current).unwrap());
+    run.binding.targets.clone_from(&current);
     assert!(!worker.admits_assistant_device("device-1"));
+    assert!(worker.admits_assistant_device("device-4"));
+    assert_eq!(worker.agent_role.binding().unwrap().targets, current);
     run.adjust(
         run.fence(),
         "Verify the two environments".into(),
@@ -183,13 +181,17 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
             .iter()
             .map(|target| target.device_id.as_str())
             .collect::<Vec<_>>(),
-        ["device-2", "device-3"]
+        ["device-2", "device-3", "device-4"]
     );
     assert_eq!(
         worker.assistant_request_device_generation("device-2"),
         Some(2)
     );
     let raw = worker.encode_json_for_storage().unwrap();
+    assert_eq!(
+        crate::session::stored_request_device_ids(&raw).unwrap(),
+        ["device-2", "device-3", "device-4"]
+    );
     assert_eq!(
         PersistedAgentSession::decode_json(&raw)
             .unwrap()
@@ -1835,8 +1837,8 @@ fn timer_delegation_uses_its_frozen_target_and_preserves_owner_group_and_lineage
     assert_eq!(timer.owner_requirement, owner.owner_requirement);
     assert_eq!(timer.model_destination, owner.model_destination);
     assert_ne!(timer.group_id().unwrap(), owner.group_id().unwrap());
-    assert_eq!(timer.select_targets(&["a".into()]).unwrap(), [target]);
-    assert!(timer.select_targets(&["b".into()]).is_err());
+    // A scheduled resume keeps its frozen execution target.
+    assert_eq!(timer.request_targets(&parent).unwrap(), [target]);
     crate::ai_assistant::scheduled_retrieval::restore_owner_retrieval(&mut parent).unwrap();
     assert_eq!(parent.delegation_group_id.as_deref(), Some("owner-group"));
     assert_eq!(parent.assistant_request_targets().unwrap(), [latest]);

@@ -63,7 +63,7 @@ impl SubAgentStore {
         })
         .await?;
 
-        desk_diagnose_core::future::boxed(|| async {
+        let owner_targets = desk_diagnose_core::future::boxed(|| async {
             parent_on(
                 &txn,
                 &selected.root_conversation_id,
@@ -72,7 +72,9 @@ impl SubAgentStore {
             )
             .await
         })
-        .await?;
+        .await?
+        .assistant_request_targets()
+        .map(<[_]>::to_vec);
         let history = desk_diagnose_core::future::boxed(|| {
             crate::assistant_data_store::native_scope_on(
                 &txn,
@@ -278,6 +280,14 @@ impl SubAgentStore {
                 .checked_add(1)
                 .filter(|value| *value <= i64::MAX as u64)
                 .ok_or_else(|| invalid())?;
+            // The child starts each turn with its owner's current devices.
+            if let Some(targets) = &owner_targets
+                && session
+                    .refresh_subagent_targets(targets)
+                    .map_err(|_| invalid())?
+            {
+                run.binding.targets.clone_from(targets);
+            }
             session
                 .begin_turn(
                     &params.turn_id,

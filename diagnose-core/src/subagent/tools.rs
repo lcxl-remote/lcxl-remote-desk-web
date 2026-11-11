@@ -127,8 +127,6 @@ mod argument_tests {
 pub struct SpawnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub target_refs: Vec<String>,
     pub name: String,
     pub task: String,
     pub acceptance_criteria: Vec<String>,
@@ -256,6 +254,7 @@ pub fn available_for_session(name: &str, session: &PersistedAgentSession) -> boo
     match name {
         REPLY => reply_exposed(session),
         HANDOFF => session.has_workbench_report_notification() && reply_exposed(session),
+        // A delegated binding's targets follow its owner's current devices.
         WAIT_DEVICE => session
             .agent_role
             .binding()
@@ -360,12 +359,11 @@ pub fn registry() -> Vec<RegisteredTool> {
     vec![
         tool(
             SPAWN,
-            "Send a finite request to an existing worker, or create a worker by omitting worker_id. Requests sent to the same worker run in order. Delegate a finite independent branch, context-heavy investigation, independent review, or clearly bounded execution task to a background subagent. Prefer handling simple tasks directly. The subagent uses the same business tools and requests its own permissions; this call grants no device authority. Supply a concise, self-contained objective, necessary task context and observable acceptance criteria proportional to the deliverable. For a routine execution task, request a short outcome; do not copy tool schemas, routine permission steps or internal-report checklists into the task unless the owner requested them. Mark required_for_completion when the main task depends on this result. The server enforces one level, capacity, source budget and deadline. Existing children continue when the owner sends a new main message.",
+            "Send a finite request to an existing worker, or create a worker by omitting worker_id. Requests sent to the same worker run in order. Delegate a finite independent branch, context-heavy investigation, independent review, or clearly bounded execution task to a background subagent. Prefer handling simple tasks directly. The subagent uses the same business tools and this conversation's current devices, and requests its own permissions; this call grants no device authority. Supply a concise, self-contained objective, necessary task context and observable acceptance criteria proportional to the deliverable. For a routine execution task, request a short outcome; do not copy tool schemas, routine permission steps or internal-report checklists into the task unless the owner requested them. Mark required_for_completion when the main task depends on this result. The server enforces one level, capacity, source budget and deadline. Existing children continue when the owner sends a new main message.",
             json!({
                 "type":"object","additionalProperties":false,"required":["name","task","acceptance_criteria","required_for_completion"],
                 "properties":{
                     "worker_id":{"type":"string","description":"The stable worker_id returned by this tool. Omit it to create a new worker."},
-                    "target_refs":{"type":"array","uniqueItems":true,"items":id.clone(),"description":"Select the devices this request may use from REQUEST DEVICES. Omit for a personal request that needs no devices."},
                     "name":{"type":"string","minLength":1,"maxLength":MAX_SUBAGENT_NAME_CHARS},
                     "task":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS,"description":"The requested deliverable and only context the child needs; routine runtime and permission rules are already provided."},
                     "acceptance_criteria":{"type":"array","minItems":1,"maxItems":super::MAX_ACCEPTANCE_CRITERIA,"items":{"type":"string","minLength":1,"maxLength":super::MAX_ACCEPTANCE_CRITERION_CHARS}},
@@ -540,10 +538,6 @@ pub fn parse_observed(
     let result = (|| match call.name.as_str() {
         SPAWN => {
             let request: SpawnRequest = decode(call)?;
-            desk_agent_protocol::ai_assistant::validate_target_refs(
-                request.target_refs.iter().map(String::as_str),
-            )
-            .map_err(invalid)?;
             if request
                 .worker_id
                 .as_ref()

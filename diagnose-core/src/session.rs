@@ -810,6 +810,28 @@ impl AssistantRequestTargets {
     }
 }
 
+/// The device ids of a stored conversation's current request, read without
+/// decoding the whole session.
+pub fn stored_request_device_ids(state_json: &str) -> Result<Vec<String>, &'static str> {
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        #[serde(default)]
+        assistant_request_targets: Option<AssistantRequestTargets>,
+    }
+    let stored: Stored =
+        serde_json::from_str(state_json).map_err(|_| "invalid stored conversation")?;
+    Ok(stored
+        .assistant_request_targets
+        .map(|targets| {
+            targets
+                .targets
+                .into_iter()
+                .map(|target| target.device_id)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 impl PersistedAgentSession {
     /// Own a complete rollback snapshot without copying it through the caller's frame.
     #[inline(never)]
@@ -1831,6 +1853,38 @@ impl PersistedAgentSession {
         }
         self.assistant_request_targets = Some(Box::new(targets));
         Ok(())
+    }
+
+    /// A delegated child of an owner conversation or work follows that owner's
+    /// current devices: devices the owner adds become usable and devices it
+    /// removes do not. Returns whether the child's devices changed.
+    pub fn refresh_subagent_targets(
+        &mut self,
+        owner_targets: &[crate::dynamic_run::AssistantInputTarget],
+    ) -> Result<bool, &'static str> {
+        if !self.device_id.is_empty()
+            || !self
+                .agent_role
+                .binding()
+                .is_some_and(|binding| binding.source.follows_owner_devices())
+        {
+            return Ok(false);
+        }
+        if self.admitted_assistant_request_targets() == Some(owner_targets) {
+            return Ok(false);
+        }
+        let targets = AssistantRequestTargets {
+            input_revision: self.input_revision,
+            targets: owner_targets.to_vec(),
+        };
+        if !targets.valid_membership() {
+            return Err("invalid assistant device membership snapshot");
+        }
+        self.assistant_request_targets = Some(Box::new(targets));
+        if let crate::subagent::AgentRole::SubAgent { binding } = &mut self.agent_role {
+            binding.targets = owner_targets.to_vec();
+        }
+        Ok(true)
     }
 
     /// Both assistant entries freeze their device ceiling at input admission.

@@ -90,11 +90,56 @@ impl DeviceRoster {
     }
 }
 
+/// A delegated child of an ordinary owner conversation follows that
+/// conversation's current request devices. Both hosts store conversations in
+/// `agent_session` with the same subject columns; only the device field of
+/// the owner's state is read.
+async fn owner_current_devices(
+    db: &impl ConnectionTrait,
+    session: &PersistedAgentSession,
+) -> Result<Option<Vec<String>>, AssistantStoreError> {
+    use sea_orm::sea_query::{Alias, ExprTrait, Query};
+    let Some(binding) = session.agent_role.binding() else {
+        return Ok(None);
+    };
+    if !session.device_id.is_empty()
+        || !binding.source.follows_owner_devices()
+        || binding.source.workbench_id().is_some()
+    {
+        return Ok(None);
+    }
+    let query = Query::select()
+        .column(Alias::new("state_json"))
+        .from(Alias::new("agent_session"))
+        .and_where(
+            Expr::col(Alias::new("conversation_id")).eq(binding.root_conversation_id.clone()),
+        )
+        .and_where(Expr::col(Alias::new("actor_id")).eq(session.actor_id.clone()))
+        .and_where(Expr::col(Alias::new("device_id")).eq(""))
+        .to_owned();
+    let row = db
+        .query_one(&query)
+        .await
+        .map_err(AssistantStoreError::Backend)?
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    let state: String = row
+        .try_get("", "state_json")
+        .map_err(AssistantStoreError::Backend)?;
+    desk_diagnose_core::session::stored_request_device_ids(&state)
+        .map(Some)
+        .map_err(|_| AssistantStoreError::Inaccessible)
+}
+
 pub async fn permits_current_target(
     db: &impl ConnectionTrait,
     session: &desk_diagnose_core::session::PersistedAgentSession,
     device_id: &str,
 ) -> Result<bool, AssistantStoreError> {
+    if let Some(owner) = owner_current_devices(db, session).await?
+        && !owner.iter().any(|current| current == device_id)
+    {
+        return Ok(false);
+    }
     let Some(generation) = session.assistant_request_device_generation(device_id) else {
         return Ok(true);
     };
@@ -117,8 +162,14 @@ pub async fn current_request_devices(
         .iter()
         .all(|target| target.member_generation.is_none())
     {
+        let owner = owner_current_devices(db, session).await?;
         return Ok(targets
             .iter()
+            .filter(|target| {
+                owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.contains(&target.device_id))
+            })
             .map(|target| target.device_id.clone())
             .collect());
     }

@@ -393,7 +393,7 @@ pub async fn reserve(
             .map(|item| &item.request_id)
             .collect();
         format!(
-            " For independent work eligible for a Worker, you may return {{\"request_id\":\"<id>\",\"route\":\"worker\",\"dispatch\":{{}}}}. This queues the original request verbatim. Do not generate a task description. dispatch may include an existing worker_id and target_refs. Omit target_refs to use the original selection. The first_dispatch_scope events list any permitted device references for that request. Only use worker for these request IDs: {}. Route a report with native or defer.",
+            " For independent work eligible for a Worker, you may return {{\"request_id\":\"<id>\",\"route\":\"worker\",\"dispatch\":{{}}}}. This queues the original request verbatim. Do not generate a task description. dispatch may include an existing worker_id. The Worker uses the request's current devices; the first_dispatch_scope events list them. Only use worker for these request IDs: {}. Route a report with native or defer.",
             serde_json::to_string(&eligible)
                 .map_err(|_| AssistantStoreError::Invalid("Invalid Worker dispatch projection"))?,
         )
@@ -529,7 +529,7 @@ pub async fn settle(
                 .col_expr(request::Column::Coordinated, Expr::value(true))
                 .col_expr(request::Column::RetryAtMs, Expr::value(None::<i64>)),
             Some((Route::Worker, Some(proposal)))
-                if can_dispatch && item.dispatchable && proposal.validate(&item.target_refs) =>
+                if can_dispatch && item.dispatchable && proposal.validate() =>
             {
                 let json = serde_json::to_string(proposal)
                     .map_err(|_| AssistantStoreError::Invalid("Invalid Worker dispatch intent"))?;

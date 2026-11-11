@@ -132,13 +132,10 @@ async fn formatted_delegation_scenario(personal: bool) {
     let address = listener.local_addr().unwrap();
     let target_refs = ["worker-mac", "worker-linux"];
     let originals = ["first", "second"].map(|name| {
-        let mut args = json!({
+        let args = json!({
             "task":format!("Analyze {name} supplied value"), "required_for_completion":false,
             "name":name,"acceptance_criteria":["Report only the supplied value"]
         });
-        if personal && name == "first" {
-            args["target_refs"] = json!(target_refs);
-        }
         serde_json::to_string_pretty(&args).unwrap()
     });
     let delta = json!({"choices":[{"delta":{"role":"assistant","tool_calls": originals.iter().enumerate().map(|(index, args)| json!({

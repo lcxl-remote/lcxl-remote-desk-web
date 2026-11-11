@@ -57,6 +57,16 @@ impl DelegationSource {
         }
     }
 
+    /// Delegated work of an owner conversation or work uses that owner's
+    /// current devices. Published, scheduled and goal sources keep their
+    /// frozen execution targets.
+    pub fn follows_owner_devices(&self) -> bool {
+        matches!(
+            self,
+            Self::UserInput { .. } | Self::WorkbenchOwner { .. } | Self::IssueWork { .. }
+        )
+    }
+
     pub fn uses_request_targets(&self) -> bool {
         self.request_input_revision().is_some() || self.goal_id().is_some()
     }

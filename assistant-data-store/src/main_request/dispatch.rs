@@ -1,4 +1,4 @@
-//! A proposal selects a Worker and targets. The native work owns its objective.
+//! A proposal selects a Worker. The native work owns its objective and devices.
 
 use super::*;
 use desk_diagnose_core::subagent::{self, tools::SpawnRequest};
@@ -8,22 +8,13 @@ use desk_diagnose_core::subagent::{self, tools::SpawnRequest};
 pub struct FirstDispatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_refs: Option<Vec<String>>,
 }
 
 impl FirstDispatch {
-    pub(super) fn validate(&self, allowed: &[String]) -> bool {
+    pub(super) fn validate(&self) -> bool {
         self.worker_id
             .as_ref()
             .is_none_or(|id| native_ids::is(Kind::Worker, id))
-            && self.target_refs.as_ref().is_none_or(|targets| {
-                desk_agent_protocol::ai_assistant::validate_target_refs(
-                    targets.iter().map(String::as_str),
-                )
-                .is_ok()
-                    && targets.iter().all(|target| allowed.contains(target))
-            })
     }
 
     pub fn request_from(
@@ -45,7 +36,7 @@ impl FirstDispatch {
         let proposal: Self =
             serde_json::from_str(proposal).map_err(|_| AssistantStoreError::Inaccessible)?;
         let input = FrozenRequestInput::decode(row)?;
-        if !proposal.validate(&input.ask.target_refs) {
+        if !proposal.validate() {
             return Err(AssistantStoreError::Inaccessible);
         }
         let task = input.ask.question;
@@ -65,7 +56,6 @@ impl FirstDispatch {
             .collect();
         Ok(Some(SpawnRequest {
             worker_id: proposal.worker_id,
-            target_refs: proposal.target_refs.unwrap_or(input.ask.target_refs),
             name,
             task,
             acceptance_criteria,

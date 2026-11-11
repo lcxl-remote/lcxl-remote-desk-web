@@ -404,7 +404,6 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
     };
     let worker_request = SpawnRequest {
         worker_id: None,
-        target_refs: vec![],
         name: "Issue worker".into(),
         task: "Analyze the current issue".into(),
         acceptance_criteria: vec!["Report the analysis".into()],
