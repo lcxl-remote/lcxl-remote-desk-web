@@ -13,7 +13,11 @@ pub mod source;
 mod tests;
 
 pub const READ_ATTACHMENT_TOOL: &str = "read_conversation_attachment";
-pub const INLINE_BYTES: usize = 4 * 1024;
+/// Larger text results are externalized and read by page.
+pub const INLINE_TEXT_BYTES: usize = 4 * 1024;
+/// Structured results stay inline up to this size so a typical observation
+/// needs no extra attachment read.
+pub const INLINE_JSON_BYTES: usize = 16 * 1024;
 pub const MAX_JSON_BYTES: usize = 32 * 1024;
 pub const MAX_TEXT_BYTES: usize = 400_000;
 pub const MAX_PAGE_BYTES: usize = 32 * 1024;
@@ -196,7 +200,11 @@ pub fn prepare_text(kind: ContentKind, content: String) -> Result<PreparedText, 
     }
     Ok(PreparedText {
         kind,
-        external: content.len() > INLINE_BYTES,
+        external: content.len()
+            > match kind {
+                ContentKind::Json => INLINE_JSON_BYTES,
+                _ => INLINE_TEXT_BYTES,
+            },
         content,
         original_bytes,
         storage_truncated,

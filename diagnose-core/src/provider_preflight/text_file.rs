@@ -2086,7 +2086,7 @@ mod tests {
         else {
             panic!("metadata")
         };
-        for index in 0..16 {
+        for index in 0..80 {
             let mut entry = large_metadata.directory_entries[0].clone();
             entry.display_name = format!("other-{index}.txt");
             entry.object_ref.as_mut().unwrap().token = format!("other-file-{index}");
@@ -2096,6 +2096,7 @@ mod tests {
             desk_agent_protocol::ReadContextOutput::FileMetadataInspect(large_metadata),
         ))
         .unwrap();
+        assert!(large_text.len() > crate::conversation_attachment::INLINE_JSON_BYTES);
         externalized.conversation[1].tool_calls[0].arguments_json =
             r#"{"directory_request_id":"directory"}"#.into();
         let mut large_receipt = ChatMessage::tool_result("receipt", &source.id, &large_text);

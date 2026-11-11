@@ -1490,9 +1490,13 @@ async fn append_reviewed_tool_result_inner(
                     &frame,
                     deps.model.model_egress_policy()?.as_ref(),
                 )?;
-                let stored = if session.conversation.last().is_some_and(|message| {
-                    message.text.len() > crate::conversation_attachment::INLINE_BYTES
-                }) {
+                let body_stored = match session.conversation.last() {
+                    Some(message) => crate::conversation_attachment::delivery::stores_body(
+                        session, message, format,
+                    )?,
+                    None => false,
+                };
+                let stored = if body_stored {
                     let authorized_source = attachment.message.data_envelope.clone();
                     let mut image_only = attachment.restore(&pixels)?;
                     image_only.text = "Screenshot; the associated tool body is stored separately in this conversation's attachments.".into();

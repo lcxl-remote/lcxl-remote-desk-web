@@ -696,7 +696,7 @@ fn attachment_pages_share_inline_projection_and_keep_original_proof_on_small_sta
     for bytes in [1024 * 1024, 2 * 1024 * 1024] {
         std::thread::Builder::new().stack_size(bytes).spawn(|| {
             use crate::conversation_attachment::{batch::*, model_read, read::ReadPage};
-            let raw=json!({"conversation_id":"a".repeat(64),"messages":[{"source_id":"src_compact","message_id":"long-message","revision":3,"role":"assistant","content":"零".repeat(2000),"recorded_at_unix_ms":42,"statement_timezone":"Asia/Shanghai","source_device":{"device_ref":"dev_compact","recorded_name":null,"current_name":"Laptop","historical":true}}],"related_results":[],"previous_cursor":null,"next_cursor":null,"source_observed_through_unix_ms":42,"actual_bytes":6000,"has_more":false,"partial":false,"reasons":[]});
+            let raw=json!({"conversation_id":"a".repeat(64),"messages":[{"source_id":"src_compact","message_id":"long-message","revision":3,"role":"assistant","content":"零".repeat(6000),"recorded_at_unix_ms":42,"statement_timezone":"Asia/Shanghai","source_device":{"device_ref":"dev_compact","recorded_name":null,"current_name":"Laptop","historical":true}}],"related_results":[],"previous_cursor":null,"next_cursor":null,"source_observed_through_unix_ms":42,"actual_bytes":6000,"has_more":false,"partial":false,"reasons":[]});
             let history=history("read_conversation",raw.clone());
             let result=history.last().unwrap();
             let mut delivery=prepare_delivery(&DeliveryIdentity {conversation_id:"run",actor_id:"owner",device_id:"device",message_id:"result",tool_call_id:"call"},vec![OutputPart {name:"result".into(),content:PartContent::Json(result.text.clone()),source_truncated:false}],1).unwrap();

@@ -39,16 +39,22 @@ fn request() -> ReadRequest {
 
 #[test]
 fn result_thresholds_do_not_mutate_json() {
-    for size in [
-        INLINE_BYTES - 1,
-        INLINE_BYTES,
-        INLINE_BYTES + 1,
-        MAX_JSON_BYTES,
+    // Structured results stay inline up to 16 KiB; text bodies up to 4 KiB.
+    for (size, external) in [
+        (4 * 1024 + 1, false),
+        (6 * 1024, false),
+        (16 * 1024, false),
+        (16 * 1024 + 1, true),
+        (MAX_JSON_BYTES, true),
     ] {
         let content = format!("\"{}\"", "x".repeat(size - 2));
         let prepared = prepare_text(ContentKind::Json, content.clone()).unwrap();
         assert_eq!(prepared.content, content);
-        assert_eq!(prepared.external, size > INLINE_BYTES);
+        assert_eq!(prepared.external, external, "{size}");
+    }
+    for (size, external) in [(4 * 1024, false), (4 * 1024 + 1, true), (6 * 1024, true)] {
+        let prepared = prepare_text(ContentKind::Text, "x".repeat(size)).unwrap();
+        assert_eq!(prepared.external, external, "{size}");
     }
     let error = prepare_text(
         ContentKind::Json,
@@ -243,7 +249,8 @@ fn personal_conversation_without_device_keeps_web_result_attachments() {
         tool_call_id: "web-read",
     };
     let delivery =
-        batch::prepare_delivery(&identity, vec![text_part("body", INLINE_BYTES + 1)], 1).unwrap();
+        batch::prepare_delivery(&identity, vec![text_part("body", INLINE_TEXT_BYTES + 1)], 1)
+            .unwrap();
     let [attachment] = delivery.attachments.as_slice() else {
         panic!("expected one externalized body")
     };
@@ -272,7 +279,7 @@ fn streams_are_externalized_individually_without_envelope_recursion() {
     .unwrap();
     assert!(small.attachments.is_empty());
     assert_eq!(small.parts.len(), 2);
-    assert!(serde_json::to_vec(&small.parts).unwrap().len() > INLINE_BYTES);
+    assert!(serde_json::to_vec(&small.parts).unwrap().len() > INLINE_TEXT_BYTES);
     let split = delivery(
         vec![text_part("stdout", 4097), text_part("stderr", 4096)],
         1,

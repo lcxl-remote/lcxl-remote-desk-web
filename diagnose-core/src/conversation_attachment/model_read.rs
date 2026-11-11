@@ -338,7 +338,7 @@ mod tests {
             "search_public_web",
             "search-call",
             serde_json::json!({"query":"test"}),
-            serde_json::json!({"results":[source],"padding":"x".repeat(12000)}),
+            serde_json::json!({"results":[source],"padding":"x".repeat(20000)}),
         );
         let result = history.last().unwrap();
         let mut delivery = prepare_delivery(

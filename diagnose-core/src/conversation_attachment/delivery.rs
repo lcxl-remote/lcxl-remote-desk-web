@@ -254,6 +254,32 @@ fn prepare(
     })
 }
 
+fn identity<'a>(
+    session: &'a PersistedAgentSession,
+    message: &'a ChatMessage,
+) -> Result<DeliveryIdentity<'a>, AgentError> {
+    Ok(DeliveryIdentity {
+        conversation_id: &session.conversation_id,
+        actor_id: &session.actor_id,
+        device_id: &session.device_id,
+        message_id: &message.message_id,
+        tool_call_id: message
+            .tool_call_id
+            .as_deref()
+            .ok_or_else(|| invalid("Tool result has no call identity"))?,
+    })
+}
+
+/// Whether delivery stores any part of this tool result as an attachment.
+pub fn stores_body(
+    session: &PersistedAgentSession,
+    message: &ChatMessage,
+    format: ToolOutputFormat,
+) -> Result<bool, AgentError> {
+    let prepared = prepare(&identity(session, message)?, &message.text, format, 0)?;
+    Ok(!prepared.delivery.attachments.is_empty())
+}
+
 pub async fn externalize(
     store: &dyn SessionSeam,
     session: &PersistedAgentSession,
@@ -280,16 +306,7 @@ pub async fn externalize_with(
             "Attachment delivery has no admitted personal conversation",
         ));
     }
-    let identity = DeliveryIdentity {
-        conversation_id: &session.conversation_id,
-        actor_id: &session.actor_id,
-        device_id: &session.device_id,
-        message_id: &message.message_id,
-        tool_call_id: message
-            .tool_call_id
-            .as_deref()
-            .ok_or_else(|| invalid("Tool result has no call identity"))?,
-    };
+    let identity = identity(session, &message)?;
     if matches!(format, ToolOutputFormat::Json | ToolOutputFormat::Operation) {
         let mut projected = message.clone();
         crate::ui_model_ids::project_tool_message(&mut projected);
@@ -653,7 +670,7 @@ pub(crate) mod tests {
         };
         let store = Store::default();
         let session = session();
-        let original = json!({"body": "data".repeat(2000)}).to_string();
+        let original = json!({"body": "data".repeat(5000)}).to_string();
         let sha = digest(original.as_bytes());
         // A device read result carries no destination until it is admitted for a model.
         let mut result = ChatMessage::tool_result("message", "call", &original);
@@ -714,7 +731,7 @@ pub(crate) mod tests {
     async fn delivered_attachments_reach_the_model_and_read_by_alias() {
         let store = Store::default();
         let mut session = session();
-        let original = json!({"body": "data".repeat(2000)}).to_string();
+        let original = json!({"body": "data".repeat(5000)}).to_string();
         let message = externalize(
             &store,
             &session,
@@ -775,12 +792,32 @@ pub(crate) mod tests {
         assert!(!page.contains(&native));
     }
 
+    #[test]
+    fn screenshot_bodies_split_only_when_delivery_stores_them() {
+        let session = session();
+        let json = |bytes: usize| json!({"body": "x".repeat(bytes)}).to_string();
+        for (text, format, stored) in [
+            (json(6 * 1024), ToolOutputFormat::Json, false),
+            (json(20 * 1024), ToolOutputFormat::Json, true),
+            ("x".repeat(6 * 1024), ToolOutputFormat::Text, true),
+            ("x".repeat(1024), ToolOutputFormat::Text, false),
+        ] {
+            let message = ChatMessage::tool_result("message", "call", &text);
+            assert_eq!(
+                super::stores_body(&session, &message, format).unwrap(),
+                stored,
+                "{format:?} {}",
+                text.len()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn json_is_externalized_without_preview_and_restored_only_for_internal_checks() {
         let store = Store::default();
         let mut session = session();
         let original =
-            json!({"parent_window_id":"private-id", "body":"data".repeat(2000)}).to_string();
+            json!({"parent_window_id":"private-id", "body":"data".repeat(5000)}).to_string();
         let message = externalize(
             &store,
             &session,
