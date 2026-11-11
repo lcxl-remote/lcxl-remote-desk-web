@@ -2342,6 +2342,7 @@ async fn run_inner_impl(
         required_tool_choice_rejected,
         physical_model_attempt,
         permission_continuation_pending,
+        exact_mismatch_hinted: HashSet::new(),
     });
     loop {
         let outcome = phases::run_iteration(deps, session, turn_id, sink, &mut state).await?;
@@ -3021,7 +3022,7 @@ fn validate_browser_permission_references(
             .ok_or_else(|| AgentError {
                 kind: AgentErrorKind::InvalidInput,
                 message: format!(
-                    "invalid request_permissions arguments: tool `{}` requires exact browser input",
+                    "invalid permission request: tool `{}` requires exact browser input",
                     item.tool_name
                 ),
                 retryable: false,
@@ -3031,38 +3032,34 @@ fn validate_browser_permission_references(
         let value: serde_json::Value = serde_json::from_str(canonical).map_err(|_| AgentError {
             kind: AgentErrorKind::InvalidInput,
             message: format!(
-                "invalid request_permissions arguments: tool `{}` has invalid exact browser input",
+                "invalid permission request: tool `{}` has invalid exact browser input",
                 item.tool_name
             ),
             retryable: false,
             safe_for_model: true,
             error_code: None,
         })?;
-        let page: BrowserPageRef = serde_json::from_value(
-            value
-                .get("page")
-                .cloned()
-                .ok_or_else(|| AgentError {
-                    kind: AgentErrorKind::InvalidInput,
-                    message: format!(
-                        "invalid request_permissions arguments: tool `{}` is missing its exact page reference",
-                        item.tool_name
-                    ),
-                    retryable: false,
-                    safe_for_model: true,
-                    error_code: None,
-                })?,
-        )
-        .map_err(|_| AgentError {
-            kind: AgentErrorKind::InvalidInput,
-            message: format!(
-                "invalid request_permissions arguments: tool `{}` has an invalid exact page reference",
-                item.tool_name
-            ),
-            retryable: false,
-            safe_for_model: true,
-            error_code: None,
-        })?;
+        let page: BrowserPageRef =
+            serde_json::from_value(value.get("page").cloned().ok_or_else(|| AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!(
+                    "invalid permission request: tool `{}` is missing its exact page reference",
+                    item.tool_name
+                ),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })?)
+            .map_err(|_| AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!(
+                    "invalid permission request: tool `{}` has an invalid exact page reference",
+                    item.tool_name
+                ),
+                retryable: false,
+                safe_for_model: true,
+                error_code: None,
+            })?;
         let mut elements = Vec::new();
         for (key, child) in value.as_object().into_iter().flatten() {
             if key != "page" {
@@ -3097,7 +3094,7 @@ fn validate_browser_permission_references(
             return Err(AgentError {
                 kind: AgentErrorKind::InvalidInput,
                 message: format!(
-                    "invalid request_permissions arguments: tool `{}` must copy its exact page and element references from one unexpired verified browser result in this run",
+                    "invalid permission request: tool `{}` must copy its exact page and element references from one unexpired verified browser result in this run",
                     item.tool_name
                 ),
                 retryable: false,
@@ -3766,6 +3763,7 @@ async fn run_mutating<F: FnMut() -> String>(
     remaining_calls: &[crate::chat::ToolCall],
     mint: &mut F,
     halted: &mut Option<String>,
+    grant_required: &mut Option<bool>,
     sink: &mut dyn TurnSink,
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<Option<LoopOutcome>, AgentError> {
@@ -3817,6 +3815,12 @@ async fn run_mutating<F: FnMut() -> String>(
         .await
         {
             Ok(policy) => Some(policy),
+            // A command without its own approval becomes a call-time proposal;
+            // the planner validates the target and command for it.
+            Err(_) if session.trigger_origin.uses_call_time_approval() => {
+                *grant_required = Some(false);
+                return Ok(None);
+            }
             Err(error) => {
                 observation
                     .permission(crate::model_observability::PermissionOutcome::PolicyRejected);
@@ -3967,6 +3971,11 @@ async fn run_mutating<F: FnMut() -> String>(
                     ));
                 }
             }
+        }
+        Ok(ExecOutcome::GrantRequired { input_mismatch }) => {
+            // Nothing was reserved or dispatched; the caller owns the planning
+            // context and turns this call into a call-time proposal.
+            *grant_required = Some(input_mismatch);
         }
         Ok(ExecOutcome::PermissionRequired { request }) => {
             terminal_outcome = Some(
@@ -4442,6 +4451,7 @@ async fn run_wait<F: FnMut() -> String>(
 #[cfg(test)]
 mod tests;
 
+mod permission_proposal;
 mod task_permission;
 
 async fn read_conversation_attachment(

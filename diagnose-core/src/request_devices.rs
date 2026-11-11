@@ -512,33 +512,35 @@ pub(crate) async fn resolve_approved_command(
     Ok(policy)
 }
 
+/// The selected-device command tool, and whether a command is already
+/// approved on some device. Without an approval the tool is still offered when
+/// a command may be proposed; calling it creates the call-time proposal.
 pub(crate) fn command_tool(
     session: &PersistedAgentSession,
     devices: &[RequestDevice],
     registry: &ProviderRegistry,
-) -> Option<RegisteredTool> {
-    if !selected_command_turn(session)
-        || !devices.iter().any(|device| {
-            device.online
-                && device
-                    .ready_capabilities
-                    .contains(&Capability::ShellExecConfirmed)
-                && device
-                    .approved_read_tools
-                    .iter()
-                    .any(|name| name == crate::command_confirmation::COMMAND_TOOL)
-        })
-    {
+) -> Option<(RegisteredTool, bool)> {
+    let approved = devices.iter().any(|device| {
+        device.online
+            && device
+                .ready_capabilities
+                .contains(&Capability::ShellExecConfirmed)
+            && device
+                .approved_read_tools
+                .iter()
+                .any(|name| name == crate::command_confirmation::COMMAND_TOOL)
+    });
+    if !selected_command_turn(session) || !(approved || can_request_command(session, devices)) {
         return None;
     }
     let mut tool = registry
         .capability_for_tool(crate::command_confirmation::COMMAND_TOOL)?
         .registered_tool();
     add_target_selector(&mut tool, !has_single_target(session));
-    tool.spec
-        .description
-        .push_str("\nUse the exact approved arguments and the original target_ref.");
-    Some(tool)
+    tool.spec.description.push_str(
+        "\nEach command is approved when called. After approval, call again with the same arguments and target_ref.",
+    );
+    Some((tool, approved))
 }
 
 pub fn command_input(
@@ -1001,11 +1003,14 @@ pub fn approved_read_tools(
 
 /// A new connection can reuse a readiness revision. Match the complete
 /// approved binding before the host attempts to consume a selected read grant.
+/// Check a selected-device read against the device and its approvals.
+/// `Ok(false)`: the read is valid but no approval covers this input, which a
+/// call-time approval session turns into a proposal.
 pub fn require_current_read_target(
     session: &PersistedAgentSession,
     call: &ToolCall,
     target: &SelectedDeviceTarget,
-) -> Result<(), AgentError> {
+) -> Result<bool, AgentError> {
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     let invalid = || {
         crate::subagent::invalid(
@@ -1021,10 +1026,10 @@ pub fn require_current_read_target(
     if crate::provider_preflight::classify_provider_call(descriptor, call)?
         == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
     {
-        return Ok(());
+        return Ok(true);
     }
     let canonical = canonical_selected_read_input(&call.name, input).map_err(|_| invalid())?;
-    if session.permission_requests.iter().any(|request| {
+    Ok(session.permission_requests.iter().any(|request| {
         request.input_revision <= session.input_revision
             && matches!(
                 request.state,
@@ -1039,11 +1044,7 @@ pub fn require_current_read_target(
                             && crate::permission_tools::permission_input_mode(descriptor)
                                 == "optional_exact_input")
             })
-    }) {
-        Ok(())
-    } else {
-        Err(invalid())
-    }
+    }))
 }
 
 pub fn platform_name(platform: &str) -> Option<&'static str> {
@@ -1135,7 +1136,7 @@ pub(crate) fn append_catalogue(
     }
     prompt.push_str("\nWhen advertised, use read_system_info to check current CPU, memory, and disk capacity. Use the online field for device connectivity and the advertised tools for operations available in this conversation.");
     if can_request_command {
-        prompt.push_str(" If process-level CPU or disk details require an OS command, call request_permissions directly with target_ref and one item with tool_name=exec_command, reason, and exact_input containing shell, command and timeout_ms. Choose a bounded, non-modifying command for the device's platform. Run cheap diagnostics first and narrow expensive recursive scans to one relevant directory at a time. If a scan times out, use its partial output and narrow the scan before requesting another command. The exact command is exposed after approval; do not call describe_tools or ask for a separate chat confirmation.");
+        prompt.push_str(" If process-level CPU or disk details require an OS command, call exec_command with target_ref, shell, command and timeout_ms; each command is approved when called. Choose a bounded, non-modifying command for the device's platform. Run cheap diagnostics first and narrow expensive recursive scans to one relevant directory at a time. If a scan times out, use its partial output and narrow the scan before running another command. Do not ask for a separate chat confirmation.");
     }
 }
 

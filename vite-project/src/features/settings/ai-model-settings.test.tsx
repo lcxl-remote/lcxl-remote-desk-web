@@ -78,6 +78,7 @@ beforeEach(() => {
         max_steps_per_turn: 20,
         max_same_tool_calls_per_turn: 10,
         exec_approval_timeout_secs: 300,
+        application_scope_default_uses: 5,
         api_key_set: true,
     }
     h.providerMutateAsync.mockResolvedValue({ success: true, data: h.providerData })
@@ -191,6 +192,7 @@ describe("AiModelSettings", () => {
         expect(payload.max_steps_per_turn).toBe(20)
         expect(payload.max_same_tool_calls_per_turn).toBe(10)
         expect(payload.exec_approval_timeout_secs).toBe(300)
+        expect(payload.application_scope_default_uses).toBe(5)
         // The provider form no longer carries the collection policy.
         expect(payload.allow_logs).toBeUndefined()
         expect(payload.allow_screen).toBeUndefined()
@@ -238,6 +240,19 @@ describe("AiModelSettings", () => {
         await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
 
         expect(lastProviderPayload().exec_approval_timeout_secs).toBe(120)
+    })
+
+    it("saves app operation approval uses and defaults them to 8", async () => {
+        delete h.providerData.application_scope_default_uses
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        expect(screen.getByLabelText("App operation approval uses")).toHaveValue(8)
+        fireEvent.change(screen.getByLabelText("App operation approval uses"), {
+            target: { value: "3" },
+        })
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalled())
+        expect(lastProviderPayload().application_scope_default_uses).toBe(3)
     })
 
     it("rejects an out-of-range command approval window", async () => {

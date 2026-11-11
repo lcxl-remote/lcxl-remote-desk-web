@@ -21,6 +21,8 @@ pub(super) struct LoopState<M> {
     pub required_tool_choice_rejected: bool,
     pub physical_model_attempt: u32,
     pub permission_continuation_pending: bool,
+    /// Tools whose exact-input mismatch was already explained in this turn.
+    pub exact_mismatch_hinted: HashSet<String>,
 }
 
 enum PhaseResult<F> {
@@ -358,13 +360,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             if session.trigger_origin == crate::session::TriggerOrigin::ScheduledTask {
                 return true;
             }
+            // A loaded tool without a grant stays callable: the call itself
+            // becomes the approval request.
             names.contains(tool.name())
                 || (session
                     .capability_disclosure
                     .loaded_tool_names
                     .iter()
                     .any(|name| name == tool.name())
-                    && policy_read_names.iter().any(|name| name == tool.name()))
+                    && (session.trigger_origin.uses_call_time_approval()
+                        || policy_read_names.iter().any(|name| name == tool.name())))
         });
     }
     if planning_goal.is_some() {
@@ -462,9 +467,11 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             });
         }
     }
+    // Selected-device tools without a grant stay callable: the host answers
+    // a call without a matching grant with a call-time proposal.
     for (tool, callable) in &selected_reads {
         exposed.retain(|candidate| candidate.name() != tool.name());
-        if *callable {
+        if *callable || session.trigger_origin.uses_call_time_approval() {
             exposed.push(tool);
         }
     }
@@ -552,7 +559,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     let mut definition_registry = callable_registry.clone();
     for (tool, callable) in &selected_reads {
         definition_registry.retain(|candidate| candidate.name() != tool.name());
-        if *callable {
+        if *callable || session.trigger_origin.uses_call_time_approval() {
             definition_registry.push(tool.clone());
         }
     }
@@ -650,19 +657,27 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         exposed.retain(|candidate| candidate.name() != tool.name());
         exposed.push(tool);
     }
-    let can_request_selected_command = selected_permission_tool.is_some()
-        && crate::request_devices::can_request_command(session, &request_devices);
-    let selected_command_tool = if !goal_control_only && planning_goal.is_none() {
+    let can_request_selected_command =
+        crate::request_devices::can_request_command(session, &request_devices);
+    let offered_command_tool = if !goal_control_only && planning_goal.is_none() {
         deps.provider_registry.and_then(|registry| {
             crate::request_devices::command_tool(session, &request_devices, registry)
         })
     } else {
         None
     };
+    // Only the first step after a command decision is limited to that command;
+    // a different command later becomes its own call-time proposal.
+    let (selected_command_tool, offered_command_tool) = match offered_command_tool {
+        Some((tool, true)) if state.permission_continuation_pending => (Some(tool), None),
+        Some((tool, _)) => (None, Some(tool)),
+        None => (None, None),
+    };
     if let Some(tool) = &selected_command_tool {
-        // Selected-device permission proposals contain a single command. Finish
-        // that decision before starting another device read or a new proposal.
         exposed.clear();
+        exposed.push(tool);
+    } else if let Some(tool) = &offered_command_tool {
+        exposed.retain(|candidate| candidate.name() != tool.name());
         exposed.push(tool);
     }
     let require_tool_choice = goal_control_only || selected_command_tool.is_some();
@@ -768,7 +783,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             }
         }
         if !policy_read_names.is_empty() {
-            system_prompt.text.push_str(&format!("\nPOLICY-ELIGIBLE READS: {}. These existing read policies can issue authority at invocation. Load missing parameter details to use them; do not request approval solely because no grant is listed yet. Sensitive arguments can still require approval; the server checks the complete input. Other capabilities need current grants.", policy_read_names.join(", ")));
+            system_prompt.text.push_str(&format!("\nPOLICY-ELIGIBLE READS: {}. These existing read policies can issue authority at invocation. Load missing parameter details and call them directly; sensitive arguments can still require approval, which the call itself requests.", policy_read_names.join(", ")));
         }
         if session.surface == crate::session::AgentSessionSurface::AiAssistant {
             system_prompt
@@ -1124,7 +1139,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     "runtime-permission-continuation-{turn_id}-{}",
                     session.input_revision
                 );
-                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. Continue in dependency order using active authorized tools: finish required prerequisites (for example create a file before executing it), and do not execute a dependent action if its prerequisite failed. When calling a tool with approved_exact_input, copy the displayed arguments unchanged. Do not add fixed protocol metadata such as schema_version; the server restores it before exact authorization checks. Do not unnecessarily repeat inspection, recreate a preview, or request an already active permission, because this can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
+                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. An approved paused call runs only when you call it again: call the same tool with the same arguments as the paused call, unchanged, or copy approved_exact_input from CURRENT AUTHORIZED GRANTS when shown. Do not add fixed protocol metadata such as schema_version; the server restores it before exact authorization checks. Continue in dependency order: finish required prerequisites (for example create a file before executing it), and do not execute a dependent action if its prerequisite failed. Do not unnecessarily repeat inspection or recreate a preview, because this can replace the approved ephemeral object reference. If the decision was a refusal, adapt to it or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
                 let marker_text = if permission_continuation_blocked {
                     let reasons = deps
                         .permission_continuation_exact_tools
@@ -1167,7 +1182,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     )
                 } else if selected_command_tool.is_some() {
                     format!(
-                        "{marker_text} For the approved selected-device command, copy target_ref from the original permission proposal and use the exact_input from its exec_command item as the remaining arguments. The server checks both the target and command before dispatch."
+                        "{marker_text} For the approved selected-device command, call exec_command again with the same target_ref and arguments as the paused call. The server checks both the target and command before dispatch."
                     )
                 } else {
                     marker_text.to_string()
@@ -1220,7 +1235,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 "runtime-empty-end-turn-retry-{turn_id}-{}",
                 state.empty_end_turn_retries
             );
-            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response contained reasoning but no assistant text or tool call. Continue the same requirement now with either a visible answer or a valid exposed tool call. This notice grants no permission. If a prior tool was denied for missing authorization, request the exact bounded grant before retrying it.";
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response contained reasoning but no assistant text or tool call. Continue the same requirement now with either a visible answer or a valid exposed tool call. This notice grants no permission; a call without authorization asks for approval when made.";
             let parent = child_runtime_label.as_ref().or_else(|| {
                 crate::permission_resume::latest_user_requirement(&session.conversation)
                     .and_then(|message| message.data_envelope.as_ref())
@@ -2807,7 +2822,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             (state.mint)(),
                                             &call.id,
                                             format!(
-                                                "tool_not_advertised: tool `{}` is not advertised in this request. This does not by itself mean permission was denied. Check CURRENT AUTHORIZED GRANTS and the capability index; request permission only if no matching active grant exists. Use describe_tools for a budget-hidden authorized tool only when describe_tools is advertised. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
+                                                "tool_not_advertised: tool `{}` is not advertised in this request. This does not by itself mean permission was denied. Load it with describe_tools when describe_tools is advertised; calling a loaded tool asks for approval when needed. Currently advertised tools (includes built-in conversation tools; only Provider names from the capability index can be loaded): {}",
                                                 call.name,
                                                 exposed
                                                     .iter()
@@ -3040,46 +3055,64 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
                                     || tool.has_device_capability(&snapshot
                                         .policy_read_capabilities));
-                                        let denial = if ready
-                                            && session.trigger_origin
-                                                != crate::session::TriggerOrigin::ScheduledTask
+                                        let ungranted = ready
+                                            && session.trigger_origin.uses_call_time_approval()
                                             && !active.contains(&call.name)
-                                            && !policy_read
+                                            && !policy_read;
+                                        // A direct call without any grant for this tool becomes
+                                        // a call-time proposal; the host still judges calls
+                                        // that have some grant against their exact input.
+                                        if ungranted
+                                            && (tool.effect == ToolEffect::ReadOnly
+                                                || session.allows_new_mutation())
                                         {
-                                            crate::permission_tools::latest_tool_request_denial(
-                                                &session.permission_requests,
-                                                &session.permission_decisions,
-                                                &call.name,
-                                                session.input_revision,
-                                            )
-                                        } else {
-                                            None
-                                        };
+                                            let proposal = crate::future::phase(|| async {
+                                                permission_proposal::propose_call(
+                                                    deps,
+                                                    session,
+                                                    call,
+                                                    permission_proposal::ProposalContext {
+                                                        authority: authority.as_ref(),
+                                                        request_devices: &request_devices,
+                                                        selected_reads: &selected_reads,
+                                                        step_inventory: step_inventory.as_deref(),
+                                                        permission_candidates,
+                                                        remaining: &turn.tool_calls
+                                                            [call_index + 1..],
+                                                        parent_envelope: turn
+                                                            .provider_meta
+                                                            .data_envelope
+                                                            .as_ref(),
+                                                    },
+                                                    &mut state.mint,
+                                                    &tool_batch.input(call_index),
+                                                    sink,
+                                                )
+                                                .await
+                                            });
+                                            if let Some(outcome) = proposal.await? {
+                                                return Ok(Some(outcome));
+                                            }
+                                            continue;
+                                        }
                                         let reason = if !ready {
                                             Some("capability_not_ready")
-                                        } else if session.trigger_origin
-                                            != crate::session::TriggerOrigin::ScheduledTask
-                                            && !active.contains(&call.name)
-                                            && !policy_read
-                                        {
-                                            Some(if denial.is_some() {
-                                                "permission_denied"
-                                            } else {
-                                                crate::grant_disclosure::inactive_grant_reason(
-                                                    &grants,
-                                                    &call.name,
-                                                    current_unix_ms(deps.clock)?,
-                                                    snapshot.readiness_revision,
-                                                )
-                                            })
+                                        } else if ungranted {
+                                            Some(crate::grant_disclosure::inactive_grant_reason(
+                                                &grants,
+                                                &call.name,
+                                                current_unix_ms(deps.clock)?,
+                                                snapshot.readiness_revision,
+                                            ))
                                         } else {
                                             None
                                         };
                                         if let Some(reason) = reason {
                                             if ready {
-                                                tool_batch.permission(call_index,if let Some(denial)=denial {
-                                    crate::model_observability::permission::state_outcome(crate::dynamic_run::PermissionRequestState::Denied,denial.actor)
-                                } else { crate::model_observability::PermissionOutcome::PolicyRejected });
+                                                tool_batch.permission(
+                                                    call_index,
+                                                    crate::model_observability::PermissionOutcome::PolicyRejected,
+                                                );
                                             }
                                             append_internal_tool_result(
                                                 session,
@@ -3087,7 +3120,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 (state.mint)(),
                                                 &call.id,
                                                 format!(
-                                                    "{reason}: the schema is visible but this invocation is not currently eligible. Read the latest authorization and readiness state; no action was dispatched. Never retry the same denied action. A materially narrower action after an AI review denial needs a new permission request; an owner denial requires new owner input."
+                                                    "{reason}: this invocation is not currently eligible. Read the latest authorization and readiness state; no action was dispatched. Never retry the same denied action."
                                                 ),
                                                 reason,
                                             )?;
@@ -3474,6 +3507,35 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     provided_envelope,
                                                     background_task,
                                                 ) = match completion.outcome {
+                                                    Ok(ReadOutcome::GrantRequired {
+                                                        input_mismatch,
+                                                    }) => {
+                                                        return permission_proposal::grant_required(
+                                                            deps,
+                                                            session,
+                                                            call,
+                                                            input_mismatch,
+                                                            &mut state.exact_mismatch_hinted,
+                                                            permission_proposal::ProposalContext {
+                                                                authority: authority.as_ref(),
+                                                                request_devices: &request_devices,
+                                                                selected_reads: &selected_reads,
+                                                                step_inventory: step_inventory
+                                                                    .as_deref(),
+                                                                permission_candidates,
+                                                                remaining: &turn.tool_calls
+                                                                    [call_index + 1..],
+                                                                parent_envelope: turn
+                                                                    .provider_meta
+                                                                    .data_envelope
+                                                                    .as_ref(),
+                                                            },
+                                                            &mut state.mint,
+                                                            &tool_observation,
+                                                            sink,
+                                                        )
+                                                        .await;
+                                                    }
                                                     Ok(ReadOutcome::PermissionRequired {
                                                         request,
                                                     }) => {
@@ -3656,6 +3718,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             })
                                         }
                                         ToolEffect::Mutating => crate::future::phase(|| async {
+                                            let mut grant_required = None;
                                             if let Some(outcome) = crate::future::boxed(|| {
                                                 run_mutating(
                                                     deps,
@@ -3665,6 +3728,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     &turn.tool_calls[call_index + 1..],
                                                     &mut (state.mint),
                                                     &mut halted,
+                                                    &mut grant_required,
                                                     sink,
                                                     &tool_observation,
                                                 )
@@ -3672,6 +3736,32 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             .await?
                                             {
                                                 return Ok(Some(outcome));
+                                            }
+                                            if let Some(input_mismatch) = grant_required {
+                                                return permission_proposal::grant_required(
+                                                    deps,
+                                                    session,
+                                                    call,
+                                                    input_mismatch,
+                                                    &mut state.exact_mismatch_hinted,
+                                                    permission_proposal::ProposalContext {
+                                                        authority: authority.as_ref(),
+                                                        request_devices: &request_devices,
+                                                        selected_reads: &selected_reads,
+                                                        step_inventory: step_inventory.as_deref(),
+                                                        permission_candidates,
+                                                        remaining: &turn.tool_calls
+                                                            [call_index + 1..],
+                                                        parent_envelope: turn
+                                                            .provider_meta
+                                                            .data_envelope
+                                                            .as_ref(),
+                                                    },
+                                                    &mut state.mint,
+                                                    &tool_observation,
+                                                    sink,
+                                                )
+                                                .await;
                                             }
 
                                             Ok(None)
@@ -4510,463 +4600,29 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         }
                                         ToolEffect::PermissionPlanning => {
                                             crate::future::phase(|| async {
-                                                sink.on_tool_started(
-                                                    &call.name,
-                                                    &call.id,
-                                                    &call.arguments_json,
-                                                );
-                                                let created_at = (deps.clock)();
-                                                let request_id = stable_lineage_id(
-                                                    "permission-request",
-                                                    &(
-                                                        &session.conversation_id,
-                                                        session.input_revision,
-                                                        session.last_event_seq.saturating_add(1),
-                                                        &call.id,
-                                                    ),
-                                                );
-                                                let selected_request = crate::future::boxed(|| {
-                                                    crate::request_devices::plan_device_permission(
-                                                        deps.tools,
-                                                        deps.provider_registry,
-                                                        authority
-                                                            .as_ref()
-                                                            .map(|snapshot| snapshot.surface),
-                                                        session,
-                                                        &request_devices,
-                                                        &selected_reads,
-                                                        call,
-                                                        &request_id,
-                                                        &created_at,
-                                                    )
-                                                })
-                                                .await;
-                                                let request = selected_request.unwrap_or_else(|| deps.provider_registry.ok_or_else(|| AgentError {
-                                kind: AgentErrorKind::Internal,
-                                message: "permission planning has no Provider catalog".into(),
-                                retryable: false,
-                                safe_for_model: false,
-                                error_code: None,
-                            }).and_then(|registry| {
-                                crate::permission_tools::build_permission_request(
-                                    call,
-                                    registry,
-                                    request_id.clone(),
-                                    session.input_revision,
-                                    created_at.clone(),
-                                )
-                            }).and_then(|mut request| {
-                                let providers = deps.provider_registry.ok_or_else(|| AgentError {
-                                    kind: AgentErrorKind::Internal,
-                                    message: "permission planning has no Provider catalog".into(),
-                                    retryable: false,
-                                    safe_for_model: false,
-                                    error_code: None,
-                                })?;
-                                let inventory = step_inventory.as_deref().ok_or_else(|| AgentError {
-                                    kind: AgentErrorKind::Internal,
-                                    message: "permission planning has no live capability inventory".into(),
-                                    retryable: false,
-                                    safe_for_model: false,
-                                    error_code: None,
-                                })?;
-                                // An interactive command needs the owner's live terminal
-                                // at approval time; unattended turns cannot provide one.
-                                if session.trigger_origin != crate::session::TriggerOrigin::User
-                                    && request.items.iter().any(|item| {
-                                        item.command_confirmation
-                                            .as_ref()
-                                            .is_some_and(|confirmation| confirmation.is_interactive())
-                                    })
-                                {
-                                    return Err(AgentError {
-                                        kind: AgentErrorKind::PermissionDenied,
-                                        message: "interactive (PTY) commands need the owner's live terminal and cannot be requested from a goal or scheduled run; use a non-interactive command".into(),
-                                        retryable: false,
-                                        safe_for_model: true,
-                                        error_code: None,
-                                    });
-                                }
-                                crate::application_ui::bind_request(&mut request, &session.conversation)?;
-                                crate::permission_tools::include_desktop_action_reads(&mut request, providers)?;
-                                validate_permission_request_availability(
-                                    &session.agent_role,
-                                    &session.conversation,
-                                    &request,
-                                    providers,
-                                    inventory,
-                                    deps.registry,
-                                    permission_candidates,
-                                )?;
-                                let now = chrono::DateTime::parse_from_rfc3339(&request.created_at)
-                                    .ok()
-                                    .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-                                    .unwrap_or(0);
-                                if request.items.iter().any(|item| crate::provider_preflight::ArtifactCallPreflight::supports(&item.tool_name)) {
-                                    let surface = authority.as_ref().ok_or_else(|| crate::subagent::invalid("artifact permission has no current authorization context"))?.surface;
-                                    crate::permission_tools::bind_artifact_request(&mut request, session, providers, surface, now)?;
-                                }
-                                for item in &request.items {
-                                    crate::provider_preflight::text_file::validate_mutation_permission_input(
-                                        session,
-                                        &item.tool_name,
-                                        item.canonical_input_json.as_deref(),
-                                        now,
-                                    )?;
-                                    crate::provider_preflight::text_file::validate_read_permission_input_with_context(
-                                        session,
-                                        &item.tool_name,
-                                        item.canonical_input_json.as_deref(),
-                                        now,
-                                        deps.tools.original_read_context(),
-                                    )?;
-                                }
-                                Ok(request)
-                            }));
-                                                let request = match request {
-                                            Ok(mut request) => {
-                                                crate::application_launch::bind_permission_request(
-                                                    &mut request,
+                                                permission_proposal::propose(
+                                                    deps,
                                                     session,
-                                                    authority.as_ref().map_or(0, |snapshot| {
-                                                        snapshot.readiness_revision
-                                                    }),
-                                                    deps.tools,
+                                                    call,
+                                                    call,
+                                                    permission_proposal::ProposalContext {
+                                                        authority: authority.as_ref(),
+                                                        request_devices: &request_devices,
+                                                        selected_reads: &selected_reads,
+                                                        step_inventory: step_inventory.as_deref(),
+                                                        permission_candidates,
+                                                        remaining: &turn.tool_calls
+                                                            [call_index + 1..],
+                                                        parent_envelope: turn
+                                                            .provider_meta
+                                                            .data_envelope
+                                                            .as_ref(),
+                                                    },
+                                                    &mut state.mint,
+                                                    &tool_observation,
+                                                    sink,
                                                 )
                                                 .await
-                                                .map(|()| request)
-                                            }
-                                            Err(error) => Err(error),
-                                        };
-                                                let request = match request {
-                                                    Ok(request) => deps
-                                                        .session_seam
-                                                        .validate_task_permission_request(
-                                                            session,
-                                                            &request,
-                                                            deps.provider_registry.ok_or_else(
-                                                                || {
-                                                                    AgentError {
-                                                kind: AgentErrorKind::InvalidInput,
-                                                message:
-                                                    "Permission provider catalog is unavailable"
-                                                        .into(),
-                                                retryable: false,
-                                                safe_for_model: true,
-                                                error_code: None,
-                                            }
-                                                                },
-                                                            )?,
-                                                        )
-                                                        .await
-                                                        .map(|()| request),
-                                                    Err(error) => Err(error),
-                                                };
-                                                tool_observation.preflight_result(&request);
-                                                let request = match request {
-                                            Ok(request) => {
-                                                if let Some((denied_request, denied_item)) =
-                                            crate::permission_tools::unchanged_ai_denied_item(
-                                                &session.permission_requests,
-                                                &session.permission_decisions,
-                                                &request,
-                                            )
-                                        {
-                                            tool_observation.permission(crate::model_observability::PermissionOutcome::PolicyRejected);
-                                            Err(AgentError {
-                                                kind: AgentErrorKind::InvalidInput,
-                                                message: format!(
-                                                    "permission_denied: this action is unchanged from AI-denied item `{denied_item}` in request `{denied_request}`. Do not rename or repeat it on the same owner input. Narrow the actual action or ask the owner about this specific rejected operation."
-                                                ),
-                                                retryable: false,
-                                                safe_for_model: true,
-                                                error_code: None,
-                                            })
-                                        } else {
-                                            Ok(request)
-                                        }
-                                            }
-                                            Err(error) => Err(error),
-                                        };
-                                                match request {
-                                                    Ok(request) => {
-                                                        // The proposal now owns its complete input. Retire
-                                                        // preparatory schemas; approval will expose tools
-                                                        // from grants, including separately approved reads.
-                                                        session
-                                                            .capability_disclosure
-                                                            .loaded_tool_names
-                                                            .retain(|name| {
-                                                                !request.items.iter().any(|item| {
-                                                                    item.tool_name == *name
-                                                                })
-                                                            });
-                                                        let existing = session
-                                        .permission_requests
-                                        .iter()
-                                        .rev()
-                                        .find(|existing| {
-                                            crate::permission_tools::equivalent_permission_request(
-                                                existing, &request,
-                                            )
-                                        })
-                                        .cloned();
-                                                        let existing = match existing {
-                                        Some(existing)
-                                            if existing.state == crate::dynamic_run::PermissionRequestState::Approved && deps
-                                                .session_seam
-                                                .permission_request_can_renew(session, &existing)
-                                                .await? =>
-                                        {
-                                            None
-                                        }
-                                        other => other,
-                                    };
-                                                        if let Some(existing) = existing {
-                                                            let actor = session
-                                                                .permission_decisions
-                                                                .iter()
-                                                                .find(|decision| {
-                                                                    decision.request_id
-                                                                        == existing.request_id
-                                                                        && decision.input_revision
-                                                                            == existing
-                                                                                .input_revision
-                                                                })
-                                                                .map(|decision| decision.actor);
-                                                            tool_observation.permission(
-                                            crate::model_observability::permission::state_outcome(
-                                                existing.state,
-                                                actor,
-                                            ),
-                                        );
-                                                            let decision_state = match existing.state {
-                                            crate::dynamic_run::PermissionRequestState::Pending => {
-                                                "pending"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::NeedsRevalidation => {
-                                                "needs_revalidation"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::Approved => {
-                                                "approved"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::PartiallyApproved => {
-                                                "partially_approved"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::Denied => {
-                                                "denied"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::Replaced => {
-                                                "replaced"
-                                            }
-                                            crate::dynamic_run::PermissionRequestState::Withdrawn => {
-                                                "withdrawn"
-                                            }
-                                        };
-                                                            let content =
-                                                crate::permission_tools::existing_request_result(
-                                                    &existing.request_id,
-                                                    decision_state,
-                                                )
-                                                .to_string();
-                                                            let envelope = derive_internal_tool_result_envelope(
-                                            turn.provider_meta.data_envelope.as_ref(),
-                                            &call.id,
-                                            &content,
-                                            crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                                        )?;
-                                                            let mut message =
-                                                                ChatMessage::tool_result(
-                                                                    (state.mint)(),
-                                                                    &call.id,
-                                                                    content,
-                                                                );
-                                                            message.data_envelope = envelope;
-                                                            session.conversation.push(message);
-                                                            finish_tool(
-                                                                session, &call.id, true, sink,
-                                                            );
-                                                            if existing.state.can_user_decide() {
-                                                                append_unstarted_tool_results(
-                                                                    session,
-                                                                    &turn.tool_calls
-                                                                        [call_index + 1..],
-                                                                    turn.provider_meta
-                                                                        .data_envelope
-                                                                        .as_ref(),
-                                                                    &mut (state.mint),
-                                                                    "not executed: waiting for the existing user permission decision",
-                                                                    "permission_pause_tool_call",
-                                                                )?;
-                                                                deps.session_seam
-                                                                    .save(session)
-                                                                    .await?;
-                                                                sink.on_permission_requested(
-                                                                    &existing.request_id,
-                                                                    existing.items.len(),
-                                                                );
-                                                                return Ok(Some(
-                                                                LoopOutcome::PermissionRequested {
-                                                                    request_id: existing.request_id,
-                                                                },
-                                                            ));
-                                                            }
-                                                            deps.session_seam.save(session).await?;
-                                                            return Ok(None);
-                                                        }
-                                                        let content = serde_json::json!({
-                                                            "status": "pending_user_decision",
-                                                            "request_id": request.request_id,
-                                                            "item_count": request.items.len(),
-                                                            "authority": "none"
-                                                        })
-                                                        .to_string();
-                                                        let result_envelope = derive_internal_tool_result_envelope(
-                                        turn.provider_meta.data_envelope.as_ref(),
-                                        &call.id,
-                                        &content,
-                                        crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                                    )?;
-                                                        let event_seq = session
-                                                            .last_event_seq
-                                                            .checked_add(1)
-                                                            .ok_or_else(|| {
-                                                                AgentError {
-                                                            kind: AgentErrorKind::Internal,
-                                                            message:
-                                                                "agent run event sequence exhausted"
-                                                                    .into(),
-                                                            retryable: false,
-                                                            safe_for_model: false,
-                                                            error_code: None,
-                                                        }
-                                                            })?;
-                                                        let event = crate::dynamic_run::PermissionRequestedEvent {
-                                        approval_mode_revision: None,
-                                        event: crate::dynamic_run::AgentRunEvent {
-                                            schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
-                                            event_id: stable_lineage_id(
-                                                "permission-event",
-                                                &(&session.conversation_id, event_seq, &request.request_id),
-                                            ),
-                                            run_id: session.conversation_id.clone(),
-                                            event_seq,
-                                            input_revision: session.input_revision,
-                                            kind: crate::dynamic_run::AgentRunEventKind::PermissionRequested,
-                                            correlation_id: Some(request.request_id.clone()),
-                                            source_envelope_ids: turn
-                                                .provider_meta
-                                                .data_envelope
-                                                .as_ref()
-                                                .map(|envelope| vec![envelope.envelope_id.clone()])
-                                                .unwrap_or_default(),
-                                            result_envelope_ids: result_envelope
-                                                .as_ref()
-                                                .map(|envelope| vec![envelope.envelope_id.clone()])
-                                                .unwrap_or_default(),
-                                            created_at,
-                                        },
-                                        request: request.clone(),
-                                    };
-                                                        event.validate().map_err(|error| AgentError {
-                                                    kind: AgentErrorKind::Internal,
-                                                    message: format!(
-                                                        "invalid permission request event: {error}"
-                                                    ),
-                                                    retryable: false,
-                                                    safe_for_model: false,
-                                                    error_code: None,
-                                                })?;
-                                                        let mut message = ChatMessage::tool_result(
-                                                            (state.mint)(),
-                                                            &call.id,
-                                                            content,
-                                                        );
-                                                        message.data_envelope = result_envelope;
-                                                        session.conversation.push(message);
-                                                        append_unstarted_tool_results(
-                                                            session,
-                                                            &turn.tool_calls[call_index + 1..],
-                                                            turn.provider_meta
-                                                                .data_envelope
-                                                                .as_ref(),
-                                                            &mut (state.mint),
-                                                            "not executed: waiting for user permission decision",
-                                                            "permission_pause_tool_call",
-                                                        )?;
-                                                        session.add_permission_request(request.clone()).map_err(
-                                            |error| AgentError {
-                                                kind: AgentErrorKind::Internal,
-                                                message: format!(
-                                                    "invalid persisted permission request: {error}"
-                                                ),
-                                                retryable: false,
-                                                safe_for_model: false,
-                                                error_code: None,
-                                            },
-                                        )?;
-                                                        session.last_event_seq = event_seq;
-                                                        deps.session_seam
-                                                            .save_permission_request(
-                                                                session, &event,
-                                                            )
-                                                            .await?;
-                                                        if let Some(alias)=crate::model_observability::ObservationAlias::permission_request(&session.conversation_id,&request.request_id) {
-                                        tool_observation.bind(alias);
-                                    }
-                                                        tool_observation.permission(
-                                            crate::model_observability::PermissionOutcome::Waiting,
-                                        );
-                                                        finish_tool(session, &call.id, true, sink);
-                                                        sink.on_permission_requested(
-                                                            &request.request_id,
-                                                            request.items.len(),
-                                                        );
-                                                        return Ok(Some(
-                                                            LoopOutcome::PermissionRequested {
-                                                                request_id: request.request_id,
-                                                            },
-                                                        ));
-                                                    }
-                                                    Err(error) => {
-                                                        let content =
-                                                            crate::model_input::describe_error(
-                                                                &call.name,
-                                                                &error.message,
-                                                            );
-                                                        let envelope = derive_internal_tool_result_envelope(
-                                        turn.provider_meta.data_envelope.as_ref(),
-                                        &call.id,
-                                        &content,
-                                        crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                                    )?;
-                                                        let mut message = ChatMessage::tool_result(
-                                                            (state.mint)(),
-                                                            &call.id,
-                                                            content,
-                                                        );
-                                                        message.data_envelope = envelope;
-                                                        session.conversation.push(message);
-                                                        if session.trigger_origin
-                                                    == crate::session::TriggerOrigin::ScheduledTask
-                                                {
-                                                    append_unstarted_tool_results(
-                                                        session,
-                                                        &turn.tool_calls[call_index + 1..],
-                                                        turn.provider_meta.data_envelope.as_ref(),
-                                                        &mut (state.mint),
-                                                        "not executed: task permission request was rejected",
-                                                        "task_permission_denied",
-                                                    )?;
-                                                    finish_tool(session, &call.id, false, sink);
-                                                    return Err(error);
-                                                }
-                                                        deps.session_seam.save(session).await?;
-                                                        finish_tool(session, &call.id, false, sink);
-                                                    }
-                                                }
-
-                                                Ok(None)
                                             })
                                         }
                                         ToolEffect::SkillLoading => {

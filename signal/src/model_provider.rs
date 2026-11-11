@@ -139,6 +139,9 @@ pub struct ModelProviderConfig {
     pub max_steps_per_turn: u32,
     /// How long a newly created owner-confirmed command approval remains open.
     pub exec_approval_timeout_secs: u32,
+    /// Uses granted by default when a direct native UI call asks to approve its
+    /// application scope. The owner can lower it on the approval card.
+    pub application_scope_default_uses: u32,
 }
 
 impl Default for ModelProviderConfig {
@@ -168,6 +171,8 @@ impl Default for ModelProviderConfig {
             max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
             max_steps_per_turn: MAX_STEPS_DEFAULT,
             exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
+            application_scope_default_uses:
+                desk_diagnose_core::permission_tools::DEFAULT_APPLICATION_SCOPE_USES,
         }
     }
 }
@@ -258,6 +263,7 @@ impl ModelProviderConfig {
             max_same_tool_calls_per_turn: self.max_same_tool_calls_per_turn,
             max_steps_per_turn: self.max_steps_per_turn,
             exec_approval_timeout_secs: self.exec_approval_timeout_secs,
+            application_scope_default_uses: self.application_scope_default_uses,
             api_key_set: self.api_key_set(),
         }
     }
@@ -356,6 +362,10 @@ impl ModelProviderConfig {
                 EXEC_APPROVAL_TIMEOUT_MAX_SECS,
             );
         }
+        if let Some(uses) = update.application_scope_default_uses {
+            let range = desk_diagnose_core::permission_tools::APPLICATION_SCOPE_USES_RANGE;
+            self.application_scope_default_uses = uses.clamp(*range.start(), *range.end());
+        }
         // Keep the cross-field invariant even for non-HTTP callers or legacy
         // stored values. The API rejects this shape; the domain layer repairs it.
         self.max_steps_per_turn = self
@@ -430,6 +440,10 @@ impl fmt::Debug for ModelProviderConfig {
                 "exec_approval_timeout_secs",
                 &self.exec_approval_timeout_secs,
             )
+            .field(
+                "application_scope_default_uses",
+                &self.application_scope_default_uses,
+            )
             .finish()
     }
 }
@@ -465,6 +479,8 @@ pub struct ModelProviderPublic {
     pub max_steps_per_turn: u32,
     #[schema(minimum = 30, maximum = 1800)]
     pub exec_approval_timeout_secs: u32,
+    #[schema(minimum = 1, maximum = 16)]
+    pub application_scope_default_uses: u32,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
@@ -520,6 +536,10 @@ pub struct ModelProviderUpdate {
     /// Owner-confirmed command approval window. Valid range: 30..=1800 seconds.
     #[schema(minimum = 30, maximum = 1800)]
     pub exec_approval_timeout_secs: Option<u32>,
+    /// Default uses of a native UI application approval proposed from a direct
+    /// call. Valid range: 1..=16.
+    #[schema(minimum = 1, maximum = 16)]
+    pub application_scope_default_uses: Option<u32>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -545,6 +565,10 @@ impl fmt::Debug for ModelProviderUpdate {
             .field(
                 "exec_approval_timeout_secs",
                 &self.exec_approval_timeout_secs,
+            )
+            .field(
+                "application_scope_default_uses",
+                &self.application_scope_default_uses,
             )
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
@@ -735,6 +759,8 @@ mod tests {
             max_same_tool_calls_per_turn: MAX_SAME_TOOL_CALLS_DEFAULT,
             max_steps_per_turn: MAX_STEPS_DEFAULT,
             exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
+            application_scope_default_uses:
+                desk_diagnose_core::permission_tools::DEFAULT_APPLICATION_SCOPE_USES,
         }
     }
 
@@ -877,6 +903,7 @@ mod tests {
         cfg.max_same_tool_calls_per_turn = 17;
         cfg.max_steps_per_turn = 23;
         cfg.exec_approval_timeout_secs = 300;
+        cfg.application_scope_default_uses = 3;
         save(&db, cfg).await.unwrap();
 
         let loaded = load(&db).await.unwrap();
@@ -889,6 +916,22 @@ mod tests {
         assert_eq!(loaded.max_same_tool_calls_per_turn, 17);
         assert_eq!(loaded.max_steps_per_turn, 23);
         assert_eq!(loaded.exec_approval_timeout_secs, 300);
+        assert_eq!(loaded.application_scope_default_uses, 3);
+    }
+
+    #[test]
+    fn update_application_scope_default_uses_is_bounded_defensively() {
+        let mut cfg = configured();
+        cfg.apply_update(ModelProviderUpdate {
+            application_scope_default_uses: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(cfg.application_scope_default_uses, 1);
+        cfg.apply_update(ModelProviderUpdate {
+            application_scope_default_uses: Some(99),
+            ..Default::default()
+        });
+        assert_eq!(cfg.application_scope_default_uses, 16);
     }
 
     #[test]

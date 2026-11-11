@@ -76,9 +76,6 @@ pub fn collect(session: &PersistedAgentSession) -> Result<PermissionControls, Ta
         let (parent, original) = proposals[0];
         let explicit =
             original.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME;
-        if reused && !explicit {
-            return Err(TaskSourceError::ConflictingNode);
-        }
         let tool = ToolCall {
             id: original.id.clone(),
             name: original.name.clone(),
@@ -102,21 +99,8 @@ pub fn collect(session: &PersistedAgentSession) -> Result<PermissionControls, Ta
             } {
                 return Err(TaskSourceError::ConflictingNode);
             }
-        } else {
-            let canonical = crate::permission_tools::canonical_tool_permission_input_json(
-                &tool.name,
-                serde_json::from_str(&tool.arguments_json)
-                    .map_err(|_| TaskSourceError::InvalidNode)?,
-            )
-            .map_err(|_| TaskSourceError::InvalidNode)?;
-            if request.items.len() != 1
-                || request.items[0].item_id != id
-                || request.items[0].tool_name != tool.name
-                || request.items[0].suggested_max_uses != 1
-                || request.items[0].canonical_input_json.as_deref() != Some(canonical.as_str())
-            {
-                return Err(TaskSourceError::ConflictingNode);
-            }
+        } else if !crate::permission_tools::synthesized_request_matches(request, &tool) {
+            return Err(TaskSourceError::ConflictingNode);
         }
         let expected = if reused {
             // A historical state label is not evidence of a present decision.
@@ -162,7 +146,7 @@ pub fn collect(session: &PersistedAgentSession) -> Result<PermissionControls, Ta
             if explicit {
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
             } else {
-                "provider_execution_status"
+                crate::permission_tools::CALL_PERMISSION_RESULT_SOURCE
             },
         )
         .map_err(|_| TaskSourceError::InvalidNode)?

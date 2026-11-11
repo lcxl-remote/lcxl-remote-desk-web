@@ -14,7 +14,8 @@ export function isHistoricalPermissionSkip(output: string | null | undefined): b
 }
 
 function isPermissionSubmissionReceipt(tool: AiAssistantToolActivity): boolean {
-    if (tool.name !== 'request_permissions' || !tool.output) return false;
+    // A direct tool call that waits for approval reports the same receipt.
+    if (!tool.output) return false;
     try {
         const result = JSON.parse(tool.output);
         return result?.status === 'pending_user_decision'

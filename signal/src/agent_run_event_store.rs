@@ -2435,9 +2435,15 @@ mod tests {
             name: tool.into(),
             arguments_json: r#"{"url":"https://example.com/docs"}"#.into(),
         };
-        let denied = tools.run_read(&fetch).await.unwrap_err();
+        // Without a grant the read is not dispatched; the loop proposes it instead.
+        let denied = tools.read_outcome(&fetch).await.unwrap();
         assert!(
-            denied.message.contains("no active capability grant"),
+            matches!(
+                denied,
+                desk_diagnose_core::seam::ReadOutcome::GrantRequired {
+                    input_mismatch: false
+                }
+            ),
             "{denied:?}"
         );
         let forged = ToolCall {

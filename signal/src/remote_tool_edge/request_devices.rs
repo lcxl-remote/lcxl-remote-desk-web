@@ -172,7 +172,7 @@ impl SignalAiAssistantTools {
                 .get_fresh(&connection_id, chrono::Utc::now())
                 .map(|current| current.readiness.revision)
                 .ok_or_else(unavailable)?;
-        desk_diagnose_core::request_devices::require_current_read_target(
+        if !desk_diagnose_core::request_devices::require_current_read_target(
             session,
             &native_call,
             &desk_diagnose_core::request_devices::SelectedDeviceTarget {
@@ -181,7 +181,16 @@ impl SignalAiAssistantTools {
                 connection_id: connection_id.clone(),
                 readiness_revision,
             },
-        )?;
+        )? {
+            if session.trigger_origin.uses_call_time_approval() {
+                return Ok(ReadOutcome::GrantRequired {
+                    input_mismatch: false,
+                });
+            }
+            return Err(desk_diagnose_core::subagent::invalid(
+                "The selected read needs current approval for this device and input",
+            ));
+        }
 
         let scoped =
             self.scoped_request_device(held, connection_id, readiness_revision, Vec::new(), 0);
@@ -199,6 +208,9 @@ impl SignalAiAssistantTools {
                 desk_diagnose_core::model_input::error_output(&call.name, &error),
                 false,
             ),
+            Ok(ReadOutcome::GrantRequired { input_mismatch }) => {
+                return Ok(ReadOutcome::GrantRequired { input_mismatch });
+            }
             Ok(_) => return Err(unavailable()),
         };
         let data_envelope = scoped.read_data_envelope(&native_call, &output)?;

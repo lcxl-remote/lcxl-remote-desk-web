@@ -100,26 +100,10 @@ pub fn authorize_permission_review_egress(
     let user = session
         .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
-    let action_source = session
-        .conversation
-        .iter()
-        .find(|message| {
-            message.role == ChatRole::Assistant
-                && message.tool_calls.iter().any(|call| {
-                    call.name == "request_permissions"
-                        && session.conversation.iter().any(|result| {
-                            result.tool_call_id.as_deref() == Some(call.id.as_str())
-                                && serde_json::from_str::<serde_json::Value>(&result.text)
-                                    .ok()
-                                    .and_then(|value| {
-                                        value.get("request_id")?.as_str().map(str::to_owned)
-                                    })
-                                    .as_deref()
-                                    == Some(request.request_id.as_str())
-                        })
-                })
-        })
-        .ok_or(ApprovalReviewError::InvalidContext)?;
+    let action_source =
+        crate::permission_tools::proposing_call(&session.conversation, &request.request_id)
+            .map(|(message, _)| &session.conversation[message])
+            .ok_or(ApprovalReviewError::InvalidContext)?;
 
     let mut source_ids = BTreeSet::new();
     source_ids.insert(user.message_id.as_str());

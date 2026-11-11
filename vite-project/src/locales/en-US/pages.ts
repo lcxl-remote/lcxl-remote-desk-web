@@ -2791,6 +2791,8 @@ export default {
   'pages.aiModel.settings.maxSameToolCallsPerTurn': 'Same-tool calls per turn',
   'pages.aiModel.settings.maxSameToolCallsPerTurn.description': 'Maximum calls to one tool type in a single AI turn, even when its arguments differ. Range: {{min}}–{{max}}; default: {{defaultValue}}. This is separate from concurrent commands on the Desk Server.',
   'pages.aiModel.settings.execApprovalTimeout': 'Command approval window (seconds)',
+  'pages.aiModel.settings.applicationScopeUses': 'App operation approval uses',
+  'pages.aiModel.settings.applicationScopeUses.description': 'When the assistant operates an app, one approval covers the same kinds of operations in that app up to this many times. Range: {{min}}–{{max}}; default: {{defaultValue}}. You can lower it on each approval card.',
   'pages.aiModel.settings.execApprovalTimeout.description': 'How long a newly proposed AI command waits for explicit owner approval. Range: {{min}}–{{max}} seconds; default: {{defaultValue}}. Existing prompts keep the value they were created with. This is separate from command runtime and device access approval.',
   'pages.aiModel.settings.updateSucceedMessage': 'Model provider updated successfully',
   'pages.aiModel.settings.updateFailedMessage': 'Failed to update the model provider',

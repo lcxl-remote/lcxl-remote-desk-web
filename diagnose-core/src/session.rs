@@ -452,6 +452,12 @@ impl TriggerOrigin {
     /// User input, explicit permission decisions and confirmed continuations
     /// still require current policy and exact grants. Interpretation-only completions
     /// cannot start executions, and work continuations stay under the automation
+    /// Direct tool calls without a matching grant become permission proposals.
+    /// Published tasks instead derive per-call grants from their task contract.
+    pub fn uses_call_time_approval(self) -> bool {
+        self != TriggerOrigin::ScheduledTask
+    }
+
     /// budget so a chain of results remains bounded.
     pub fn allows_new_mutation(self) -> bool {
         matches!(

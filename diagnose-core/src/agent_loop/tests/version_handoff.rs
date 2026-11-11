@@ -168,6 +168,7 @@ async fn execute(
         &[],
         &mut || "minted".into(),
         &mut None,
+        &mut None,
         &mut NullTurnSink,
         &crate::model_observability::tool::ToolObservation::default(),
     )

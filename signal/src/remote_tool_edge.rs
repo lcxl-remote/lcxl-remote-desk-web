@@ -144,6 +144,9 @@ fn browser_read_outcome(outcome: ExecOutcome) -> Result<ReadOutcome, AgentError>
         ExecOutcome::PermissionRequired { request } => {
             Ok(ReadOutcome::PermissionRequired { request })
         }
+        ExecOutcome::GrantRequired { input_mismatch } => {
+            Ok(ReadOutcome::GrantRequired { input_mismatch })
+        }
         ExecOutcome::Rejected { reason } => Err(error(
             AgentErrorKind::PermissionDenied,
             reason.unwrap_or_else(|| "browser observation was rejected".into()),
@@ -1420,7 +1423,7 @@ impl SignalAiAssistantTools {
     // Keep read polling outside the composition stack while sharing exact turn state.
     // The owned task is aborted if its caller is cancelled.
     #[inline(never)]
-    fn read_outcome(
+    pub(crate) fn read_outcome(
         &self,
         call: &ToolCall,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<ReadOutcome, AgentError>>>>
@@ -1781,6 +1784,13 @@ impl SignalAiAssistantTools {
                         )
                     })?;
                 grant_id
+            } else if session.trigger_origin.uses_call_time_approval() {
+                return Ok(ReadOutcome::GrantRequired {
+                    input_mismatch: desk_diagnose_core::capability_grant::differs_only_in_input(
+                        &available_grants,
+                        &call_authority,
+                    ),
+                });
             } else {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -2262,31 +2272,42 @@ impl SignalAiAssistantTools {
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            desk_diagnose_core::future::boxed(|| async {
-                store
-                    .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                    .await
-            })
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load command grants: {db_error}"),
-                    false,
-                    false,
-                )
-            })?
-            .into_iter()
-            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-            .map(|grant| grant.grant_id)
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    "command execution requires an active one-shot exact grant",
-                    false,
-                    true,
-                )
-            })?
+            {
+                let grants = desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load command grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+                match desk_diagnose_core::capability_grant::select_grant(
+                    &grants,
+                    &call_authority,
+                    session.trigger_origin.uses_call_time_approval(),
+                ) {
+                    desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
+                        grant.grant_id.clone()
+                    }
+                    desk_diagnose_core::capability_grant::GrantSelection::Required {
+                        input_mismatch,
+                    } => return Ok(ExecOutcome::GrantRequired { input_mismatch }),
+                    desk_diagnose_core::capability_grant::GrantSelection::Unavailable => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "command execution requires an active one-shot exact grant",
+                            false,
+                            true,
+                        ));
+                    }
+                }
+            }
         };
         let prepare = || PrepareCapabilityCall {
             grant_id: &grant_id,
@@ -3393,28 +3414,42 @@ impl SignalAiAssistantTools {
             {
                 crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
             } else {
-                desk_diagnose_core::future::boxed(|| async { store
-                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                .await }).await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to load semantic UI grants: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?
-                .into_iter()
-                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-                .map(|grant| grant.grant_id)
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "semantic UI action requires an active approved application scope matching the target and action",
-                        false,
-                        true,
-                    )
-                })?
+                {
+                    let grants = desk_diagnose_core::future::boxed(|| async {
+                        store
+                            .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                            .await
+                    })
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to load semantic UI grants: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                    match desk_diagnose_core::capability_grant::select_grant(
+                        &grants,
+                        &call_authority,
+                        session.trigger_origin.uses_call_time_approval(),
+                    ) {
+                        desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
+                            grant.grant_id.clone()
+                        }
+                        desk_diagnose_core::capability_grant::GrantSelection::Required {
+                            input_mismatch,
+                        } => return Ok(ExecOutcome::GrantRequired { input_mismatch }),
+                        desk_diagnose_core::capability_grant::GrantSelection::Unavailable => {
+                            return Err(error(
+                                AgentErrorKind::PermissionDenied,
+                                "semantic UI action requires an active approved application scope matching the target and action",
+                                false,
+                                true,
+                            ));
+                        }
+                    }
+                }
             };
             let prepare = || PrepareCapabilityCall {
                 grant_id: &grant_id,
@@ -4265,7 +4300,8 @@ impl SignalAiAssistantTools {
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            desk_diagnose_core::future::boxed(|| async {
+            {
+                let grants = desk_diagnose_core::future::boxed(|| async {
                 store
                     .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
                     .await
@@ -4278,18 +4314,28 @@ impl SignalAiAssistantTools {
                     false,
                     false,
                 )
-            })?
-            .into_iter()
-            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-            .map(|grant| grant.grant_id)
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    "artifact creation requires an active approved capability grant",
-                    false,
-                    true,
-                )
-            })?
+            })?;
+                match desk_diagnose_core::capability_grant::select_grant(
+                    &grants,
+                    &call_authority,
+                    session.trigger_origin.uses_call_time_approval(),
+                ) {
+                    desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
+                        grant.grant_id.clone()
+                    }
+                    desk_diagnose_core::capability_grant::GrantSelection::Required {
+                        input_mismatch,
+                    } => return Ok(ExecOutcome::GrantRequired { input_mismatch }),
+                    desk_diagnose_core::capability_grant::GrantSelection::Unavailable => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "artifact creation requires an active approved capability grant",
+                            false,
+                            true,
+                        ));
+                    }
+                }
+            }
         };
         desk_diagnose_core::future::phase(|| async {
         let prepare = || PrepareCapabilityCall {
@@ -4942,7 +4988,8 @@ impl SignalAiAssistantTools {
                     })?;
                 grant_id
             } else {
-                desk_diagnose_core::future::boxed(|| async {
+                {
+                let grants = desk_diagnose_core::future::boxed(|| async {
                     store
                         .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
                         .await
@@ -4955,18 +5002,28 @@ impl SignalAiAssistantTools {
                         false,
                         false,
                     )
-                })?
-                .into_iter()
-                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-                .map(|grant| grant.grant_id)
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "browser action requires an active approved capability grant",
-                        false,
-                        true,
-                    )
-                })?
+                })?;
+                match desk_diagnose_core::capability_grant::select_grant(
+                    &grants,
+                    &call_authority,
+                    session.trigger_origin.uses_call_time_approval(),
+                ) {
+                    desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
+                        grant.grant_id.clone()
+                    }
+                    desk_diagnose_core::capability_grant::GrantSelection::Required {
+                        input_mismatch,
+                    } => return Ok(ExecOutcome::GrantRequired { input_mismatch }),
+                    desk_diagnose_core::capability_grant::GrantSelection::Unavailable => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "browser action requires an active approved capability grant",
+                            false,
+                            true,
+                        ));
+                    }
+                }
+            }
             };
             if slack_input.is_some() || gmail_input.is_some() {
                 let site = if gmail_input.is_some() {
@@ -5567,31 +5624,42 @@ impl SignalAiAssistantTools {
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            desk_diagnose_core::future::boxed(|| async {
-                store
-                    .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                    .await
-            })
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load Outlook grants: {db_error}"),
-                    false,
-                    false,
-                )
-            })?
-            .into_iter()
-            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-            .map(|grant| grant.grant_id)
-            .ok_or_else(|| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    "Outlook draft handoff requires an active exact WriteExternalDraft grant",
-                    false,
-                    true,
-                )
-            })?
+            {
+                let grants = desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to load Outlook grants: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
+                match desk_diagnose_core::capability_grant::select_grant(
+                    &grants,
+                    &call_authority,
+                    session.trigger_origin.uses_call_time_approval(),
+                ) {
+                    desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
+                        grant.grant_id.clone()
+                    }
+                    desk_diagnose_core::capability_grant::GrantSelection::Required {
+                        input_mismatch,
+                    } => return Ok(ExecOutcome::GrantRequired { input_mismatch }),
+                    desk_diagnose_core::capability_grant::GrantSelection::Unavailable => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "Outlook draft handoff requires an active exact WriteExternalDraft grant",
+                            false,
+                            true,
+                        ));
+                    }
+                }
+            }
         };
 
         // The exact canonical tool bytes cross into an external, potentially
@@ -6791,12 +6859,14 @@ impl ToolSeam for SignalAiAssistantTools {
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         match self.read_outcome(call).await? {
             ReadOutcome::Completed { output, .. } => Ok(output),
-            ReadOutcome::PermissionRequired { .. } => Err(error(
-                AgentErrorKind::PermissionDenied,
-                "permission decision requires the versioned read loop",
-                false,
-                false,
-            )),
+            ReadOutcome::PermissionRequired { .. } | ReadOutcome::GrantRequired { .. } => {
+                Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "permission decision requires the versioned read loop",
+                    false,
+                    false,
+                ))
+            }
         }
     }
 

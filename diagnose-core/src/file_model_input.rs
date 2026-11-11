@@ -182,12 +182,12 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
         {
             tool.description.push_str(" Select recorded files with source (sources for multi-file operations), using file_result_call_id and entry_name only when a directory result needs a child choice. The server restores source metadata. Never provide native paths or device tokens.");
             if tool.name != "convert_document" {
-                tool.description.push_str(" Source may be omitted only when the current accepted user input already selects the required file or file set. Available attachments or a recent history result are not implicit selections. Keep any required cell, worksheet or merge rules. Request contextual_exact_input permission; the server completes defaults before approval.");
+                tool.description.push_str(" Source may be omitted only when the current accepted user input already selects the required file or file set. Available attachments or a recent history result are not implicit selections. Keep any required cell, worksheet or merge rules.");
             }
         }
     }
     if tool.name == "inspect_files" {
-        tool.description = tool.description.replace("by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments", "from a selected or uniquely approved conversation directory; request contextual_exact_input metadata permission");
+        tool.description = tool.description.replace("by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments", "from a selected or uniquely approved conversation directory");
         if !tool
             .description
             .contains("directory_request_id may be omitted")

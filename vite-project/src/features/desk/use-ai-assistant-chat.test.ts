@@ -2249,8 +2249,9 @@ describe('useAiAssistantChat', () => {
         const receipt = { requestId: 'parent', clientMessageId: 'input', state: 'activated', inputRevision: 1, acceptedAtMs: 1 };
         const permission = { requestId: 'approval', inputRevision: 1, state: 'pending', items: [] };
         const user = { id: 'input', role: 'user', text: 'Check disk space' };
-        const proposal = { id: 'proposal', role: 'assistant', text: '', reasoning: 'Ask for permission first.', toolCalls: [
-            { id: 'review', name: 'request_permissions', argumentsJson: '{"command":"df -h"}' },
+        // The model calls the command directly; the call waits for approval.
+        const proposal = { id: 'proposal', role: 'assistant', text: '', reasoning: 'Run the command.', toolCalls: [
+            { id: 'review', name: 'exec_command', argumentsJson: '{"command":"df -h"}' },
         ] };
         const receiptMessage = { id: 'receipt', role: 'tool', toolCallId: 'review', toolOk: true,
             text: '{"status":"pending_user_decision","request_id":"approval"}' };
@@ -2284,7 +2285,7 @@ describe('useAiAssistantChat', () => {
             await poll();
             act(() => deliver('parent', 1, { kind: 'partial', partial_summary: 'Checking' }));
             expect(original.result.current.partial).toBe('Checking');
-            await act(async () => deliver('parent', 2, { kind: 'tool_started', tool_name: 'request_permissions', tool_call_id: 'review' }));
+            await act(async () => deliver('parent', 2, { kind: 'tool_started', tool_name: 'exec_command', tool_call_id: 'review' }));
             expectSameTimeline(['input']);
 
             snapshot = { ...snapshot, seq: 2, active: false, handledInputSeq: 1,

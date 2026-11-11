@@ -298,30 +298,17 @@ pub fn unfinished_pause(session: &PersistedAgentSession) -> Option<String> {
                     name: call.name.clone(),
                     arguments_json: call.arguments_json.clone(),
                 };
-                if request.items.len() != 1
-                    || request.items[0].item_id != call.id
-                    || request.items[0].tool_name != call.name
-                    || request.items[0].suggested_max_uses != 1
+                // A published task pauses only for one exact single-use call.
+                let task_shape = session.trigger_origin
+                    != crate::session::TriggerOrigin::ScheduledTask
+                    || (request.items.len() == 1 && request.items[0].suggested_max_uses == 1);
+                if !task_shape
+                    || !crate::permission_tools::synthesized_request_matches(request, &original)
                     || !super::contract::exception::unique_original_call(
                         &session.conversation,
                         &original,
                     )
                 {
-                    continue;
-                }
-                let Some(canonical) =
-                    serde_json::from_str(&call.arguments_json)
-                        .ok()
-                        .and_then(|value| {
-                            crate::permission_tools::canonical_tool_permission_input_json(
-                                &call.name, value,
-                            )
-                            .ok()
-                        })
-                else {
-                    continue;
-                };
-                if request.items[0].canonical_input_json.as_deref() != Some(canonical.as_str()) {
                     continue;
                 }
                 expected["executed"] = serde_json::Value::Bool(false);

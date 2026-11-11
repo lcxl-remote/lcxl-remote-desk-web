@@ -77,7 +77,20 @@ impl ScheduleStore {
                 .flat_map(|message| &message.tool_calls)
                 .filter(|call| &call.id == id)
                 .collect();
-            if calls.len() != 1 || calls[0].name != "request_permissions" {
+            // An explicit proposal, or a direct call that paused for approval.
+            if calls.len() != 1
+                || (calls[0].name != "request_permissions"
+                    && !session.permission_requests.iter().any(|request| {
+                        desk_diagnose_core::permission_tools::synthesized_request_matches(
+                            request,
+                            &desk_diagnose_core::chat::ToolCall {
+                                id: calls[0].id.clone(),
+                                name: calls[0].name.clone(),
+                                arguments_json: calls[0].arguments_json.clone(),
+                            },
+                        )
+                    }))
+            {
                 return Err(ScheduleStoreError::Conflict);
             }
         }

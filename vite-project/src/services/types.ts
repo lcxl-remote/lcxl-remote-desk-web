@@ -10077,6 +10077,12 @@ export type ModelProviderPublic = {
     */
     api_key_set: boolean;
     /**
+     * @minLength 1
+     * @maxLength 16
+     * @type integer, int32
+    */
+    application_scope_default_uses: number;
+    /**
      * @type string,null
     */
     base_url?: string | null;
@@ -10170,6 +10176,13 @@ export type ModelProviderUpdate = {
      * @type string,null
     */
     api_key?: string | null;
+    /**
+     * @description Default uses of a native UI application approval proposed from a direct\ncall. Valid range: 1..=16.
+     * @minLength 1
+     * @maxLength 16
+     * @type integer,null, int32
+    */
+    application_scope_default_uses?: number | null;
     /**
      * @type string,null
     */
@@ -14943,6 +14956,12 @@ export type RestResponseModelProviderPublic = {
          * @type boolean
         */
         api_key_set: boolean;
+        /**
+         * @minLength 1
+         * @maxLength 16
+         * @type integer, int32
+        */
+        application_scope_default_uses: number;
         /**
          * @type string,null
         */

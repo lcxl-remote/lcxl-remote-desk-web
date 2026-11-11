@@ -30,6 +30,10 @@ pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_permissions";
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
 const DEFAULT_SCREEN_CAPTURE_USES: u32 = 3;
+/// Default uses for a server-proposed native application scope.
+pub const DEFAULT_APPLICATION_SCOPE_USES: u32 = 8;
+/// Configurable range of [`DEFAULT_APPLICATION_SCOPE_USES`].
+pub const APPLICATION_SCOPE_USES_RANGE: std::ops::RangeInclusive<u32> = 1..=MAX_REQUEST_USES;
 #[cfg(test)]
 pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
 
@@ -129,46 +133,29 @@ pub(crate) fn latest_tool_request_denied(
     tool: &str,
     revision: u64,
 ) -> bool {
-    latest_tool_request_denial(requests, decisions, tool, revision).is_some()
-}
-
-/// The denial branch and observation share the same scoped decision evidence.
-pub(crate) struct ToolRequestDenial {
-    pub actor: Option<crate::dynamic_run::PermissionDecisionActor>,
-}
-
-pub(crate) fn latest_tool_request_denial(
-    requests: &[PermissionRequest],
-    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
-    tool: &str,
-    revision: u64,
-) -> Option<ToolRequestDenial> {
-    let request = requests.iter().rev().find(|request| {
+    let Some(request) = requests.iter().rev().find(|request| {
         request.input_revision == revision
             && request.items.iter().any(|item| item.tool_name == tool)
-    })?;
-    let decision = decisions
+    }) else {
+        return false;
+    };
+    match decisions
         .iter()
-        .find(|decision| decision.request_id == request.request_id);
-    let denied = decision.map_or(
-        request.state == PermissionRequestState::Denied,
-        |decision| {
-            // A mixed decision is not a refusal of the entire tool.
-            request
-                .items
-                .iter()
-                .filter(|item| item.tool_name == tool)
-                .all(|item| {
-                    decision
-                        .items
-                        .iter()
-                        .any(|outcome| outcome.item_id == item.item_id && !outcome.approved)
-                })
-        },
-    );
-    denied.then(|| ToolRequestDenial {
-        actor: decision.map(|decision| decision.actor),
-    })
+        .find(|decision| decision.request_id == request.request_id)
+    {
+        None => request.state == PermissionRequestState::Denied,
+        // A mixed decision is not a refusal of the entire tool.
+        Some(decision) => request
+            .items
+            .iter()
+            .filter(|item| item.tool_name == tool)
+            .all(|item| {
+                decision
+                    .items
+                    .iter()
+                    .any(|outcome| outcome.item_id == item.item_id && !outcome.approved)
+            }),
+    }
 }
 
 /// Reject an unchanged AI-denied item even if the model changes item ids,
@@ -710,7 +697,7 @@ fn invalid(detail: impl std::fmt::Display) -> AgentError {
     AgentError {
         kind: AgentErrorKind::InvalidInput,
         message: format!(
-            "invalid request_permissions arguments: {detail}. The entire batch was rejected: no request or approval card was created, including otherwise valid items. Do not repeat unchanged arguments or tell the user a request exists. Fix the invalid item; if its target is not yet known, first request only the prerequisite read permission, inspect the target, then request native UI actions with application_scope, or other mutations with exact_input when required by their tool contract."
+            "invalid permission request: {detail}. No approval card was created and nothing was executed. Do not repeat unchanged arguments or tell the user a request exists. Fix the arguments; if the target is not yet known, observe it first, then call the tool with the observed references."
         ),
         retryable: false,
         safe_for_model: true,
@@ -1559,6 +1546,261 @@ fn same_permission_action(
         && left.launch_confirmation == right.launch_confirmation
 }
 
+/// Locate the assistant call whose result recorded `request_id` as a new
+/// pending proposal: an explicit `request_permissions` call or a direct tool
+/// call paused for approval. Returns (message index, call index).
+pub fn proposing_call(
+    conversation: &[crate::chat::ChatMessage],
+    request_id: &str,
+) -> Option<(usize, usize)> {
+    let (result_index, call_id) =
+        conversation
+            .iter()
+            .enumerate()
+            .find_map(|(index, message)| {
+                let call_id = message.tool_call_id.as_deref()?;
+                let value: serde_json::Value = serde_json::from_str(&message.text).ok()?;
+                (value.get("status")?.as_str()? == "pending_user_decision"
+                    && value.get("request_id")?.as_str()? == request_id)
+                    .then_some((index, call_id))
+            })?;
+    conversation[..result_index]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            if message.role != crate::chat::ChatRole::Assistant {
+                return None;
+            }
+            message
+                .tool_calls
+                .iter()
+                .position(|call| call.id == call_id)
+                .map(|call| (index, call))
+        })
+}
+
+/// Whether the owner personally refused this tool for the current input. AI and
+/// system refusals do not block a new call-time proposal: an unchanged action is
+/// still caught by [`unchanged_ai_denied_item`] after synthesis.
+pub(crate) fn owner_denied_tool(
+    requests: &[PermissionRequest],
+    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
+    tool: &str,
+    revision: u64,
+) -> bool {
+    requests
+        .iter()
+        .filter(|request| request.input_revision == revision)
+        .any(|request| {
+            decisions
+                .iter()
+                .filter(|decision| decision.request_id == request.request_id)
+                .any(|decision| {
+                    request
+                        .items
+                        .iter()
+                        .filter(|item| item.tool_name == tool)
+                        .any(|item| {
+                            decision.items.iter().any(|outcome| {
+                                outcome.item_id == item.item_id
+                                    && !outcome.approved
+                                    && outcome.actor
+                                        == crate::dynamic_run::PermissionDecisionActor::Owner
+                            })
+                        })
+                })
+        })
+}
+
+/// Fallback when the proposing assistant message has no visible text.
+pub(crate) const SYNTHESIZED_REASON: &str = "Requested by the assistant's tool call.";
+
+/// Build the permission proposal implied by one resolved direct tool call. The
+/// result is an internal `request_permissions` call with the same call id; it
+/// passes through the same planner and validation as an explicit proposal.
+///
+/// The input form follows the tool's permission input mode, so grant breadth is
+/// fixed by the server: exact tools bind these arguments, side-effecting tools
+/// always bind them, read-only tools request a reusable scope, and native UI
+/// tools request the actions this call uses with `application_scope_uses` uses.
+pub(crate) fn synthesize_request_call(
+    call: &ToolCall,
+    registry: &ProviderRegistry,
+    conversation: &[crate::chat::ChatMessage],
+    application_scope_uses: u32,
+) -> Result<ToolCall, AgentError> {
+    let capability = registry
+        .capability_for_tool(&call.name)
+        .ok_or_else(|| invalid(format!("unknown tool `{}`", call.name)))?;
+    let mut input: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|error| invalid(error.to_string()))?;
+    let target_ref = input
+        .as_object_mut()
+        .ok_or_else(|| invalid("tool arguments must be an object"))?
+        .remove("target_ref");
+    let mut item = serde_json::Map::new();
+    item.insert("item_id".into(), json!(call.id));
+    item.insert("tool_name".into(), json!(call.name));
+    match permission_input_mode(capability) {
+        "application_scope" => {
+            let native = ToolCall {
+                arguments_json: input.to_string(),
+                ..call.clone()
+            };
+            let steps = crate::application_batch::actions(&native)?;
+            let mut actions = Vec::new();
+            for step in &steps {
+                let kind = match &step.action {
+                    desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
+                        action,
+                        ..
+                    } => crate::application_ui::action_kind(action),
+                    desk_agent_protocol::computer_use::ComputerActionKind::BackgroundInput {
+                        input,
+                        ..
+                    } => input.kind(),
+                    _ => return Err(crate::application_ui::invalid()),
+                };
+                if !actions.contains(&kind) {
+                    actions.push(kind);
+                }
+            }
+            item.insert(
+                "application_scope".into(),
+                json!({"application": input["application"], "actions": actions}),
+            );
+            item.insert(
+                "suggested_max_uses".into(),
+                json!(application_scope_uses.clamp(1, MAX_REQUEST_USES)),
+            );
+        }
+        "optional_exact_input" if !capability.wire.effect.is_side_effecting() => {}
+        _ => {
+            item.insert("exact_input".into(), input);
+        }
+    }
+    item.insert(
+        "reason".into(),
+        json!(synthesized_reason(conversation, &call.id)),
+    );
+    let mut arguments = json!({ "items": [item] });
+    if let Some(target_ref) = target_ref {
+        arguments["target_ref"] = target_ref;
+    }
+    Ok(ToolCall {
+        id: call.id.clone(),
+        name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: arguments.to_string(),
+    })
+}
+
+/// The visible text of the assistant message that issued `call_id`, bounded on
+/// a character boundary. Reasoning is never copied into an approval request.
+fn synthesized_reason(conversation: &[crate::chat::ChatMessage], call_id: &str) -> String {
+    let text = conversation
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == crate::chat::ChatRole::Assistant
+                && message.tool_calls.iter().any(|call| call.id == call_id)
+        })
+        .map(|message| message.text.trim())
+        .unwrap_or_default();
+    if text.is_empty() {
+        return SYNTHESIZED_REASON.into();
+    }
+    let mut end = text
+        .len()
+        .min(crate::dynamic_run::MAX_PERMISSION_REASON_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].into()
+}
+
+/// The paused direct call's result, identical to a published task's pause.
+/// Only a later decision can mint a grant.
+pub(crate) fn call_pending_result(request_id: &str, item_count: usize) -> serde_json::Value {
+    json!({"status":"pending_user_decision", "request_id":request_id,
+        "item_count":item_count, "authority":"none", "executed":false})
+}
+
+/// Source label of a direct call's permission control result.
+pub(crate) const CALL_PERMISSION_RESULT_SOURCE: &str = "provider_execution_status";
+
+/// Whether `request` is the proposal a direct `call` produces: its first item
+/// is this call (exact input, application scope or reusable read scope) and any
+/// further items are the fixed desktop observations added for UI actions.
+pub fn synthesized_request_matches(request: &PermissionRequest, call: &ToolCall) -> bool {
+    let Some((first, rest)) = request.items.split_first() else {
+        return false;
+    };
+    if first.item_id != call.id
+        || first.tool_name != call.name
+        || !(1..=MAX_REQUEST_USES).contains(&first.suggested_max_uses)
+    {
+        return false;
+    }
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(&call.arguments_json) else {
+        return false;
+    };
+    if let Some(input) = input.as_object_mut() {
+        input.remove("target_ref");
+    }
+    let first_matches = if let Some(scope) = crate::application_ui::from_canonical(
+        &first.tool_name,
+        first.canonical_input_json.as_deref(),
+    ) {
+        let native = ToolCall {
+            arguments_json: input.to_string(),
+            ..call.clone()
+        };
+        crate::application_batch::actions(&native).is_ok_and(|steps| {
+            let mut actions = Vec::new();
+            for step in &steps {
+                let kind = match &step.action {
+                    desk_agent_protocol::computer_use::ComputerActionKind::UiInApplication {
+                        action,
+                        ..
+                    } => crate::application_ui::action_kind(action),
+                    desk_agent_protocol::computer_use::ComputerActionKind::BackgroundInput {
+                        input,
+                        ..
+                    } => input.kind(),
+                    _ => return false,
+                };
+                if !actions.contains(&kind) {
+                    actions.push(kind);
+                }
+            }
+            serde_json::to_value(&scope.application).ok().as_ref() == Some(&input["application"])
+                && scope.actions == actions
+        })
+    } else if let Some(canonical) = first.canonical_input_json.as_deref() {
+        canonical_tool_permission_input_json(&call.name, input)
+            .ok()
+            .as_deref()
+            == Some(canonical)
+    } else {
+        crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(&call.name)
+            .is_some_and(|capability| {
+                permission_input_mode(capability) == "optional_exact_input"
+                    && !capability.wire.effect.is_side_effecting()
+            })
+    };
+    first_matches
+        && rest.iter().all(|item| {
+            item.item_id == format!("included-{}", item.tool_name)
+                && matches!(
+                    item.tool_name.as_str(),
+                    "inspect_desktop_session" | "inspect_desktop_ui"
+                )
+                && item.canonical_input_json.is_none()
+        })
+}
+
 /// Deterministic control text only; this is not a grant or current policy snapshot.
 pub(crate) fn existing_request_result(request_id: &str, decision_state: &str) -> serde_json::Value {
     json!({"status":"existing_permission_request", "decision_state":decision_state,
@@ -1726,102 +1968,174 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn tool_denial_retains_actual_decider_and_missing_evidence_stays_unknown() {
-        let registry = crate::ai_assistant::ai_assistant_provider_registry();
-        let mut request=build_permission_request(
-            &call(r#"{"items":[{"item_id":"capture","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
-            &registry,"permission-denial-source".into(),3,"2026-09-17T00:00:00Z".into(),
-        ).unwrap();
-        request.state = PermissionRequestState::Denied;
-        for (actor, expected) in [
-            (
-                PermissionDecisionActor::Owner,
-                crate::model_observability::PermissionOutcome::Denied,
-            ),
-            (
-                PermissionDecisionActor::AiApproval,
-                crate::model_observability::PermissionOutcome::PolicyRejected,
-            ),
-            (
-                PermissionDecisionActor::System,
-                crate::model_observability::PermissionOutcome::Unavailable,
-            ),
-        ] {
-            let decision = PermissionDecisionProjection {
-                request_id: request.request_id.clone(),
-                input_revision: 3,
-                actor,
-                items: vec![PermissionItemDisposition {
-                    item_id: "capture".into(),
-                    approved: false,
-                    actor,
-                }],
-            };
-            decision.validate_for(&request).unwrap();
-            let denial = latest_tool_request_denial(
-                std::slice::from_ref(&request),
-                std::slice::from_ref(&decision),
-                "read_current_screen",
-                3,
-            )
-            .unwrap();
-            assert_eq!(denial.actor, Some(actor));
-            assert_eq!(
-                crate::model_observability::permission::state_outcome(
-                    PermissionRequestState::Denied,
-                    denial.actor
-                ),
-                expected
-            );
-            assert!(latest_tool_request_denied(
-                std::slice::from_ref(&request),
-                std::slice::from_ref(&decision),
-                "read_current_screen",
-                3
-            ));
-            assert!(
-                latest_tool_request_denial(
-                    std::slice::from_ref(&request),
-                    std::slice::from_ref(&decision),
-                    "read_current_screen",
-                    4
-                )
-                .is_none()
-            );
-            let mut mixed = request.clone();
-            mixed.state = PermissionRequestState::PartiallyApproved;
-            let mut second = mixed.items[0].clone();
-            second.item_id = "approved-capture".into();
-            mixed.items.push(second);
-            let mut mixed_decision = decision;
-            mixed_decision.items.push(PermissionItemDisposition {
-                item_id: "approved-capture".into(),
-                approved: true,
-                actor: if actor == PermissionDecisionActor::System {
-                    PermissionDecisionActor::AiApproval
-                } else {
-                    actor
-                },
-            });
-            if actor == PermissionDecisionActor::System {
-                mixed_decision.actor = PermissionDecisionActor::Mixed;
-            }
-            mixed_decision.validate_for(&mixed).unwrap();
-            assert!(
-                latest_tool_request_denial(&[mixed], &[mixed_decision], "read_current_screen", 3)
-                    .is_none()
-            );
+    fn direct(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "direct".into(),
+            name: name.into(),
+            arguments_json: arguments.to_string(),
         }
-        let denial = latest_tool_request_denial(&[request], &[], "read_current_screen", 3).unwrap();
-        assert!(denial.actor.is_none());
-        assert_eq!(
-            crate::model_observability::permission::state_outcome(
-                PermissionRequestState::Denied,
-                denial.actor
-            ),
-            crate::model_observability::PermissionOutcome::Unavailable
+    }
+
+    fn proposed(call: &ToolCall, uses: u32) -> serde_json::Value {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let planning = synthesize_request_call(call, &registry, &[], uses).unwrap();
+        assert_eq!(planning.id, call.id);
+        assert_eq!(planning.name, REQUEST_CAPABILITY_GRANTS_TOOL_NAME);
+        serde_json::from_str(&planning.arguments_json).unwrap()
+    }
+
+    #[test]
+    fn a_direct_call_proposes_the_grant_its_input_mode_allows() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        // Exact tools bind the call's own arguments; the device selector moves out.
+        let open = direct(
+            "browser_open_page",
+            json!({"target":{"url":"https://example.com/"},"target_ref":"mac"}),
         );
+        let args = proposed(&open, 8);
+        assert_eq!(args["target_ref"], "mac");
+        assert_eq!(args["items"][0]["item_id"], "direct");
+        assert_eq!(
+            args["items"][0]["exact_input"],
+            json!({"target":{"url":"https://example.com/"}})
+        );
+        assert_eq!(args["items"][0]["reason"], SYNTHESIZED_REASON);
+        // A read-only tool asks for a reusable scope with the default uses.
+        let read = direct("read_process_list", json!({}));
+        let args = proposed(&read, 8);
+        assert!(args["items"][0].get("exact_input").is_none());
+        let request = build_permission_request(
+            &synthesize_request_call(&read, &registry, &[], 8).unwrap(),
+            &registry,
+            "p".into(),
+            1,
+            "2026-11-11T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert_eq!(request.items[0].suggested_max_uses, MAX_REQUEST_USES);
+        assert!(synthesized_request_matches(&request, &read));
+        // Native UI actions ask for the observed application and this call's actions.
+        let application = json!({"token":"app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-11-11T00:10:00Z"});
+        let target = json!({"token":"control","snapshot_id":"ui","object_kind":"ui_element","expires_at":"2026-11-11T00:10:00Z"});
+        let ui = direct(
+            "execute_ui_actions",
+            json!({"application":application,"target":target,"action":{"kind":"invoke"},
+                "remaining_steps":[{"application":application,"target":target,"action":{"kind":"invoke"}},
+                    {"application":application,"target":target,"action":{"kind":"focus"}}]}),
+        );
+        let args = proposed(&ui, 3);
+        assert_eq!(
+            args["items"][0]["application_scope"],
+            json!({"application":application,"actions":["invoke","focus"]})
+        );
+        assert_eq!(args["items"][0]["suggested_max_uses"], 3);
+        assert_eq!(
+            proposed(&ui, 99)["items"][0]["suggested_max_uses"],
+            MAX_REQUEST_USES
+        );
+        let mut request = build_permission_request(
+            &synthesize_request_call(&ui, &registry, &[], 3).unwrap(),
+            &registry,
+            "p".into(),
+            1,
+            "2026-11-11T00:00:00Z".into(),
+        )
+        .unwrap();
+        include_desktop_action_reads(&mut request, &registry).unwrap();
+        assert_eq!(request.items[0].suggested_max_uses, 3);
+        assert!(synthesized_request_matches(&request, &ui));
+        // A different action set is a different proposal.
+        let changed = direct(
+            "execute_ui_actions",
+            json!({"application":application,"target":target,"action":{"kind":"focus"}}),
+        );
+        assert!(!synthesized_request_matches(&request, &changed));
+    }
+
+    #[test]
+    fn a_proposal_reason_is_the_visible_text_bounded_on_a_character() {
+        use crate::chat::ChatMessage;
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let call = direct("read_process_list", json!({}));
+        let mut message = ChatMessage::text(
+            "m",
+            crate::chat::ChatRole::Assistant,
+            format!(
+                "  {}  ",
+                "界".repeat(crate::dynamic_run::MAX_PERMISSION_REASON_BYTES)
+            ),
+        );
+        message.tool_calls.push(crate::chat::ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        });
+        let planning = synthesize_request_call(&call, &registry, &[message], 8).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&planning.arguments_json).unwrap();
+        let reason = args["items"][0]["reason"].as_str().unwrap();
+        assert!(reason.len() <= crate::dynamic_run::MAX_PERMISSION_REASON_BYTES);
+        assert!(reason.starts_with('界'));
+    }
+
+    #[test]
+    fn only_an_owner_refusal_blocks_a_new_call_time_proposal() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let build = |id: &str| {
+            let mut request = build_permission_request(
+                &call(r#"{"items":[{"item_id":"capture","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
+                &registry, id.into(), 3, "2026-09-17T00:00:00Z".into(),
+            ).unwrap();
+            request.state = PermissionRequestState::Denied;
+            request
+        };
+        let decision = |request: &PermissionRequest, actor| PermissionDecisionProjection {
+            request_id: request.request_id.clone(),
+            input_revision: 3,
+            actor,
+            items: vec![PermissionItemDisposition {
+                item_id: "capture".into(),
+                approved: false,
+                actor,
+            }],
+        };
+        for (actor, blocked) in [
+            (PermissionDecisionActor::Owner, true),
+            (PermissionDecisionActor::AiApproval, false),
+            (PermissionDecisionActor::System, false),
+        ] {
+            let request = build("permission-denial-source");
+            let decided = decision(&request, actor);
+            decided.validate_for(&request).unwrap();
+            assert_eq!(
+                owner_denied_tool(
+                    std::slice::from_ref(&request),
+                    std::slice::from_ref(&decided),
+                    "read_current_screen",
+                    3,
+                ),
+                blocked,
+                "{actor:?}"
+            );
+            assert!(!owner_denied_tool(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&decided),
+                "read_current_screen",
+                4,
+            ));
+        }
+        // A later AI refusal must not hide the owner's earlier refusal.
+        let owner = build("permission-owner");
+        let ai = build("permission-ai");
+        let decisions = [
+            decision(&owner, PermissionDecisionActor::Owner),
+            decision(&ai, PermissionDecisionActor::AiApproval),
+        ];
+        assert!(owner_denied_tool(
+            &[owner, ai],
+            &decisions,
+            "read_current_screen",
+            3,
+        ));
     }
 
     #[test]
@@ -2239,11 +2553,7 @@ mod tests {
                 .message
                 .contains("does not match the current closed tool contract")
         );
-        assert!(
-            error
-                .message
-                .contains("no request or approval card was created")
-        );
+        assert!(error.message.contains("No approval card was created"));
     }
 
     #[test]

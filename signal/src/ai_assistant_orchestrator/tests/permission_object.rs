@@ -28,7 +28,12 @@ use std::{sync::Arc, time::Duration};
 mod scheduled;
 
 pub(super) fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
-    let delta = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("call-{name}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
+    tool_reply_with_id(&format!("call-{name}"), name, arguments)
+}
+
+/// A direct call that pauses for approval and its later re-issue need distinct ids.
+pub(super) fn tool_reply_with_id(id: &str, name: &str, arguments: serde_json::Value) -> String {
+    let delta = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
     format!(
         "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":2}}}}\n\ndata: [DONE]\n\n"
     )
@@ -155,10 +160,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     };
     let capability = registry.capability_for_tool(read_name).unwrap();
     let mut replies = vec![
-        tool_reply("request_permissions", serde_json::json!({"items":[{
-            "tool_name":read_name,
-            "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the selected file metadata"
-        }]})),
+        // The direct read pauses as its own approval request.
+        tool_reply_with_id("call-proposal", read_name, serde_json::json!({})),
         tool_reply(read_name, serde_json::json!({})),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
@@ -497,7 +500,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             "device",
             &request.request_id,
             vec![PermissionDecisionItem {
-                item_id: "item_1".into(),
+                item_id: request.items[0].item_id.clone(),
                 decision: PermissionItemDecision::Approve {
                     resource_scope: request.items[0].resource_scope.clone(),
                     operation_scope: request.items[0].operation_scope.clone(),

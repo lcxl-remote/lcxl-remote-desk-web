@@ -38,6 +38,15 @@ describe('tool call transcript', () => {
         expect(screen.getByText('pages.aiAssistant.permissionSubmissionReceipt')).toBeTruthy();
     });
 
+    it('labels a direct call that waits for approval as its submission receipt', () => {
+        render(<AssistantToolCall running={false} tool={{ ...tool,
+            name: 'browser_open_page', status: 'ok',
+            output: JSON.stringify({ status: 'pending_user_decision', request_id: 'request-1', authority: 'none', item_count: 1, executed: false }),
+        }} />);
+        fireEvent.click(screen.getByText(/browser_open_page/));
+        expect(screen.getByText('pages.aiAssistant.permissionSubmissionReceipt')).toBeTruthy();
+    });
+
     it.each(['ai_approval', 'owner'] as const)('shows the saved %s decision after the input', source => {
         const review = { ...tool, name: 'request_permissions', status: 'ok' as const,
             output: '{"status":"pending_user_decision","request_id":"request-1"}' };

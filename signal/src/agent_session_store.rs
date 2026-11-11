@@ -1669,6 +1669,15 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    async fn application_scope_default_uses(&self) -> u32 {
+        use crate::config::ConfigConnection;
+        self.db
+            .config_read()
+            .await
+            .ai_gateway
+            .application_scope_default_uses
+    }
+
     async fn conversation_title_limit(
         &self,
         session: &PersistedAgentSession,

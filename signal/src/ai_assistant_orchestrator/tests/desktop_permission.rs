@@ -1,5 +1,5 @@
 //! Empty-context desktop permission decisions over the real model/edge transports.
-use super::permission_object::tool_reply;
+use super::permission_object::{tool_reply, tool_reply_with_id};
 use super::*;
 use crate::remote_tool_edge::SignalRemoteToolObserver;
 use chrono::Utc;
@@ -165,10 +165,12 @@ async fn run_desktop_history_case(
     let capability = registry.capability_for_tool(read_name).unwrap();
     let mut replies = vec![
         tool_reply("describe_tools", serde_json::json!({"tool_names":[read_name]})),
-        tool_reply("request_permissions", serde_json::json!({"items":[{
-            "tool_name":read_name,
-            "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the desktop session requested by the owner"
-        }]})),
+        // The direct read pauses as its own approval request.
+        tool_reply_with_id(
+            "call-proposal",
+            read_name,
+            if read_name == "inspect_desktop_ui" { serde_json::json!({"queries":["Calendar"]}) } else { serde_json::json!({}) },
+        ),
         tool_reply(read_name, if read_name == "inspect_desktop_ui" { serde_json::json!({"queries":["Calendar"]}) } else { serde_json::json!({}) }),
         "data: {\"choices\":[{\"delta\":{\"content\":\"object-read-complete\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
     ];
@@ -180,32 +182,24 @@ async fn run_desktop_history_case(
             "describe_tools",
             serde_json::json!({"tool_names":[read_name,"execute_ui_actions"]}),
         );
+        let ui_input = {
+            let mut input = serde_json::json!({
+                "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"select"}}]
+            });
+            // A model in a multi-device conversation copies the device
+            // selector from the device tools; it must name the same device.
+            if selectable {
+                input["target_ref"] = serde_json::json!("device");
+            }
+            input
+        };
+        // The first UI call pauses for its application approval; the same
+        // call runs after approval.
         replies.insert(
             3,
-            tool_reply(
-                "request_permissions",
-                serde_json::json!({"items":[{
-                    "tool_name":"execute_ui_actions", "reason":"Select the requested Calendar item",
-                    "suggested_ttl_seconds":120, "suggested_max_uses":2,
-                    "application_scope":{"application_id":"a1", "actions":["select"]}
-                }]}),
-            ),
+            tool_reply_with_id("call-ui-permission", "execute_ui_actions", ui_input.clone()),
         );
-        replies[3] = replies[3].replace("call-request_permissions", "call-ui-permission");
-        replies.insert(
-            4,
-            tool_reply("execute_ui_actions", {
-                let mut input = serde_json::json!({
-                    "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"select"}}]
-                });
-                // A model in a multi-device conversation copies the device
-                // selector from the device tools; it must name the same device.
-                if selectable {
-                    input["target_ref"] = serde_json::json!("device");
-                }
-                input
-            }),
-        );
+        replies.insert(4, tool_reply("execute_ui_actions", ui_input));
     }
     if goal_route {
         *replies.last_mut().unwrap() = tool_reply(
@@ -480,7 +474,7 @@ async fn run_desktop_history_case(
                 storage_device,
                 &request.request_id,
                 vec![PermissionDecisionItem {
-                    item_id: "item_1".into(),
+                    item_id: request.items[0].item_id.clone(),
                     decision: if approve {
                         PermissionItemDecision::Approve {
                             resource_scope: request.items[0].resource_scope.clone(),
@@ -923,10 +917,18 @@ async fn run_desktop_history_case(
         .await
         .unwrap();
     assert_eq!(grants.len(), if concrete { 4 } else { 1 });
+    // The owner approves one use here; an automatic review keeps the server's
+    // reusable read scope for a direct read, so one of its uses is consumed.
+    let consumed = if automatic {
+        desk_diagnose_core::permission_tools::MAX_REQUEST_USES - 1
+    } else {
+        0
+    };
     assert!(
         grants
             .iter()
-            .any(|grant| grant.tool_name == read_name && grant.remaining_uses == 0)
+            .any(|grant| grant.tool_name == read_name && grant.remaining_uses == consumed),
+        "{grants:?}"
     );
     if let Some(probe) = stack_probe {
         probe.assert_points(&["prepare", "tool_execute", "decode", "budget"]);

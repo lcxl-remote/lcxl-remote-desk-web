@@ -277,6 +277,8 @@ pub(super) fn validate_gateway(
         )
         || !(EXEC_APPROVAL_TIMEOUT_MIN_SECS..=EXEC_APPROVAL_TIMEOUT_MAX_SECS)
             .contains(&config.exec_approval_timeout_secs)
+        || !desk_diagnose_core::permission_tools::APPLICATION_SCOPE_USES_RANGE
+            .contains(&config.application_scope_default_uses)
     {
         return Err(invalid("model_gateway"));
     }

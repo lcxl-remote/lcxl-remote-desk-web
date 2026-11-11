@@ -642,6 +642,11 @@ pub enum ExecOutcome {
     PermissionRequired {
         request: crate::dynamic_run::PermissionRequest,
     },
+    /// No current grant matches this exact call in a call-time approval
+    /// session. Nothing was reserved or dispatched; the loop turns the call into
+    /// a permission proposal. `input_mismatch` means an active exact grant
+    /// differs only in its approved input.
+    GrantRequired { input_mismatch: bool },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
     /// The independent AI reviewer refused this exact call; nothing ran. Counted
@@ -711,6 +716,10 @@ pub enum ReadOutcome {
     PermissionRequired {
         request: crate::dynamic_run::PermissionRequest,
     },
+    /// No current grant matches this exact read in a call-time approval
+    /// session; nothing was reserved or dispatched. See
+    /// [`ExecOutcome::GrantRequired`].
+    GrantRequired { input_mismatch: bool },
 }
 
 #[derive(Debug)]
@@ -1479,6 +1488,12 @@ pub trait SessionSeam {
     /// Persist a normalized permission request and its append-only event in one
     /// transaction. The default is suitable only for in-memory test seams;
     /// durable runtimes override it so UI visibility cannot diverge from audit.
+    /// Owner-configured use count for a native application scope that the
+    /// server proposes from one direct UI call. Never read from model input.
+    async fn application_scope_default_uses(&self) -> u32 {
+        crate::permission_tools::DEFAULT_APPLICATION_SCOPE_USES
+    }
+
     /// Validate a scheduled-task exception against current frozen authority.
     /// Runtimes without task admission must not expose an expanding approval card.
     async fn validate_task_permission_request(

@@ -201,6 +201,14 @@ pub async fn update_model_provider(
             ),
         ));
     }
+    if let Some(uses) = update.application_scope_default_uses
+        && !desk_diagnose_core::permission_tools::APPLICATION_SCOPE_USES_RANGE.contains(&uses)
+    {
+        return Err(DeskSignalError::new_custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            "application_scope_default_uses must be between 1 and 16",
+        ));
+    }
     let next_max_steps = update
         .max_steps_per_turn
         .unwrap_or(config.max_steps_per_turn);

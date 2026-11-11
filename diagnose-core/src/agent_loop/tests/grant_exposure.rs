@@ -81,18 +81,11 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
         turns: RefCell::new(
             [
                 ModelTurn {
-                    tool_calls: vec![
-                        ToolCall {
-                            id: "read".into(),
-                            name: target.name().into(),
-                            arguments_json: "{}".into(),
-                        },
-                        ToolCall {
-                            id: "duplicate".into(),
-                            name: target.name().into(),
-                            arguments_json: "{}".into(),
-                        },
-                    ],
+                    tool_calls: vec![ToolCall {
+                        id: "read".into(),
+                        name: target.name().into(),
+                        arguments_json: "{}".into(),
+                    }],
                     stop_reason: StopReason::ToolUse,
                     provider_meta: tool_meta(),
                     ..Default::default()
@@ -126,19 +119,6 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
     .await
     .unwrap();
     assert_eq!(tools.reads.get(), 1);
-    assert!(
-        session
-            .inner
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .conversation
-            .iter()
-            .any(
-                |message| message.tool_call_id.as_deref() == Some("duplicate")
-                    && message.text.contains("grant_exhausted")
-            )
-    );
     let requests = requests.borrow();
     assert_eq!(requests[0].messages[0].text, requests[1].messages[0].text);
     for request in requests.iter() {
@@ -746,4 +726,205 @@ async fn workbench_coordinator_uses_reads_and_rejects_forged_writes_and_permissi
             .iter()
             .any(|message| message.text.contains("browser_open_page"))
     );
+}
+
+/// Seam whose host finds no grant matching the exact read input.
+struct MismatchTools {
+    snapshot: crate::grant_disclosure::GrantDisclosureSnapshot,
+    reads: std::cell::Cell<usize>,
+}
+
+#[async_trait(?Send)]
+impl ToolSeam for MismatchTools {
+    async fn current_grant_disclosure(
+        &self,
+    ) -> Result<Option<crate::grant_disclosure::GrantDisclosureSnapshot>, AgentError> {
+        Ok(Some(self.snapshot.clone()))
+    }
+    async fn run_read(&self, _: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        unreachable!("a read without a matching grant is never dispatched")
+    }
+    async fn run_read_versioned(
+        &self,
+        _: &ToolCall,
+        _: &crate::seam::ExecContext,
+        _: Option<&crate::action_version::ActionVersion>,
+    ) -> crate::seam::ReadCompletion {
+        self.reads.set(self.reads.get() + 1);
+        crate::seam::ReadCompletion {
+            outcome: Ok(ReadOutcome::GrantRequired {
+                input_mismatch: true,
+            }),
+            version_advance: None,
+        }
+    }
+}
+
+fn call_time_case(
+    exhausted: bool,
+) -> (
+    MemSession,
+    crate::provider_registry::ProviderRegistry,
+    crate::grant_disclosure::GrantDisclosureSnapshot,
+    Vec<crate::capability_availability::CapabilityAvailability>,
+    RegisteredTool,
+    AgentScope,
+) {
+    let (mut initial, providers, mut snapshot) = crate::grant_disclosure::tests::fixture();
+    initial.latest_input_seq = 1;
+    initial.focus_epoch.input_revision = 1;
+    let scope = initial.scope_snapshot.clone();
+    if exhausted {
+        snapshot.grants[0].remaining_uses = 0;
+    }
+
+    let target = providers
+        .capability_for_tool("inspect_desktop_session")
+        .unwrap()
+        .registered_tool();
+    let inventory = vec![crate::capability_availability::CapabilityAvailability {
+        provider_id: snapshot.grants[0].provider_id.clone(),
+        capability_id: snapshot.grants[0].capability_id.clone(),
+        tool_name: target.name().into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let session = MemSession {
+        inner: RefCell::new(Some(initial)),
+        ..Default::default()
+    };
+    (session, providers, snapshot, inventory, target, scope)
+}
+
+fn direct_read(id: &str) -> ModelTurn {
+    ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: "inspect_desktop_session".into(),
+            arguments_json: "{}".into(),
+        }],
+        stop_reason: StopReason::ToolUse,
+        provider_meta: tool_meta(),
+        ..Default::default()
+    }
+}
+
+/// Loading a definition grants nothing; it only makes the tool callable.
+fn load_read() -> ModelTurn {
+    ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: "load".into(),
+            name: crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"tool_names":["inspect_desktop_session"]})
+                .to_string(),
+        }],
+        stop_reason: StopReason::ToolUse,
+        provider_meta: tool_meta(),
+        ..Default::default()
+    }
+}
+
+fn tool_result<'a>(session: &'a PersistedAgentSession, id: &str) -> &'a str {
+    &session
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some(id))
+        .unwrap()
+        .text
+}
+
+#[tokio::test]
+async fn a_direct_call_without_any_grant_pauses_as_its_own_proposal() {
+    let (session, providers, snapshot, inventory, target, scope) = call_time_case(true);
+    let model = ScriptModel {
+        turns: RefCell::new([load_read(), direct_read("read")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = GrantTools {
+        snapshot: RefCell::new(snapshot),
+        reads: std::cell::Cell::new(0),
+    };
+    let mut registry = vec![target];
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    let clock = || "1970-01-01T00:00:00.500Z".to_string();
+    let mut deps = deps(&session, &model, &tools, &registry, &clock);
+    deps.provider_registry = Some(&providers);
+    deps.capability_inventory = Some(&inventory);
+    let outcome = run_agent_turn(
+        &deps,
+        ClaimTurnParams {
+            current_pdp_scope: scope,
+            ..claim()
+        },
+        ChatMessage::text("u", ChatRole::User, "inspect the session"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let LoopOutcome::PermissionRequested { request_id } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(tools.reads.get(), 0, "nothing ran before approval");
+    let stored = session.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    let [request] = stored.permission_requests.as_slice() else {
+        panic!("one proposal")
+    };
+    assert_eq!(request.request_id, request_id);
+    assert_eq!(request.items[0].item_id, "read");
+    assert_eq!(request.items[0].tool_name, "inspect_desktop_session");
+    let result: serde_json::Value = serde_json::from_str(tool_result(stored, "read")).unwrap();
+    assert_eq!(result["status"], "pending_user_decision");
+    assert_eq!(result["executed"], false);
+    assert_eq!(
+        crate::permission_tools::proposing_call(&stored.conversation, &request_id)
+            .map(|(message, call)| stored.conversation[message].tool_calls[call].id.as_str()),
+        Some("read")
+    );
+}
+
+#[tokio::test]
+async fn a_host_input_mismatch_is_explained_once_before_a_new_proposal() {
+    let (session, providers, snapshot, inventory, target, scope) = call_time_case(false);
+    let model = ScriptModel {
+        turns: RefCell::new([direct_read("first"), direct_read("second")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = MismatchTools {
+        snapshot,
+        reads: std::cell::Cell::new(0),
+    };
+    let mut registry = vec![target];
+    registry.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    let clock = || "1970-01-01T00:00:00.500Z".to_string();
+    let mut deps = deps(&session, &model, &tools, &registry, &clock);
+    deps.provider_registry = Some(&providers);
+    deps.capability_inventory = Some(&inventory);
+    let outcome = run_agent_turn(
+        &deps,
+        ClaimTurnParams {
+            current_pdp_scope: scope,
+            ..claim()
+        },
+        ChatMessage::text("u", ChatRole::User, "inspect the session"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, LoopOutcome::PermissionRequested { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(tools.reads.get(), 2);
+    let stored = session.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert!(tool_result(stored, "first").starts_with("approved_input_mismatch"));
+    assert!(tool_result(stored, "second").contains("pending_user_decision"));
+    let [request] = stored.permission_requests.as_slice() else {
+        panic!("one proposal")
+    };
+    assert_eq!(request.items[0].item_id, "second");
 }

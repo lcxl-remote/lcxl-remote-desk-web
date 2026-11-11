@@ -72,17 +72,18 @@ pub fn resource(application: &ObjectRef) -> Vec<String> {
 }
 
 pub fn operation(action: &UiSemanticAction) -> String {
-    operation_for_tool(
-        "execute_ui_actions",
-        match action {
-            UiSemanticAction::Invoke => ApplicationActionKind::Invoke,
-            UiSemanticAction::Select => ApplicationActionKind::Select,
-            UiSemanticAction::Focus => ApplicationActionKind::Focus,
-            UiSemanticAction::Toggle { .. } => ApplicationActionKind::Toggle,
-            UiSemanticAction::SetValue { .. } => ApplicationActionKind::SetValue,
-            UiSemanticAction::Scroll { .. } => ApplicationActionKind::Scroll,
-        },
-    )
+    operation_for_tool("execute_ui_actions", action_kind(action))
+}
+
+pub fn action_kind(action: &UiSemanticAction) -> ApplicationActionKind {
+    match action {
+        UiSemanticAction::Invoke => ApplicationActionKind::Invoke,
+        UiSemanticAction::Select => ApplicationActionKind::Select,
+        UiSemanticAction::Focus => ApplicationActionKind::Focus,
+        UiSemanticAction::Toggle { .. } => ApplicationActionKind::Toggle,
+        UiSemanticAction::SetValue { .. } => ApplicationActionKind::SetValue,
+        UiSemanticAction::Scroll { .. } => ApplicationActionKind::Scroll,
+    }
 }
 
 pub fn operation_for_tool(tool: &str, action: ApplicationActionKind) -> String {
@@ -216,11 +217,7 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("requires application_scope"));
         assert!(error.message.contains("never exact_input"));
-        assert!(
-            error
-                .message
-                .contains("no request or approval card was created")
-        );
+        assert!(error.message.contains("No approval card was created"));
     }
 
     #[test]
@@ -236,16 +233,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("item_id=click"));
-        assert!(
-            error
-                .message
-                .contains("no request or approval card was created")
-        );
-        assert!(
-            error
-                .message
-                .contains("first request only the prerequisite read permission")
-        );
+        assert!(error.message.contains("No approval card was created"));
+        assert!(error.message.contains("observe it first"));
         assert!(error.message.contains("application_id"));
         assert!(!error.message.contains("snapshot_id"));
     }

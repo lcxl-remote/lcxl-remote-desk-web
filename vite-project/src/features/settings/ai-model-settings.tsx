@@ -45,6 +45,9 @@ const SAME_TOOL_LIMIT_DEFAULT = 20
 const EXEC_APPROVAL_TIMEOUT_MIN_SECS = 30
 const EXEC_APPROVAL_TIMEOUT_MAX_SECS = 1800
 const EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS = 120
+const APPLICATION_SCOPE_USES_MIN = 1
+const APPLICATION_SCOPE_USES_MAX = 16
+const APPLICATION_SCOPE_USES_DEFAULT = 8
 
 const providerSchema = z.object({
     wire_protocol: z.string().refine(value => PROVIDERS.includes(value as (typeof PROVIDERS)[number])),
@@ -83,6 +86,11 @@ const providerSchema = z.object({
         .int()
         .min(EXEC_APPROVAL_TIMEOUT_MIN_SECS)
         .max(EXEC_APPROVAL_TIMEOUT_MAX_SECS),
+    application_scope_default_uses: z
+        .number()
+        .int()
+        .min(APPLICATION_SCOPE_USES_MIN)
+        .max(APPLICATION_SCOPE_USES_MAX),
 })
 
 type ProviderFormValues = z.infer<typeof providerSchema>
@@ -194,6 +202,7 @@ export function AiModelSettings() {
             max_steps_per_turn: MAX_STEPS_DEFAULT,
             max_same_tool_calls_per_turn: SAME_TOOL_LIMIT_DEFAULT,
             exec_approval_timeout_secs: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
+            application_scope_default_uses: APPLICATION_SCOPE_USES_DEFAULT,
         },
     })
 
@@ -226,6 +235,8 @@ export function AiModelSettings() {
                     data.max_same_tool_calls_per_turn ?? SAME_TOOL_LIMIT_DEFAULT,
                 exec_approval_timeout_secs:
                     data.exec_approval_timeout_secs ?? EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
+                application_scope_default_uses:
+                    data.application_scope_default_uses ?? APPLICATION_SCOPE_USES_DEFAULT,
             })
             setHydrated(true)
         }
@@ -260,6 +271,7 @@ export function AiModelSettings() {
             max_steps_per_turn: values.max_steps_per_turn,
             max_same_tool_calls_per_turn: values.max_same_tool_calls_per_turn,
             exec_approval_timeout_secs: values.exec_approval_timeout_secs,
+            application_scope_default_uses: values.application_scope_default_uses,
             supports_image_input: values.supports_image_input,
             api_key,
         }
@@ -829,6 +841,42 @@ export function AiModelSettings() {
                                                     min: EXEC_APPROVAL_TIMEOUT_MIN_SECS,
                                                     max: EXEC_APPROVAL_TIMEOUT_MAX_SECS,
                                                     defaultValue: EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
+                                                },
+                                            )}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <FormField
+                                control={form.control}
+                                name="application_scope_default_uses"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>
+                                            {t("pages.aiModel.settings.applicationScopeUses")}
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                type="number"
+                                                min={APPLICATION_SCOPE_USES_MIN}
+                                                max={APPLICATION_SCOPE_USES_MAX}
+                                                step={1}
+                                                {...field}
+                                                value={field.value}
+                                                onChange={(event) =>
+                                                    field.onChange(Number(event.target.value))
+                                                }
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {t(
+                                                "pages.aiModel.settings.applicationScopeUses.description",
+                                                {
+                                                    min: APPLICATION_SCOPE_USES_MIN,
+                                                    max: APPLICATION_SCOPE_USES_MAX,
+                                                    defaultValue: APPLICATION_SCOPE_USES_DEFAULT,
                                                 },
                                             )}
                                         </FormDescription>

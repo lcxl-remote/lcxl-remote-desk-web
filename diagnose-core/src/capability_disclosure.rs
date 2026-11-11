@@ -301,7 +301,6 @@ pub fn capability_name_index_prompt(
     let mut known_but_not_requestable_now = Vec::new();
     let mut unavailable_now = Vec::new();
     let mut advertised_state = BTreeMap::new();
-    let mut permission_input_modes = BTreeMap::new();
 
     for provider in registry.providers() {
         for capability in &provider.capabilities {
@@ -309,12 +308,6 @@ pub fn capability_name_index_prompt(
             let Some(availability) = inventory.iter().find(|item| item.tool_name == name) else {
                 continue;
             };
-            if availability.callable() && requestable.contains(name) {
-                permission_input_modes.insert(
-                    name,
-                    crate::permission_tools::permission_input_mode(capability),
-                );
-            }
             if advertised_tool_names.contains(name) {
                 advertised_state.insert(
                     name,
@@ -351,10 +344,9 @@ pub fn capability_name_index_prompt(
         "permission_requestable_when_loaded_now": permission_requestable_when_loaded_now,
         "known_but_not_requestable_now": known_but_not_requestable_now,
         "unavailable_now": unavailable_now,
-        "permission_input_modes": permission_input_modes,
     });
     let prompt = format!(
-        "This server-authored capability index contains names and permission input modes only. Advertised definitions are not execution authority; advertised_state describes current eligibility. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Application-scope approval does not require loading individual action schemas first. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
+        "This server-authored capability index contains names only. Advertised definitions are not execution authority; advertised_state describes current eligibility. Active authorized tools are provided automatically. Use {LOAD_CAPABILITY_DETAILS_TOOL_NAME} with exact names only when you need missing parameter details or a budget-hidden tool. Calling a tool without a matching grant asks the owner for approval. Loading grants no authority and cannot change readiness.\n<capability_index>{}</capability_index>",
         serde_json::to_string(&index).expect("name index is serializable")
     );
     if prompt.len() > MAX_CAPABILITY_INDEX_BYTES {
@@ -389,7 +381,9 @@ fn detail_entries(
                 return Some(json!({"tool_name": name, "state": "callable_when_loaded"}));
             }
             if availability.callable() && requestable.contains(name.as_str()) {
-                let candidate = permission_candidates.iter().find(|tool| tool.name() == name)?;
+                let candidate = permission_candidates
+                    .iter()
+                    .find(|tool| tool.name() == name)?;
                 let mut model_spec = candidate.spec.clone();
                 crate::ui_model_ids::project_tool(&mut model_spec);
                 crate::ui_model_ids::strip_server_keywords(&mut model_spec.parameters_schema);
@@ -411,7 +405,6 @@ fn detail_entries(
                     "input_schema": model_spec.parameters_schema,
                     "execution_policy": capability.wire.execution_policy,
                     "authorization_hint": capability.wire.authorization_hint,
-                    "permission_input_mode": crate::permission_tools::permission_input_mode(capability),
                     "limits": capability.wire.limits,
                     "supports_progress": capability.wire.supports_progress,
                     "supports_cancel": capability.wire.supports_cancel,
@@ -784,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn requestable_tools_disclose_their_permission_input_modes() {
+    fn catalog_needs_no_permission_input_modes_for_call_time_approval() {
         let (registry, inventory, tools) = every_capability_ready();
         let complete_index =
             capability_name_index_prompt(&registry, &inventory, &[], &tools, &BTreeSet::new())
@@ -803,24 +796,8 @@ mod tests {
         let index =
             capability_name_index_prompt(&registry, &inventory, &[], &candidates, &BTreeSet::new())
                 .unwrap();
-        assert!(index.len() <= MAX_CAPABILITY_INDEX_BYTES);
-        let modes = index
-            .split_once("<capability_index>")
-            .and_then(|(_, rest)| rest.split_once("</capability_index>"))
-            .map(|(value, _)| serde_json::from_str::<serde_json::Value>(value).unwrap())
-            .unwrap();
-        assert_eq!(
-            modes["permission_input_modes"]["execute_ui_actions"],
-            "application_scope"
-        );
-        assert_eq!(
-            modes["permission_input_modes"]["send_gmail_message"],
-            "exact_input"
-        );
-        assert_eq!(
-            modes["permission_input_modes"]["inspect_files"],
-            "contextual_exact_input"
-        );
+        assert!(!index.contains("permission_input_mode"));
+        assert!(index.contains("asks the owner for approval"));
         let details = detail_entries(
             &registry,
             &inventory,
@@ -829,7 +806,7 @@ mod tests {
             &BTreeSet::new(),
             &["execute_ui_actions".into()],
         );
-        assert_eq!(details[0]["permission_input_mode"], "application_scope");
+        assert!(details[0].get("permission_input_mode").is_none());
 
         let process = tools
             .iter()

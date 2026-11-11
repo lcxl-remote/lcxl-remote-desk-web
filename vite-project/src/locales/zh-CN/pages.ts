@@ -2780,6 +2780,8 @@ export default {
   'pages.aiModel.settings.maxSameToolCallsPerTurn': '单回合内同一工具重复调用上限',
   'pages.aiModel.settings.maxSameToolCallsPerTurn.description': '单个 AI 回合内同一类工具的最大调用次数，即使参数不同也计入。范围：{{min}}–{{max}}，默认：{{defaultValue}}。此项与 Desk 服务端的同时运行命令数无关。',
   'pages.aiModel.settings.execApprovalTimeout': '命令审批窗口（秒）',
+  'pages.aiModel.settings.applicationScopeUses': '应用操作授权次数',
+  'pages.aiModel.settings.applicationScopeUses.description': '助手操作应用时，一次批准可在该应用中执行同类操作的次数。范围：{{min}}–{{max}}，默认：{{defaultValue}}。每张审批卡上都可以调低。',
   'pages.aiModel.settings.execApprovalTimeout.description': 'AI 新提出的命令等待设备所有者明确批准的时间。范围：{{min}}–{{max}} 秒，默认：{{defaultValue}}。已显示的审批保持创建时的值。此项与命令运行上限和设备访问审批相互独立。',
   'pages.aiModel.settings.updateSucceedMessage': '模型服务更新成功',
   'pages.aiModel.settings.updateFailedMessage': '模型服务更新失败',

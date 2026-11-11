@@ -1142,18 +1142,10 @@ pub fn preflight_review_capacity(
     if requires_owner_decision(request) {
         return Ok(());
     }
-    if let Some(proposal) = session.conversation.iter().find(|message| {
-        message.tool_calls.iter().any(|call| {
-            call.name == "request_permissions"
-                && crate::native_ids::stable(
-                    crate::native_ids::Kind::PermissionRequest,
-                    &(
-                        "permission-request",
-                        &(&session.conversation_id, session.input_revision, &call.id),
-                    ),
-                ) == request.request_id
-        })
-    }) {
+    if let Some(proposal) =
+        crate::permission_tools::proposing_call(&session.conversation, &request.request_id)
+            .map(|(message, _)| &session.conversation[message])
+    {
         let bytes = crate::model_egress::message_content_bytes(proposal)
             .map_err(|_| ApprovalReviewError::InvalidContext)?;
         let owner = session
@@ -1705,43 +1697,28 @@ fn skipped_calls_for_authority(
     session: &PersistedAgentSession,
     authority: &[ApprovalAuthorityFact],
 ) -> Vec<ApprovalSkippedCall> {
-    let mut skipped = Vec::new();
-    for (index, message) in session.conversation.iter().enumerate() {
-        if message.role != ChatRole::Assistant {
-            continue;
+    let mut requests = std::collections::BTreeSet::new();
+    for fact in authority {
+        if let ApprovalSource::PermissionItem { request_id, .. } = &fact.source {
+            requests.insert(request_id.as_str());
         }
-        let Some((permission_index, paused_for_request_id)) = message
-            .tool_calls
-            .iter()
-            .enumerate()
-            .find_map(|(permission_index, call)| {
-                if call.name != "request_permissions" {
-                    return None;
-                }
-                let request_id = session.conversation[index + 1..]
-                    .iter()
-                    .find_map(|result| {
-                        (result.tool_call_id.as_deref() == Some(call.id.as_str()))
-                            .then(|| serde_json::from_str::<serde_json::Value>(&result.text).ok())
-                            .flatten()
-                            .and_then(|value| value.get("request_id")?.as_str().map(str::to_owned))
-                    })?;
-                authority.iter().any(|fact| matches!(
-                    &fact.source,
-                    ApprovalSource::PermissionItem { request_id: known, .. } if known == &request_id
-                )).then_some((permission_index, request_id))
-            })
+    }
+    let mut skipped = Vec::new();
+    for request_id in requests {
+        let Some((index, call_index)) =
+            crate::permission_tools::proposing_call(&session.conversation, request_id)
         else {
             continue;
         };
-        for call in &message.tool_calls[permission_index + 1..] {
+        let message = &session.conversation[index];
+        for call in &message.tool_calls[call_index + 1..] {
             if session.conversation[index + 1..].iter().any(|result| {
                 result.tool_call_id.as_deref() == Some(call.id.as_str())
                     && is_historical_permission_pause_result(result)
             }) {
                 skipped.push(ApprovalSkippedCall {
                     call_id: call.id.clone(),
-                    paused_for_request_id: paused_for_request_id.clone(),
+                    paused_for_request_id: request_id.to_string(),
                 });
             }
         }

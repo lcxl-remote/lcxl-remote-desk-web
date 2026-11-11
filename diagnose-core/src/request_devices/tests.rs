@@ -348,7 +348,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         let target = devices[0].read_target.as_ref().unwrap();
         if risk == CapabilityRiskTier::R0 {
             assert!(*callable, "{name}");
-            require_current_read_target(&session, &native, target).unwrap();
+            assert!(covered(&session, &native, target));
             continue;
         }
         assert!(
@@ -386,14 +386,13 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         .unwrap()
         .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(approved.selected_device_target(), Some(target), "{name}");
-        assert!(
-            require_current_read_target(&session, &native, target).is_err(),
-            "{name}"
-        );
+        assert!(!covered(&session, &native, target), "{name}");
         approved.state = PermissionRequestState::Approved;
         session.permission_requests.push(approved);
-        require_current_read_target(&session, &native, target)
-            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(
+            require_current_read_target(&session, &native, target)
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"))
+        );
         let mut later = session.clone();
         let targets = later.assistant_request_targets().unwrap().to_vec();
         later.input_revision += 1;
@@ -401,39 +400,47 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             .begin_focus_epoch(later.input_revision, Vec::new())
             .unwrap();
         later.bind_assistant_input_targets(&targets).unwrap();
-        require_current_read_target(&later, &native, target).unwrap_or_else(|error| {
-            panic!("{name}: original approval lost on follow-up: {error:?}")
-        });
         assert!(
-            require_current_read_target(&later, &native, devices[1].read_target.as_ref().unwrap())
-                .is_err(),
+            require_current_read_target(&later, &native, target).unwrap_or_else(|error| {
+                panic!("{name}: original approval lost on follow-up: {error:?}")
+            })
+        );
+        assert!(
+            !covered(&later, &native, devices[1].read_target.as_ref().unwrap()),
             "{name}: A approval authorized B"
         );
         assert!(
-            require_current_read_target(
+            !covered(
                 &session,
                 &native,
                 &SelectedDeviceTarget {
                     connection_id: "reconnected".into(),
                     ..target.clone()
                 }
-            )
-            .is_err(),
+            ),
             "{name}: approval survived a changed connection"
         );
         assert!(
-            require_current_read_target(
+            !covered(
                 &session,
                 &native,
                 &SelectedDeviceTarget {
                     readiness_revision: 2,
                     ..target.clone()
                 }
-            )
-            .is_err(),
+            ),
             "{name}: approval survived changed readiness"
         );
     }
+}
+
+/// The read is admitted on this target and covered by an approval.
+fn covered(
+    session: &PersistedAgentSession,
+    call: &ToolCall,
+    target: &SelectedDeviceTarget,
+) -> bool {
+    require_current_read_target(session, call, target).unwrap_or(false)
 }
 
 #[test]
@@ -441,14 +448,14 @@ fn process_arguments_cannot_escalate_an_unapproved_read() {
     let target = device("a", vec![]).read_target.unwrap();
     let session = session();
     let basic = tool("read_process_list", json!({"allow_unfiltered":true}));
-    require_current_read_target(&session, &basic, &target).unwrap();
+    assert!(covered(&session, &basic, &target));
     let sensitive = tool(
         "read_process_list",
         json!({
             "allow_unfiltered":true, "include_command_line":true
         }),
     );
-    assert!(require_current_read_target(&session, &sensitive, &target).is_err());
+    assert!(!covered(&session, &sensitive, &target));
     assert!(
         require_observed_desktop_target(
             &session,
@@ -621,11 +628,12 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         serde_json::from_str::<Value>(&native.arguments_json).unwrap(),
         input_a
     );
-    require_current_read_target(&session, &native, a).unwrap();
-    assert!(
-        require_current_read_target(&session, &tool("read_current_screen", input_b.clone()), a)
-            .is_err()
-    );
+    assert!(covered(&session, &native, a));
+    assert!(!covered(
+        &session,
+        &tool("read_current_screen", input_b.clone()),
+        a
+    ));
     let mut reused_token = session.conversation.last().unwrap().clone();
     reused_token
         .data_envelope
@@ -638,13 +646,10 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         require_observed_desktop_target(&session, "a", "read_current_screen", &input_b).is_ok()
     );
     assert!(
-        require_current_read_target(&session, &tool("read_current_screen", input_b.clone()), a)
-            .is_err(),
+        !covered(&session, &tool("read_current_screen", input_b.clone()), a),
         "a newly observed incarnation on the same device needs a new approval"
     );
-    assert!(
-        require_current_read_target(&session, &tool("read_current_screen", input_b), b).is_err()
-    );
+    assert!(!covered(&session, &tool("read_current_screen", input_b), b));
     for (target, element, allowed) in [("a", "e1", true), ("b", "e1", false), ("b", "e2", true)] {
         let raw = tool(
             REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
@@ -1321,14 +1326,20 @@ fn approved_command_visibility_uses_live_device_authority_across_continuations()
             approved_read_tools(&session, device.read_target.as_ref().unwrap(), &grants, now);
         assert_eq!(device.approved_read_tools, ["exec_command"], "{origin:?}");
         assert!(
-            command_tool(&session, std::slice::from_ref(&device), &registry).is_some(),
+            command_tool(&session, std::slice::from_ref(&device), &registry)
+                .is_some_and(|(_, approved)| approved),
             "{origin:?}"
         );
         let mut spent = grants.clone();
         spent[0].remaining_uses = 0;
         device.approved_read_tools =
             approved_read_tools(&session, device.read_target.as_ref().unwrap(), &spent, now);
-        assert!(command_tool(&session, std::slice::from_ref(&device), &registry).is_none());
+        // A spent approval no longer pins the command; the tool may still be
+        // offered for a new call-time proposal.
+        assert!(
+            !command_tool(&session, std::slice::from_ref(&device), &registry)
+                .is_some_and(|(_, approved)| approved)
+        );
     }
 }
 

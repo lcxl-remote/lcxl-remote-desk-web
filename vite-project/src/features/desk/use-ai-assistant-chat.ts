@@ -349,10 +349,12 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
             let nativeVerified = false;
             let nativeFileResult = false;
             let permissionReview: AiAssistantToolActivity['permissionReview'];
+            let approvalReceipt = false;
             try {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
-                if (existing?.name === 'request_permissions' && native.status === 'pending_user_decision') {
+                approvalReceipt = native.status === 'pending_user_decision' && typeof native.request_id === 'string';
+                if (approvalReceipt) {
                     const request = permissions.get(native.request_id);
                     if (request) permissionReview = { state: request.state, source: request.decision?.source };
                 }
@@ -377,7 +379,8 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
                 argumentsJson: existing?.argumentsJson ?? '{}',
                 output: message.text,
             });
-            if (!backgroundRunning && message.text && (existing?.name === 'exec_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
+            // An approval receipt is not command output; the permission card shows it.
+            if (!backgroundRunning && !approvalReceipt && message.text && (existing?.name === 'exec_command' || nativeFileResult || message.backgroundTaskId || (nativeFailed && permissionReason))) {
                 messages.push({ id: message.id, role: 'tool_result', toolCallId: message.toolCallId, turnId: message.turnId, text: message.text, permissionReason });
             }
         }

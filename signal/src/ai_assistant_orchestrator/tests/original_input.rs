@@ -2097,11 +2097,10 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     let model = actix_web::rt::spawn(async move {
         let reply = |target: &str| {
             memory_sse(
+                // The command is called directly and pauses for its own approval.
                 json!({"tool_calls":[{"index":0,"id":format!("plan-{target}"),"type":"function","function":{
-                    "name":"request_permissions","arguments":json!({
-                    "target_ref":target,"items":[{"tool_name":"exec_command",
-                            "exact_input":{"shell":"bash","command":"df -h","timeout_ms":1000},
-                            "reason":"Check disk space on the selected machine"}]
+                    "name":"exec_command","arguments":json!({
+                    "target_ref":target,"shell":"bash","command":"df -h","timeout_ms":1000
                     }).to_string()
                 }}]}),
                 "tool_calls",
@@ -2113,7 +2112,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|tool| tool["function"]["name"] == "request_permissions")
+                .find(|tool| tool["function"]["name"] == "exec_command")
                 .unwrap();
             assert!(spec["function"]["parameters"]["properties"]["target_ref"].is_object());
             assert!(request["messages"].to_string().contains("command-selected"));
@@ -3048,7 +3047,7 @@ enum SelectedReadScenario {
 
 async fn run_selected_device_reads(scenario: SelectedReadScenario) {
     use super::desktop_permission::concrete_review_reply;
-    use super::permission_object::tool_reply;
+    use super::permission_object::{tool_reply, tool_reply_with_id};
     use crate::config::ConfigConnection;
     use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
     use desk_agent_protocol::{Capability, computer_use::*};
@@ -3272,23 +3271,26 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             capture_one_openai_request_with_reply(&listener, |body| {
                 let request: Value = serde_json::from_slice(body).unwrap();
                 if name == "inspect_files" {
-                    let id = model_directory_request.lock().unwrap().clone().expect("confirmed directory proposal");
+                    let id = model_directory_request
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("confirmed directory proposal");
                     directory_exact = Some(json!({"directory_request_id":id}));
                     assert!(request["messages"].to_string().contains(&id));
                 }
                 assert!(
-                    !request["tools"]
+                    request["tools"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|t| t["function"]["name"] == name)
+                        .any(|t| t["function"]["name"] == name),
+                    "{name} is callable before approval"
                 );
-                tool_reply(
-                    "request_permissions",
-                    json!({"target_ref":target, "items":[{
-                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":directory_exact.as_ref().unwrap_or(&exact)
-                    }]}),
-                )
+                // The direct call carries the device; its missing grant becomes the proposal.
+                let mut direct = directory_exact.as_ref().unwrap_or(&exact).clone();
+                direct["target_ref"] = json!(target);
+                tool_reply_with_id("call-proposal", name, direct)
             })
             .await;
             capture_one_openai_request_with_reply(&listener, |body| {
@@ -4132,7 +4134,7 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
     assert!(
-        names.contains(desk_diagnose_core::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME),
+        !names.contains(desk_diagnose_core::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME),
         "{names:?}"
     );
     assert_eq!(
@@ -4147,7 +4149,6 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
             *name,
             "describe_tools"
                 | "load_skill"
-                | "request_permissions"
                 | "fetch_public_web_page"
                 | "read_conversation_attachment"
                 | "search_memories"
@@ -4198,9 +4199,19 @@ async fn targetless_web_decision_resumes_the_original_model_turn_without_a_host(
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             assert_targetless_web_tools(&request, false);
+            super::permission_object::tool_reply(
+                "describe_tools",
+                json!({"tool_names":["fetch_public_web_page"]}),
+            )
+        })
+        .await;
+        // The loaded tool is called directly and pauses for its own approval.
+        capture_one_openai_request_with_reply(&listener, |body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            assert_targetless_web_tools(&request, true);
             memory_sse(json!({"tool_calls":[{"index":0,"id":"request-web-read","type":"function","function":{
-                "name":"request_permissions",
-                "arguments":json!({"items":[{"tool_name":"fetch_public_web_page","exact_input":{"url":"https://docs.example.invalid/guide"},"reason":"Read the requested public guide"}]}).to_string(),
+                "name":"fetch_public_web_page",
+                "arguments":json!({"url":"https://docs.example.invalid/guide"}).to_string(),
             }}]}), "tool_calls")
         }).await;
         capture_one_openai_request_with_reply(&listener, |body| {
@@ -5047,7 +5058,7 @@ async fn fixed_browser_uses_the_same_signal_device_action_route() {
 }
 
 async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool) {
-    use super::permission_object::tool_reply;
+    use super::permission_object::{tool_reply, tool_reply_with_id};
     use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
     use desk_agent_protocol::{Capability, browser_control::*, computer_use::*};
     use desk_signal_facade::{model::os::OperationSystemEnum, service::ComputerActionObserver};
@@ -5217,6 +5228,7 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool
         json!({"target":{"url":"https://example.com/"}})
     };
     let gateway = actix_web::rt::spawn(async move {
+        // The model calls the tool directly; the missing grant becomes the proposal.
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             assert!(
@@ -5224,16 +5236,10 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|tool| tool["function"]["name"] != name)
+                    .any(|tool| tool["function"]["name"] == name),
+                "{request}"
             );
-            tool_reply(
-                "request_permissions",
-                json!({"items":[{
-                    "tool_name":name,
-                    "exact_input":exact,
-                    "reason":if artifact { "Create the file requested by the owner" } else { "Open the page requested by the owner" }
-                }]}),
-            )
+            tool_reply_with_id("call-proposal", name, exact.clone())
         })
         .await;
         capture_one_openai_request_with_reply(&listener, |body| {

@@ -204,12 +204,13 @@ pub fn match_capability_grant(
     match_capability_grant_inner(grant, call, true, None, None, None)
 }
 
-/// Explain a rejected selection without granting authority or exposing inputs.
-pub fn unavailable_grant_message(
-    grants: &[CapabilityGrant],
-    call: &CapabilityGrantCall<'_>,
-) -> &'static str {
-    let differs_only_in_input = grants.iter().any(|grant| {
+/// An active exact grant exists for this tool, but with different arguments.
+pub const APPROVED_INPUT_MISMATCH_MESSAGE: &str = "approved_input_mismatch: an active grant exists, but these arguments differ from the approved exact input. No operation was performed. Copy approved_exact_input from the current authorization snapshot without changing fields. If you really need different arguments, call again with them to ask for a new approval.";
+
+/// Whether an active exact grant would admit this call if only its approved
+/// input matched. Used to explain a miss without exposing that input.
+pub fn differs_only_in_input(grants: &[CapabilityGrant], call: &CapabilityGrantCall<'_>) -> bool {
+    grants.iter().any(|grant| {
         let Some(approved) = grant.canonical_input_digest_sha256.as_deref() else {
             return false;
         };
@@ -219,11 +220,49 @@ pub fn unavailable_grant_message(
         let mut approved_call = call.clone();
         approved_call.canonical_input_digest_sha256 = approved;
         is_capability_grant_candidate(grant, &approved_call)
-    });
-    if differs_only_in_input {
-        "approved_input_mismatch: an active grant exists, but these arguments differ from the approved exact input. No operation was performed. Copy approved_exact_input from the current authorization snapshot without changing fields; do not request duplicate permission. If its target reference is stale, inspect again and obtain authorization for the new target."
+    })
+}
+
+/// Explain a rejected selection without granting authority or exposing inputs.
+pub fn unavailable_grant_message(
+    grants: &[CapabilityGrant],
+    call: &CapabilityGrantCall<'_>,
+) -> &'static str {
+    if differs_only_in_input(grants, call) {
+        APPROVED_INPUT_MISMATCH_MESSAGE
     } else {
         "authorization_unavailable: no active capability grant matches this call's scope, limits and current authority. Check the current authorization snapshot. A denied request is an explicit decision, not an approval propagation failure; do not repeat the same rejected action or widen its target. A materially narrower action requires a new, independently reviewed request."
+    }
+}
+
+/// A host's choice among stored grants for one exact call.
+pub enum GrantSelection<'a> {
+    Selected(&'a CapabilityGrant),
+    /// No grant matches and the session approves at call time: nothing is
+    /// reserved, and the loop turns the call into a permission proposal.
+    Required {
+        input_mismatch: bool,
+    },
+    /// No grant matches and the session cannot propose one.
+    Unavailable,
+}
+
+/// Select the first stored grant that admits this exact call. This is the same
+/// candidate filter the reservation path relies on; it grants nothing itself.
+pub fn select_grant<'a>(
+    grants: &'a [CapabilityGrant],
+    call: &CapabilityGrantCall<'_>,
+    call_time_approval: bool,
+) -> GrantSelection<'a> {
+    match grants
+        .iter()
+        .find(|grant| is_capability_grant_candidate(grant, call))
+    {
+        Some(grant) => GrantSelection::Selected(grant),
+        None if call_time_approval => GrantSelection::Required {
+            input_mismatch: differs_only_in_input(grants, call),
+        },
+        None => GrantSelection::Unavailable,
     }
 }
 
