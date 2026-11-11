@@ -417,6 +417,12 @@ impl SubAgentStore {
         } else {
             None
         };
+        let report_sources = desk_diagnose_core::subagent::projection::report_sources(
+            sources.clone(),
+            &current,
+            &creation.source.model_destination,
+            u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?,
+        );
         let report = desk_assistant_data_store::worker_report::append_report_on(
             &txn,
             &group,
@@ -431,7 +437,7 @@ impl SubAgentStore {
                     .map(|report| report.receipt_refs.clone())
                     .unwrap_or_default(),
             },
-            &sources,
+            &report_sources,
             now.timestamp_millis(),
         )
         .await?;
@@ -876,7 +882,12 @@ impl SubAgentStore {
                     },
                     receipt_refs: report.receipt_refs,
                 },
-                &sources,
+                &desk_diagnose_core::subagent::projection::report_sources(
+                    sources.clone(),
+                    held,
+                    &creation.source.model_destination,
+                    u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?,
+                ),
                 now.timestamp_millis(),
             )
             .await

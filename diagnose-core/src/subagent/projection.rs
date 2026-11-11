@@ -69,6 +69,18 @@ pub fn runtime_message_for_history(
     destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
     now_unix_ms: u64,
 ) -> Result<ChatMessage, AgentError> {
+    let projected = export_sources_for_history(inputs, session, destination, now_unix_ms)?;
+    runtime_message(message_id, payload, &projected)
+}
+
+/// Export every input to the model gateway that issued the call producing it,
+/// or fail. Inputs already readable by that gateway are kept as they are.
+pub fn export_sources_for_history(
+    inputs: &[DataEnvelope],
+    session: &crate::session::PersistedAgentSession,
+    destination: &DestinationIdentity,
+    now_unix_ms: u64,
+) -> Result<Vec<DataEnvelope>, AgentError> {
     let policy = crate::model_egress::ModelEgressPolicy {
         destination: destination.clone(),
         selected_source_tools: Default::default(),
@@ -82,7 +94,11 @@ pub fn runtime_message_for_history(
     };
     let mut projected = Vec::with_capacity(inputs.len());
     for input in inputs {
-        if input.allowed_destinations.contains(destination) {
+        if input
+            .allowed_destinations
+            .iter()
+            .any(|allowed| crate::model_egress::same_gateway(destination, allowed))
+        {
             projected.push(input.clone());
             continue;
         }
@@ -128,7 +144,21 @@ pub fn runtime_message_for_history(
                 })?,
         );
     }
-    runtime_message(message_id, payload, &projected)
+    Ok(projected)
+}
+
+/// Sources of a worker report. When every result the report relies on was
+/// produced by a call this model gateway issued, the report stays readable by
+/// that gateway: each source is exported as conversation history is and keeps
+/// its own retention. Otherwise the original sources are kept and the report
+/// is not projected.
+pub fn report_sources(
+    sources: Vec<DataEnvelope>,
+    session: &crate::session::PersistedAgentSession,
+    destination: &DestinationIdentity,
+    now_unix_ms: u64,
+) -> Vec<DataEnvelope> {
+    export_sources_for_history(&sources, session, destination, now_unix_ms).unwrap_or(sources)
 }
 
 /// Carry a bounded summary as model data, retaining the original report label.
@@ -181,6 +211,108 @@ mod tests {
         session::PersistedAgentSession,
     };
     use desk_agent_protocol::data_lineage::{DestinationIdentity, Sensitivity};
+
+    #[test]
+    fn a_report_is_readable_by_the_gateway_that_issued_its_device_calls() {
+        let destination = DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let user = crate::model_message_labels::model_bound_user_message(
+            "user".into(),
+            "Run the approved check".into(),
+            destination.clone(),
+        )
+        .unwrap();
+        let input = user.data_envelope.as_ref().unwrap().clone();
+        let mut session = PersistedAgentSession::new(
+            "child",
+            "owner",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-10-05T00:00:00Z",
+        );
+        let mut call = ChatMessage::assistant_tool_calls(
+            "proposal",
+            "Run the check",
+            vec![ToolCallRef {
+                id: "original-call".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        );
+        call.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            Some(&input),
+            "proposal",
+            &call.text,
+            "model-response",
+        )
+        .unwrap();
+        let mut result = ChatMessage::tool_result("done", "original-call", "native receipt");
+        result.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            Some(&input),
+            "receipt",
+            &result.text,
+            "exec_command",
+        )
+        .unwrap();
+        let native = result.data_envelope.as_mut().unwrap();
+        native.allowed_destinations.clear();
+        native.sensitivity = Sensitivity::Sensitive;
+        native.retention.expires_at_unix_ms = Some(9_000_000);
+        let native = native.clone();
+        session.conversation = vec![user, call, result];
+        let sources = vec![input.clone(), native.clone()];
+
+        let reported = report_sources(sources.clone(), &session, &destination, 1);
+        assert_eq!(reported.len(), 2);
+        assert!(reported.iter().all(|envelope| {
+            envelope
+                .allowed_destinations
+                .iter()
+                .any(|allowed| crate::model_egress::same_gateway(&destination, allowed))
+        }));
+        // The exported source keeps the result's own retention.
+        assert_eq!(reported[1].retention, native.retention);
+        // Another model on the same gateway may read it; another connection may not.
+        let mut same_gateway = destination.clone();
+        let mut other_connection = destination.clone();
+        if let (
+            DestinationIdentity::Model { model_id, .. },
+            DestinationIdentity::Model {
+                connection_revision,
+                ..
+            },
+        ) = (&mut same_gateway, &mut other_connection)
+        {
+            *model_id = "another-model".into();
+            *connection_revision = 2;
+        }
+        assert_ne!(
+            report_sources(sources.clone(), &session, &same_gateway, 1),
+            sources
+        );
+        assert_eq!(
+            report_sources(sources.clone(), &session, &other_connection, 1),
+            sources
+        );
+        // A result without the model call that produced it keeps the whole
+        // report unreadable.
+        let mut orphan = session.clone();
+        orphan.conversation.remove(1);
+        assert_eq!(
+            report_sources(sources.clone(), &orphan, &destination, 1),
+            sources
+        );
+    }
 
     #[test]
     fn receipt_state_requires_original_model_call_and_preserves_export_restrictions() {
