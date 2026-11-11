@@ -1127,8 +1127,9 @@ async fn run_turn_inner_with_queue(
     .await;
     if let Err(error) = result {
         log::warn!(
-            "[assistant-input] turn preparation failed: {:?}",
-            error.kind
+            "[assistant-input] turn preparation failed: {:?}: {}",
+            error.kind,
+            error.message
         );
         if !browser_connection_id.is_empty() {
             stream_event(
@@ -1266,7 +1267,21 @@ async fn prepare_composed_turn(
             "targetless assistant input cannot carry device context",
         ));
     }
-    if delegated.is_none() {
+    // A delegated child resumes after its permission decision by native id.
+    // It has no client conversation; the server rebuilt its ask and its task
+    // source is required below.
+    let resumed_child = targetless
+        && delegated.is_none()
+        && resume_conversation_id.as_ref().is_some_and(|resume| {
+            resume.permission_request_id.is_some()
+                && desk_diagnose_core::assistant_policy::targetless_subject(
+                    &actor_user_id.to_string(),
+                    &resume.conversation_id,
+                    None,
+                    desk_diagnose_core::assistant_policy::TargetlessEntry::PermissionResume,
+                ) == Ok(desk_diagnose_core::assistant_policy::TargetlessSubject::Child)
+        });
+    if delegated.is_none() && !resumed_child {
         desk_diagnose_core::assistant_policy::validate_assistant_ask_scope(&ask, !targetless)
             .map_err(transport_error)?;
     }
@@ -1388,30 +1403,43 @@ async fn prepare_composed_turn(
     let conversation_id = if let Some(runtime) = delegated.as_ref() {
         runtime.session().conversation_id.clone()
     } else if targetless {
-        let personal = derive_assistant_conversation_key(
+        use desk_diagnose_core::assistant_policy::{
+            PERSONAL_KEY_MISMATCH, TargetlessEntry, targetless_subject,
+        };
+        let (conversation, entry) = match resume_conversation_id.as_ref() {
+            Some(resume) => (
+                resume.conversation_id.clone(),
+                if resume.permission_request_id.is_some() {
+                    TargetlessEntry::PermissionResume
+                } else {
+                    TargetlessEntry::Input
+                },
+            ),
+            None => (
+                derive_assistant_conversation_key(
+                    &actor_id,
+                    AssistantConversationScope::Personal,
+                    client_conversation_id.as_deref().ok_or_else(|| {
+                        transport_error("targetless input requires a valid continuation id")
+                    })?,
+                ),
+                TargetlessEntry::Input,
+            ),
+        };
+        targetless_subject(
             &actor_id,
-            AssistantConversationScope::Personal,
-            client_conversation_id.as_deref().ok_or_else(|| {
-                transport_error("targetless input requires a valid continuation id")
-            })?,
-        );
-        if let Some(resume) = resume_conversation_id.as_ref()
-            && resume.conversation_id != personal
-        {
-            if resume.permission_request_id.is_none()
-                || !desk_diagnose_core::native_ids::is(
-                    desk_diagnose_core::native_ids::Kind::WorkbenchWorkConversation,
-                    &resume.conversation_id,
-                )
-            {
-                return Err(transport_error(
-                    "permission resume does not match its personal conversation",
-                ));
-            }
-            resume.conversation_id.clone()
-        } else {
-            personal
-        }
+            &conversation,
+            client_conversation_id.as_deref(),
+            entry,
+        )
+        .map_err(|error| {
+            transport_error(if error == PERSONAL_KEY_MISMATCH {
+                "permission resume does not match its personal conversation"
+            } else {
+                error
+            })
+        })?;
+        conversation
     } else {
         scheduled
             .as_ref()
@@ -1521,6 +1549,9 @@ async fn prepare_composed_turn(
     } else {
         None
     };
+    if resumed_child && permission_child_context.is_none() {
+        return Err(transport_error("delegated permission source changed"));
+    }
     if let Some((creation, _)) = &permission_child_context
         && creation.source.model_destination != destination
     {
@@ -3588,6 +3619,83 @@ mod tests {
     use sea_orm::EntityTrait;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[actix_web::test]
+    async fn a_child_permission_resume_reaches_its_stored_session_without_a_client_conversation() {
+        use desk_diagnose_core::native_ids::{Kind, stable};
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        crate::ai_assistant_gate::enable_test_host();
+        // No provider request is made before the conversation subject is checked.
+        crate::model_provider::save(
+            &db,
+            crate::model_provider::ModelProviderConfig {
+                wire_protocol: Some(
+                    desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                ),
+                model: Some("fake-model".into()),
+                base_url: Some("http://127.0.0.1:9".into()),
+                api_key: Some("test-only-key".into()),
+                max_context_bytes: Some(131_072),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let connections = web::Data::new(SharedConnectionMap::default());
+        let compose = |resume: Option<PermissionResume>, client: Option<&str>| {
+            compose_turn(
+                connections.clone(),
+                db.clone(),
+                "request".into(),
+                String::new(),
+                String::new(),
+                crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
+                String::new(),
+                AiAssistantAsk {
+                    question: "task".into(),
+                    client_message_id: "message".into(),
+                    conversation_id: client.map(str::to_string),
+                    ..Default::default()
+                },
+                resume,
+                None,
+                None,
+                None,
+            )
+        };
+        let permission = |conversation_id: String| PermissionResume {
+            conversation_id,
+            permission_request_id: Some("rq_child".into()),
+            work_event: None,
+        };
+        let input = compose(None, None).await.unwrap_err();
+        assert_eq!(
+            input.message,
+            "personal input requires a valid continuation id"
+        );
+        // A personal resume still matches its personal conversation key.
+        let mismatched = compose(Some(permission("another".into())), Some("thread"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            mismatched.message,
+            "permission resume does not match its personal conversation"
+        );
+        // A delegated child passes both input checks and reaches its stored
+        // session, which this empty database does not hold.
+        let child = compose(
+            Some(permission(stable(Kind::ChildConversation, &"child"))),
+            None,
+        )
+        .await;
+        assert_eq!(
+            child.unwrap_err().message,
+            "permission session is unavailable"
+        );
+    }
 
     #[actix_web::test]
     async fn user_cancellation_stops_the_turn_at_tool_boundaries() {

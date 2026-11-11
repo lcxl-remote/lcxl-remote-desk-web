@@ -53,7 +53,7 @@ pub(super) async fn reconcile_on(
     let grant = decode_grant(&grant_row)?;
     if grant.actor_id != session.actor_id
         || grant.run_id != session.conversation_id
-        || grant.target_device_id != session.device_id
+        || !session.owns_action_device(&grant.target_device_id)
         || grant.provider_id != payload.provider_id
         || grant.capability_id != payload.capability_id
         || grant.tool_name != payload.tool_name

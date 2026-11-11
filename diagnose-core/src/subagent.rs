@@ -5,6 +5,7 @@
 //! the common role, fencing, completion and control rules.
 
 pub mod budget;
+pub mod completion;
 pub mod control;
 pub mod creation;
 pub mod device_wait;

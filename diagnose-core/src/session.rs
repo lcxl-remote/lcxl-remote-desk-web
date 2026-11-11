@@ -1934,6 +1934,25 @@ impl PersistedAgentSession {
         }
     }
 
+    /// A delegated child's history may hold actions on any device its request
+    /// admits; every other session acts only on its own device.
+    pub fn owns_action_device(&self, device_id: &str) -> bool {
+        if self.agent_role.binding().is_some() {
+            self.admits_assistant_device(device_id)
+        } else {
+            self.device_id == device_id
+        }
+    }
+
+    /// The pending work result an automation turn handles first.
+    pub fn earliest_pending_trigger(&self) -> Option<&PendingAutoTrigger> {
+        self.pending_auto_triggers.iter().min_by(|left, right| {
+            left.since
+                .cmp(&right.since)
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        })
+    }
+
     /// Check the admitted target ceiling. Native device-bound entry points
     /// without independent target selection still use their fixed binding.
     pub fn admits_assistant_device(&self, device_id: &str) -> bool {

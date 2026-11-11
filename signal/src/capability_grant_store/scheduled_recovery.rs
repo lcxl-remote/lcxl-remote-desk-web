@@ -129,7 +129,7 @@ async fn reconcile_inner_on(
         }
         if row.kind != CAPABILITY_WORK_KIND
             || row.actor_id != session.actor_id
-            || row.target_device_id != session.device_id
+            || !session.owns_action_device(&row.target_device_id)
             || row.manual_resolved_at.is_some()
         {
             return Err(invalid());

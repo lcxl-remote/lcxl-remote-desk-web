@@ -44,16 +44,16 @@ impl SubAgentStore {
         let mut session =
             PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         let limit = crate::automation_policy::max_auto_turns_per_chain(&txn).await;
-        if session.agent_role.binding().is_none()
-            || session.turn_state.is_active()
-            || session.version != row.version
-            || session.lease_token as i64 != row.lease_token
-            || session.scope_snapshot != params.current_pdp_scope
-            || session.automation_turns_used >= limit
-            || !desk_diagnose_core::future::boxed(|| async {
-                child_resume_admitted_on(&txn, &session, now.timestamp_millis()).await
-            })
-            .await?
+        if !desk_diagnose_core::subagent::completion::ready(
+            &session,
+            row.version,
+            row.lease_token,
+            params,
+            limit,
+        ) || !desk_diagnose_core::future::boxed(|| async {
+            child_resume_admitted_on(&txn, &session, now.timestamp_millis()).await
+        })
+        .await?
         {
             return Ok(None);
         }
@@ -75,21 +75,12 @@ impl SubAgentStore {
             })
             .await?;
             if creation.source.model_destination != *destination
-                || !session.pending_auto_triggers.iter().any(|pending| {
-                    pending.event_id == event_id
-                        && pending.kind == WorkKind::AgentExec
-                        && pending.chain_id == session.chain_id
-                        && pending.resolution_org_id.is_none()
-                })
+                || !desk_diagnose_core::subagent::completion::has_pending_exec(&session, event_id)
             {
                 return Ok(None);
             }
-            desk_diagnose_core::assistant_policy::validate_claim(
-                session.surface,
-                Some(session.policy_revision),
-                params,
-            )
-            .map_err(|_| invalid())?;
+            desk_diagnose_core::assistant_policy::validate_child_work_claim(&session, params)
+                .map_err(|_| invalid())?;
             session
                 .begin_turn(
                     &params.turn_id,

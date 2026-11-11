@@ -85,6 +85,106 @@ pub fn validate_assistant_ask_scope(
     Ok(())
 }
 
+/// How a turn reaches a targetless conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetlessEntry {
+    /// Owner input to the personal conversation.
+    Input,
+    /// Owner input appended or activated in a workbench work conversation.
+    WorkInput,
+    /// Continuation after a stored permission decision.
+    PermissionResume,
+    /// A delegated child's continuation after its own command result.
+    ChildCompletion,
+}
+
+/// Which targetless conversation a turn belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetlessSubject {
+    Personal,
+    Work,
+    Child,
+}
+
+fn classify_targetless(
+    conversation_id: &str,
+    entry: TargetlessEntry,
+) -> Result<TargetlessSubject, &'static str> {
+    use crate::native_ids::{Kind, is};
+    let child = is(Kind::ChildConversation, conversation_id);
+    match entry {
+        TargetlessEntry::ChildCompletion if !child => {
+            Err("child completion requires a delegated child conversation")
+        }
+        TargetlessEntry::PermissionResume | TargetlessEntry::ChildCompletion if child => {
+            Ok(TargetlessSubject::Child)
+        }
+        TargetlessEntry::WorkInput | TargetlessEntry::PermissionResume
+            if is(Kind::WorkbenchWorkConversation, conversation_id) =>
+        {
+            Ok(TargetlessSubject::Work)
+        }
+        _ => Ok(TargetlessSubject::Personal),
+    }
+}
+
+/// The conversation is not the owner's personal conversation for this id.
+pub const PERSONAL_KEY_MISMATCH: &str = "targetless input requires the personal conversation key";
+
+/// The subject of a targetless turn, without its scope. A delegated child is
+/// addressed by its native id; its task source is checked by the host. Every
+/// other subject needs the owner's continuation id, and a personal one must
+/// match the personal conversation key.
+pub fn targetless_subject(
+    actor_id: &str,
+    conversation_id: &str,
+    client_conversation_id: Option<&str>,
+    entry: TargetlessEntry,
+) -> Result<TargetlessSubject, &'static str> {
+    let subject = classify_targetless(conversation_id, entry)?;
+    if subject == TargetlessSubject::Child {
+        return Ok(subject);
+    }
+    let continuation_id = client_conversation_id
+        .filter(|id| is_valid_client_conversation_id(id))
+        .ok_or("targetless input requires a valid continuation id")?;
+    if subject == TargetlessSubject::Personal
+        && conversation_id
+            != derive_assistant_conversation_key(
+                actor_id,
+                AssistantConversationScope::Personal,
+                continuation_id,
+            )
+    {
+        return Err(PERSONAL_KEY_MISMATCH);
+    }
+    Ok(subject)
+}
+
+/// [`targetless_subject`] together with the targetless scope.
+pub fn validate_targetless_turn(
+    actor_id: &str,
+    conversation_id: &str,
+    client_conversation_id: Option<&str>,
+    scope: &AgentScope,
+    entry: TargetlessEntry,
+) -> Result<TargetlessSubject, &'static str> {
+    let subject = classify_targetless(conversation_id, entry)?;
+    match subject {
+        TargetlessSubject::Personal => {
+            validate_targetless_input(actor_id, conversation_id, client_conversation_id, scope)?
+        }
+        TargetlessSubject::Work => {
+            validate_personal_input_scope(client_conversation_id, scope)?;
+        }
+        TargetlessSubject::Child if !is_targetless_scope(scope) => {
+            return Err("targetless input cannot carry device authority");
+        }
+        TargetlessSubject::Child => {}
+    }
+    Ok(subject)
+}
+
 /// An owner-only conversation may admit a request without a device binding.
 /// This check is shared by the stores. The host must authenticate and lock
 /// the owner before accepting the request.
@@ -360,6 +460,41 @@ pub fn validate_permission_resume_claim(
     })
 }
 
+/// A delegated child's claim after its own command result. A device child
+/// keeps the ordinary claim check. A targetless child continues only its own
+/// command result under the targetless scope; device authority still comes
+/// from its request-bound grants. The host checks the pending trigger.
+pub fn validate_child_work_claim(
+    session: &PersistedAgentSession,
+    params: &ClaimTurnParams,
+) -> Result<(), AgentError> {
+    if !params.device_id.is_empty() {
+        return validate_claim(session.surface, Some(session.policy_revision), params);
+    }
+    require_current_policy(params.policy_revision)?;
+    require_current_policy(session.policy_revision)?;
+    if session.has_admitted_personal_input()
+        && session.agent_role.binding().is_some()
+        && matches!(
+            params.trigger_origin,
+            TriggerOrigin::ExecCompletion
+                | TriggerOrigin::WorkCompletion {
+                    kind: crate::session::WorkKind::AgentExec
+                }
+        )
+        && is_targetless_scope(&params.current_pdp_scope)
+    {
+        return Ok(());
+    }
+    Err(AgentError {
+        kind: AgentErrorKind::SessionUnavailable,
+        message: "The delegated task is no longer eligible for command continuation".into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })
+}
+
 /// The host has matched the completion to its durable dispatch. Recheck the
 /// original input and pending event against the session being claimed.
 pub fn validate_personal_work_claim(
@@ -397,6 +532,164 @@ pub fn validate_personal_work_claim(
 mod tests {
     use super::*;
     use desk_agent_protocol::{AgentScope, ExecutionMode};
+
+    fn targetless_scope() -> AgentScope {
+        AgentScope {
+            granted: vec![desk_agent_protocol::Capability::WebResearchFetch],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        }
+    }
+
+    #[test]
+    fn a_targetless_turn_names_its_personal_work_or_child_subject() {
+        use crate::native_ids::{Kind, stable};
+        let personal = derive_assistant_conversation_key(
+            "owner",
+            AssistantConversationScope::Personal,
+            "thread",
+        );
+        let work = stable(Kind::WorkbenchWorkConversation, &"work");
+        let child = stable(Kind::ChildConversation, &"child");
+        let subject = |conversation: &str, client: Option<&str>, entry| {
+            targetless_subject("owner", conversation, client, entry)
+        };
+        use TargetlessEntry::*;
+        assert_eq!(
+            subject(&personal, Some("thread"), Input),
+            Ok(TargetlessSubject::Personal)
+        );
+        assert!(subject(&personal, None, Input).is_err());
+        assert!(subject("another", Some("thread"), PermissionResume).is_err());
+        // Workbench work keeps requiring the owner's continuation id.
+        assert_eq!(
+            subject(&work, Some("thread"), WorkInput),
+            Ok(TargetlessSubject::Work)
+        );
+        assert_eq!(
+            subject(&work, Some("thread"), PermissionResume),
+            Ok(TargetlessSubject::Work)
+        );
+        assert!(subject(&work, None, PermissionResume).is_err());
+        assert!(subject(&work, Some("thread"), Input).is_err());
+        // A delegated child has no continuation id, and only resumes.
+        assert_eq!(
+            subject(&child, None, PermissionResume),
+            Ok(TargetlessSubject::Child)
+        );
+        assert_eq!(
+            subject(&child, None, ChildCompletion),
+            Ok(TargetlessSubject::Child)
+        );
+        assert!(subject(&child, None, Input).is_err());
+        assert!(subject(&child, None, WorkInput).is_err());
+        // The completion entry never admits a personal conversation.
+        assert!(subject(&personal, Some("thread"), ChildCompletion).is_err());
+
+        let scope = targetless_scope();
+        assert_eq!(
+            validate_targetless_turn("owner", &child, None, &scope, ChildCompletion),
+            Ok(TargetlessSubject::Child)
+        );
+        let mut device_scope = scope.clone();
+        device_scope.mode = ExecutionMode::ConfirmEachAction;
+        assert!(
+            validate_targetless_turn("owner", &child, None, &device_scope, PermissionResume)
+                .is_err()
+        );
+        assert!(
+            validate_targetless_turn("owner", &work, Some("thread"), &device_scope, WorkInput)
+                .is_err()
+        );
+        assert_eq!(
+            validate_targetless_turn("owner", &personal, Some("thread"), &scope, Input),
+            Ok(TargetlessSubject::Personal)
+        );
+    }
+
+    #[test]
+    fn a_targetless_child_continues_only_its_own_command_result() {
+        use crate::native_ids::{Kind, stable};
+        use crate::subagent::{DelegatedTaskBinding, DelegationSource};
+        let device = crate::dynamic_run::AssistantInputTarget::fixed("mac".into());
+        let child = |device_id: &str| {
+            PersistedAgentSession::new_subagent(
+                stable(Kind::ChildConversation, &"child"),
+                "owner",
+                device_id,
+                PERSONAL_ASSISTANT_POLICY_REVISION,
+                targetless_scope(),
+                DelegatedTaskBinding {
+                    root_conversation_id: "root".into(),
+                    group_id: "group".into(),
+                    task_id: stable(Kind::Task, &"task"),
+                    source: DelegationSource::UserInput { input_revision: 1 },
+                    targets: vec![device.clone()],
+                    objective: "Run the command".into(),
+                    acceptance_criteria: vec!["Report the result".into()],
+                    input_revision: 1,
+                    control_revision: 1,
+                    source_epoch: 1,
+                    deadline_ms: 1_799_999_999_999,
+                },
+                "2026-11-11T00:00:00Z",
+            )
+            .unwrap()
+        };
+        let session = child("");
+        let mut claim = ClaimTurnParams {
+            conversation_id: session.conversation_id.clone(),
+            actor_id: "owner".into(),
+            device_id: String::new(),
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+            current_pdp_scope: targetless_scope(),
+            turn_id: "turn".into(),
+            request_id: None,
+            connection_id: None,
+            now: "2026-11-11T00:00:00Z".into(),
+            trigger_origin: TriggerOrigin::WorkCompletion {
+                kind: crate::session::WorkKind::AgentExec,
+            },
+        };
+        assert!(validate_child_work_claim(&session, &claim).is_ok());
+        // The generic claim rule refuses this continuation.
+        assert!(validate_claim(session.surface, Some(session.policy_revision), &claim).is_err());
+        claim.trigger_origin = TriggerOrigin::ExecCompletion;
+        assert!(validate_child_work_claim(&session, &claim).is_ok());
+        for origin in [
+            TriggerOrigin::User,
+            TriggerOrigin::WorkContinuation,
+            TriggerOrigin::WorkCompletion {
+                kind: crate::session::WorkKind::ComputerAction,
+            },
+        ] {
+            claim.trigger_origin = origin;
+            assert!(validate_child_work_claim(&session, &claim).is_err());
+        }
+        claim.trigger_origin = TriggerOrigin::ExecCompletion;
+        let mut device_scope = targetless_scope();
+        device_scope.mode = ExecutionMode::ConfirmEachAction;
+        claim.current_pdp_scope = device_scope;
+        assert!(validate_child_work_claim(&session, &claim).is_err());
+        claim.current_pdp_scope = targetless_scope();
+        // A main conversation never takes the child rule.
+        let mut main = session.clone();
+        main.agent_role = crate::subagent::AgentRole::Main;
+        assert!(validate_child_work_claim(&main, &claim).is_err());
+        // A device child keeps the ordinary claim rule.
+        let device_child = child("mac");
+        claim.device_id = "mac".into();
+        assert_eq!(
+            validate_child_work_claim(&device_child, &claim).is_ok(),
+            validate_claim(
+                device_child.surface,
+                Some(device_child.policy_revision),
+                &claim
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn selectable_ask_requires_targets_when_it_selects_device_attachments() {

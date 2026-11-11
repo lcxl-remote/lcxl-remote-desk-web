@@ -1089,24 +1089,14 @@ fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), Agent
                 "targetless input requires an owner without device context",
             ));
         }
-        if desk_diagnose_core::native_ids::is(
-            desk_diagnose_core::native_ids::Kind::WorkbenchWorkConversation,
+        desk_diagnose_core::assistant_policy::validate_targetless_turn(
+            &params.actor_id,
             &params.run_id,
-        ) {
-            desk_diagnose_core::assistant_policy::validate_personal_input_scope(
-                params.client_conversation_id.as_deref(),
-                &params.current_scope,
-            )
-            .map_err(internal)?;
-        } else {
-            desk_diagnose_core::assistant_policy::validate_targetless_input(
-                &params.actor_id,
-                &params.run_id,
-                params.client_conversation_id.as_deref(),
-                &params.current_scope,
-            )
-            .map_err(internal)?;
-        }
+            params.client_conversation_id.as_deref(),
+            &params.current_scope,
+            desk_diagnose_core::assistant_policy::TargetlessEntry::WorkInput,
+        )
+        .map_err(internal)?;
         if let Some(selection) = &params.read_context {
             let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref();
             if selection.expires_at != params.current_scope.expires_at
