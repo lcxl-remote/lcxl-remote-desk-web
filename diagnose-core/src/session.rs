@@ -763,6 +763,15 @@ pub struct AwaitingPermission {
     pub request_id: String,
 }
 
+/// Which step of an approval resume claim failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeClaimError {
+    /// The paused call could not be released or closed.
+    Release,
+    /// The session cannot begin a turn now.
+    Busy,
+}
+
 /// Why a turn could not be claimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnClaimError {
@@ -3154,6 +3163,35 @@ impl PersistedAgentSession {
         Ok(())
     }
 
+    /// Claim the approval resume of `request_id`: release the call it paused,
+    /// begin the turn and record the decision as its trigger. Hosts wrap this in
+    /// their claim transaction and map the two failure steps themselves.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_permission_resume(
+        &mut self,
+        request_id: &str,
+        turn_id: &str,
+        stream_request_id: Option<String>,
+        connection_id: Option<String>,
+        policy_revision: i64,
+        current_pdp_scope: AgentScope,
+        now: impl Into<String>,
+    ) -> Result<(), ResumeClaimError> {
+        self.release_awaiting_permission(request_id)
+            .map_err(|_| ResumeClaimError::Release)?;
+        self.begin_turn(
+            turn_id,
+            stream_request_id,
+            connection_id,
+            policy_revision,
+            current_pdp_scope,
+            now,
+        )
+        .map_err(|_| ResumeClaimError::Busy)?;
+        self.adopt_trigger(TriggerOrigin::PermissionDecision, turn_id);
+        Ok(())
+    }
+
     /// Release the paused call for the approval resume of `request_id`. It is
     /// released only while its call group still ends the conversation; if other
     /// messages arrived meanwhile, it is closed and the model calls it again.
@@ -3526,6 +3564,62 @@ mod tests {
         state.conversation = earlier.conversation;
         state.close_awaiting_permission("not executed").unwrap();
         assert_eq!(results_for(&state, "paused"), [1, 4]);
+    }
+
+    #[test]
+    fn an_approval_resume_claim_releases_its_call_and_records_the_decision() {
+        let mut state = paused_group();
+        let scope = state.scope_snapshot.clone();
+        state
+            .claim_permission_resume(
+                "request",
+                "resume",
+                None,
+                None,
+                state.policy_revision,
+                scope.clone(),
+                "2026-11-11T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .released_permission_call
+                .as_ref()
+                .map(|call| call.tool_call_id.as_str()),
+            Some("paused")
+        );
+        assert_eq!(state.trigger_origin, TriggerOrigin::PermissionDecision);
+        // A busy session refuses the claim.
+        assert_eq!(
+            state.claim_permission_resume(
+                "request",
+                "again",
+                None,
+                None,
+                state.policy_revision,
+                scope.clone(),
+                "2026-11-11T00:00:00Z",
+            ),
+            Err(ResumeClaimError::Busy)
+        );
+        // Messages after the group close the wait; the claim still begins.
+        let mut state = paused_group();
+        state
+            .conversation
+            .push(ChatMessage::text("completion", ChatRole::User, "result"));
+        state
+            .claim_permission_resume(
+                "request",
+                "resume",
+                None,
+                None,
+                state.policy_revision,
+                scope,
+                "2026-11-11T00:00:00Z",
+            )
+            .unwrap();
+        assert!(state.released_permission_call.is_none());
+        assert_eq!(results_for(&state, "paused"), [2]);
     }
 
     #[test]

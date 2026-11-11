@@ -247,22 +247,42 @@ pub enum GrantSelection<'a> {
     Unavailable,
 }
 
+/// What a host does once it has established that no grant admits a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoGrant {
+    /// Propose the call for approval; nothing was reserved or dispatched.
+    Required { input_mismatch: bool },
+    /// Fail the call with the host's own unavailable message.
+    Unavailable,
+}
+
+/// The single rule for a call without a matching grant: sessions that approve
+/// at call time propose it, published tasks and other sources fail it. Hosts
+/// keep their own replay, task and policy branches before this point.
+pub fn on_no_grant(origin: crate::session::TriggerOrigin, input_mismatch: bool) -> NoGrant {
+    if origin.uses_call_time_approval() {
+        NoGrant::Required { input_mismatch }
+    } else {
+        NoGrant::Unavailable
+    }
+}
+
 /// Select the first stored grant that admits this exact call. This is the same
 /// candidate filter the reservation path relies on; it grants nothing itself.
 pub fn select_grant<'a>(
     grants: &'a [CapabilityGrant],
     call: &CapabilityGrantCall<'_>,
-    call_time_approval: bool,
+    origin: crate::session::TriggerOrigin,
 ) -> GrantSelection<'a> {
     match grants
         .iter()
         .find(|grant| is_capability_grant_candidate(grant, call))
     {
         Some(grant) => GrantSelection::Selected(grant),
-        None if call_time_approval => GrantSelection::Required {
-            input_mismatch: differs_only_in_input(grants, call),
+        None => match on_no_grant(origin, differs_only_in_input(grants, call)) {
+            NoGrant::Required { input_mismatch } => GrantSelection::Required { input_mismatch },
+            NoGrant::Unavailable => GrantSelection::Unavailable,
         },
-        None => GrantSelection::Unavailable,
     }
 }
 
@@ -874,5 +894,26 @@ mod tests {
                 assert!(candidate.validate().is_err());
             }
         }
+    }
+
+    #[test]
+    fn only_call_time_approval_sessions_propose_a_call_without_a_grant() {
+        use crate::session::TriggerOrigin;
+        assert_eq!(
+            on_no_grant(TriggerOrigin::User, true),
+            NoGrant::Required {
+                input_mismatch: true
+            }
+        );
+        assert_eq!(
+            on_no_grant(TriggerOrigin::PermissionDecision, false),
+            NoGrant::Required {
+                input_mismatch: false
+            }
+        );
+        assert_eq!(
+            on_no_grant(TriggerOrigin::ScheduledTask, false),
+            NoGrant::Unavailable
+        );
     }
 }

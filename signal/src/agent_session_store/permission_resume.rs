@@ -565,22 +565,24 @@ impl SignalAgentSessionStore {
         {
             return Err(ClaimError::Busy);
         }
-        // Release the call this approval paused, in the same claim transaction:
-        // only this resume dispatches it, and a failed claim rolls the release back.
+        // Release the call this approval paused in the same claim transaction:
+        // only this resume dispatches it, and a failed claim rolls it back.
         session
-            .release_awaiting_permission(request_id)
-            .map_err(|_| ClaimError::Backend(invalid()))?;
-        session
-            .begin_turn(
-                params.turn_id.clone(),
+            .claim_permission_resume(
+                request_id,
+                &params.turn_id,
                 params.request_id,
                 params.connection_id,
                 params.policy_revision,
                 params.current_pdp_scope,
                 params.now,
             )
-            .map_err(|_| ClaimError::Busy)?;
-        session.adopt_trigger(TriggerOrigin::PermissionDecision, &params.turn_id);
+            .map_err(|error| match error {
+                desk_diagnose_core::session::ResumeClaimError::Release => {
+                    ClaimError::Backend(invalid())
+                }
+                desk_diagnose_core::session::ResumeClaimError::Busy => ClaimError::Busy,
+            })?;
         crate::agent_subagent_store::record_child_resume_on(&txn, &session, now.timestamp_millis())
             .await
             .map_err(|error| ClaimError::Backend(storage(error)))?;

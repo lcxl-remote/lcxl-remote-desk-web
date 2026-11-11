@@ -182,10 +182,10 @@ impl SignalAiAssistantTools {
                 readiness_revision,
             },
         )? {
-            if session.trigger_origin.uses_call_time_approval() {
-                return Ok(ReadOutcome::GrantRequired {
-                    input_mismatch: false,
-                });
+            if let desk_diagnose_core::capability_grant::NoGrant::Required { input_mismatch } =
+                desk_diagnose_core::capability_grant::on_no_grant(session.trigger_origin, false)
+            {
+                return Ok(ReadOutcome::GrantRequired { input_mismatch });
             }
             return Err(desk_diagnose_core::subagent::invalid(
                 "The selected read needs current approval for this device and input",

@@ -1784,13 +1784,16 @@ impl SignalAiAssistantTools {
                         )
                     })?;
                 grant_id
-            } else if session.trigger_origin.uses_call_time_approval() {
-                return Ok(ReadOutcome::GrantRequired {
-                    input_mismatch: desk_diagnose_core::capability_grant::differs_only_in_input(
-                        &available_grants,
-                        &call_authority,
-                    ),
-                });
+            } else if let desk_diagnose_core::capability_grant::NoGrant::Required {
+                input_mismatch,
+            } = desk_diagnose_core::capability_grant::on_no_grant(
+                session.trigger_origin,
+                desk_diagnose_core::capability_grant::differs_only_in_input(
+                    &available_grants,
+                    &call_authority,
+                ),
+            ) {
+                return Ok(ReadOutcome::GrantRequired { input_mismatch });
             } else {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -2290,7 +2293,7 @@ impl SignalAiAssistantTools {
                 match desk_diagnose_core::capability_grant::select_grant(
                     &grants,
                     &call_authority,
-                    session.trigger_origin.uses_call_time_approval(),
+                    session.trigger_origin,
                 ) {
                     desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
                         grant.grant_id.clone()
@@ -2707,7 +2710,8 @@ impl SignalAiAssistantTools {
             let session =
                 desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
                     .await?;
-            if session.trigger_origin.uses_call_time_approval()
+            if desk_diagnose_core::capability_grant::on_no_grant(session.trigger_origin, false)
+                != desk_diagnose_core::capability_grant::NoGrant::Unavailable
                 && desk_diagnose_core::application_launch::find_approved_binding(
                     &session,
                     &self.target_device_id,
@@ -3452,7 +3456,7 @@ impl SignalAiAssistantTools {
                     match desk_diagnose_core::capability_grant::select_grant(
                         &grants,
                         &call_authority,
-                        session.trigger_origin.uses_call_time_approval(),
+                        session.trigger_origin,
                     ) {
                         desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
                             grant.grant_id.clone()
@@ -4338,7 +4342,7 @@ impl SignalAiAssistantTools {
                 match desk_diagnose_core::capability_grant::select_grant(
                     &grants,
                     &call_authority,
-                    session.trigger_origin.uses_call_time_approval(),
+                    session.trigger_origin,
                 ) {
                     desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
                         grant.grant_id.clone()
@@ -5026,7 +5030,7 @@ impl SignalAiAssistantTools {
                 match desk_diagnose_core::capability_grant::select_grant(
                     &grants,
                     &call_authority,
-                    session.trigger_origin.uses_call_time_approval(),
+                    session.trigger_origin,
                 ) {
                     desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
                         grant.grant_id.clone()
@@ -5662,7 +5666,7 @@ impl SignalAiAssistantTools {
                 match desk_diagnose_core::capability_grant::select_grant(
                     &grants,
                     &call_authority,
-                    session.trigger_origin.uses_call_time_approval(),
+                    session.trigger_origin,
                 ) {
                     desk_diagnose_core::capability_grant::GrantSelection::Selected(grant) => {
                         grant.grant_id.clone()

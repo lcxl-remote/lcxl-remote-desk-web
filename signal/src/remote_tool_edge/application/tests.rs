@@ -233,3 +233,33 @@ async fn an_unapproved_launch_asks_for_approval_instead_of_failing() {
         "{outcome:?}"
     );
 }
+
+/// Hosts decide a call without a matching grant only through the core
+/// `on_no_grant` rule; none tests the session source on its own.
+#[test]
+fn hosts_decide_missing_grants_only_through_the_core_rule() {
+    fn scan(dir: &std::path::Path, needle: &str, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    scan(&path, needle, hits);
+                }
+            } else if name.ends_with(".rs")
+                && name != "tests.rs"
+                && std::fs::read_to_string(&path).unwrap().contains(needle)
+            {
+                hits.push(path.display().to_string());
+            }
+        }
+    }
+    let needle = concat!("uses_call_", "time_approval");
+    let mut hits = Vec::new();
+    scan(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        needle,
+        &mut hits,
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
