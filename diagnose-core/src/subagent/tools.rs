@@ -72,6 +72,27 @@ mod argument_tests {
     use super::*;
 
     #[test]
+    fn spawning_tells_the_model_to_continue_related_work_on_its_worker() {
+        let spawn = registry()
+            .into_iter()
+            .find(|tool| tool.spec.name == SPAWN)
+            .unwrap()
+            .spec;
+        assert!(spawn.description.contains("follow-ups, retries"));
+        assert!(
+            spawn
+                .description
+                .contains("create a new worker only for unrelated work")
+        );
+        assert!(
+            spawn.parameters_schema["properties"]["worker_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("continue related work")
+        );
+    }
+
+    #[test]
     fn defaults_match_without_accepting_changed_or_unknown_arguments() {
         let original = r#"{"request_id":"task"}"#;
         assert!(same_arguments(
@@ -359,11 +380,11 @@ pub fn registry() -> Vec<RegisteredTool> {
     vec![
         tool(
             SPAWN,
-            "Send a finite request to an existing worker, or create a worker by omitting worker_id. Requests sent to the same worker run in order. Delegate a finite independent branch, context-heavy investigation, independent review, or clearly bounded execution task to a background subagent. Prefer handling simple tasks directly. The subagent uses the same business tools and this conversation's current devices, and requests its own permissions; this call grants no device authority. Supply a concise, self-contained objective, necessary task context and observable acceptance criteria proportional to the deliverable. For a routine execution task, request a short outcome; do not copy tool schemas, routine permission steps or internal-report checklists into the task unless the owner requested them. Mark required_for_completion when the main task depends on this result. The server enforces one level, capacity, source budget and deadline. Existing children continue when the owner sends a new main message.",
+            "Send a finite request to an existing worker, or create a worker by omitting worker_id. Requests sent to the same worker run in order, and the worker continues with what it already learned. Send follow-ups, retries and requests for more detail on earlier work to the worker that did it; create a new worker only for unrelated work, work that must run in parallel, or work that must start without the earlier context. Delegate a finite independent branch, context-heavy investigation, independent review, or clearly bounded execution task to a background subagent. Prefer handling simple tasks directly. The subagent uses the same business tools and this conversation's current devices, and requests its own permissions; this call grants no device authority. Supply a concise, self-contained objective, necessary task context and observable acceptance criteria proportional to the deliverable. For a routine execution task, request a short outcome; do not copy tool schemas, routine permission steps or internal-report checklists into the task unless the owner requested them. Mark required_for_completion when the main task depends on this result. The server enforces one level, capacity, source budget and deadline. Existing children continue when the owner sends a new main message.",
             json!({
                 "type":"object","additionalProperties":false,"required":["name","task","acceptance_criteria","required_for_completion"],
                 "properties":{
-                    "worker_id":{"type":"string","description":"The stable worker_id returned by this tool. Omit it to create a new worker."},
+                    "worker_id":{"type":"string","description":"The stable worker_id returned by this tool or list_subagents. Pass it to continue related work on that worker; omit it only to create a new worker."},
                     "name":{"type":"string","minLength":1,"maxLength":MAX_SUBAGENT_NAME_CHARS},
                     "task":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS,"description":"The requested deliverable and only context the child needs; routine runtime and permission rules are already provided."},
                     "acceptance_criteria":{"type":"array","minItems":1,"maxItems":super::MAX_ACCEPTANCE_CRITERIA,"items":{"type":"string","minLength":1,"maxLength":super::MAX_ACCEPTANCE_CRITERION_CHARS}},

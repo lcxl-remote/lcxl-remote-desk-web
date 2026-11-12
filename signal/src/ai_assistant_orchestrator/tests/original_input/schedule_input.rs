@@ -163,6 +163,10 @@ fn cases() -> Vec<(&'static str, Value)> {
             json!({"kind":"fresh_task","title":"每日检查","prompt":"Prepare a read-only status report","time_input":time}),
         ),
         ("list_scheduled_tasks", json!({"limit":20})),
+        (
+            "request_scheduled_task",
+            json!({"kind":"fresh_task","title":"Past check","prompt":"Prepare a read-only status report","rule":{"kind":"once","at":"2020-01-01T00:00:00Z"}}),
+        ),
     ]
 }
 
@@ -170,6 +174,12 @@ fn assert_feedback(step: usize, content: &str) {
     if step == 0 {
         assert!(content.contains("once"), "{content}");
         assert!(!content.contains("current conversation authority"));
+    } else if step == 4 {
+        // A time that already passed is an input to correct, not missing authority.
+        assert!(
+            content.contains(desk_diagnose_core::schedule::proposal::NO_FUTURE_OCCURRENCE),
+            "{content}"
+        );
     } else {
         let value: Value = serde_json::from_str(content).unwrap();
         if step == 2 {

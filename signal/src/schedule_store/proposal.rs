@@ -105,7 +105,9 @@ impl ScheduleStore {
                 )
                 .map_err(|_| {
                     observation.reject(Stage::Preflight, InputIssue::Precondition);
-                    ScheduleStoreError::Invalid
+                    ScheduleStoreError::ToolInput(
+                        desk_diagnose_core::schedule::proposal::NO_FUTURE_OCCURRENCE,
+                    )
                 })?;
                 if draft.kind
                     == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume

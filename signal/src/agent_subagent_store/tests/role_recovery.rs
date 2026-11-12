@@ -36,10 +36,18 @@ async fn reject_writes(db: &DatabaseConnection, id: &str) {
         );
         for kind in ["fresh_task", "conversation_resume"] {
             let mut scheduled = held.clone();
-            let call = ToolCall { id: format!("forbidden-{kind}"),
+            let call = ToolCall {
+                id: format!("forbidden-{kind}"),
                 name: desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE.into(),
+                // Each kind uses a rule it accepts, so input checks do not end the call early.
                 arguments_json: json!({"kind":kind,"title":"Forbidden child timer",
-                    "prompt":"Continue the delegated task", "rule":{"kind":"after_confirmation","delay_seconds":60}}).to_string() };
+                "prompt":"Continue the delegated task", "rule": if kind == "fresh_task" {
+                    json!({"kind":"once","at":"2099-01-01T00:00:00Z"})
+                } else {
+                    json!({"kind":"after_confirmation","delay_seconds":60})
+                }})
+                .to_string(),
+            };
             if spoof {
                 // Valid input must reach the persisted-state comparison, not fail JSON parsing.
                 assert!(
