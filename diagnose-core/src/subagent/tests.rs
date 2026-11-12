@@ -423,7 +423,7 @@ fn child_can_inspect_its_own_schedule_scope_without_obtaining_schedule_writes() 
 }
 
 #[test]
-fn scheduled_child_permission_resume_does_not_gain_ai_review() {
+fn scheduled_child_permission_resume_keeps_ai_review() {
     let mut session = child();
     if let AgentRole::SubAgent { binding } = &mut session.agent_role {
         binding.source = DelegationSource::ScheduledOccurrence {
@@ -431,10 +431,12 @@ fn scheduled_child_permission_resume_does_not_gain_ai_review() {
             occurrence_id: "occurrence".into(),
         };
     }
+    // A scheduled run's device actions are reviewed one at a time, by the AI
+    // reviewer by default, in the child as in its root.
     session.trigger_origin = TriggerOrigin::PermissionDecision;
-    assert!(!session.allows_delegated_review());
+    assert!(session.allows_delegated_review());
     session.trigger_origin = TriggerOrigin::DelegatedTask;
-    assert!(!session.allows_delegated_review());
+    assert!(session.allows_delegated_review());
     assert!(TriggerOrigin::SubAgentCompletion.allows_new_mutation());
     assert!(TriggerOrigin::SubAgentCompletion.allows_delegated_review());
 }

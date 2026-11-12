@@ -112,7 +112,7 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
     };
     let task = store.create_draft(1, &draft, now).await.unwrap();
     let task = store
-        .activate_conversation_resume(1, &task.schedule_id, task.revision)
+        .activate_pending_for_test(1, &task.schedule_id, task.revision)
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;

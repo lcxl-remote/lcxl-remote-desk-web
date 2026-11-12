@@ -143,8 +143,6 @@ async fn validate_continuation_action_on(
         })?;
     if task.kind != "conversation_resume"
         || task.calc_version != desk_diagnose_core::schedule::SCHEDULE_CALC_VERSION
-        || task.contract_revision.is_some()
-        || task.authorization_revision.is_some()
         || session.lease_token == 0
         || !matches!(task.status.as_str(), "active" | "triggered" | "paused")
         || task.active_run_id.as_deref() != Some(run_id)
@@ -433,8 +431,6 @@ pub(super) fn same_retrieval_definition(task: &entity::Model, snapshot: &entity:
         && task.calc_version == snapshot.calc_version
         && task.source_conversation_id == snapshot.source_conversation_id
         && task.requirement_revision == snapshot.requirement_revision
-        && task.contract_revision == snapshot.contract_revision
-        && task.authorization_revision == snapshot.authorization_revision
         && task.retrieval_consent_json == snapshot.retrieval_consent_json
 }
 

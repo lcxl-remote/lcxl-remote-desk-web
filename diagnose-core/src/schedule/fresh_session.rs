@@ -1,5 +1,5 @@
-//! Construct an isolated initial context from a published task definition.
-use super::contract::ValidatedTaskContract;
+//! Construct an isolated initial context from a scheduled task definition.
+use super::definition::ScheduledTaskDefinition;
 use crate::{
     chat::{ChatMessage, ChatRole},
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
@@ -17,11 +17,11 @@ pub struct FreshSessionInput<'a> {
     pub now: &'a str,
 }
 
-/// The caller must verify current task authority and atomically insert this
+/// The caller must verify current run authority and atomically insert this
 /// session with its occurrence claim. A validated definition alone is not an
-/// authorization. No rehearsal/session state is accepted or copied here.
+/// authorization.
 pub fn initial_session(
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     input: FreshSessionInput<'_>,
 ) -> Result<PersistedAgentSession, &'static str> {
     if !input.run_id.starts_with("schedule-run-")
@@ -43,7 +43,7 @@ pub fn initial_session(
     let mut session = PersistedAgentSession::new(
         input.run_id,
         input.actor_id,
-        &contract.contract().target_device_id,
+        &definition.target_device_id,
         input.policy_revision,
         input.scope.clone(),
         input.now,

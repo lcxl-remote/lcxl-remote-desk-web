@@ -351,8 +351,6 @@ impl ScheduleStore {
             || i64::try_from(failure.recovery_epoch).ok() != Some(work.recovery_epoch)
             || task.calc_version != SCHEDULE_CALC_VERSION
             || task.requirement_revision.is_none_or(|v| v <= 0)
-            || task.contract_revision.is_some()
-            || task.authorization_revision.is_some()
             || work.conversation_id != source
             || work.turn_id.is_empty()
             || snapshot.schedule_id != task.schedule_id

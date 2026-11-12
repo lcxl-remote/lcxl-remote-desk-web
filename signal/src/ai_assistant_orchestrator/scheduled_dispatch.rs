@@ -26,7 +26,7 @@ pub(super) fn drive<'a>(
                 resume_claimed_fresh_task_children_turn(
                     deps,
                     *session,
-                    &fresh.contract,
+                    &fresh.definition,
                     creation,
                     run_id,
                     wait_id,
@@ -38,7 +38,7 @@ pub(super) fn drive<'a>(
                 resume_claimed_fresh_task_notification_turn(
                     deps,
                     *session,
-                    &fresh.contract,
+                    &fresh.definition,
                     creation,
                     run_id,
                     message_id,
@@ -50,7 +50,7 @@ pub(super) fn drive<'a>(
                 resume_claimed_fresh_task_permission_turn(
                     deps,
                     *session,
-                    &fresh.contract,
+                    &fresh.definition,
                     creation,
                     run_id,
                     request_id,
@@ -62,7 +62,7 @@ pub(super) fn drive<'a>(
                 resume_claimed_fresh_task_turn(
                     deps,
                     *session,
-                    &fresh.contract,
+                    &fresh.definition,
                     creation,
                     run_id,
                     fresh.initial_assistant_data.as_deref(),

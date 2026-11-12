@@ -199,7 +199,8 @@ async fn exercise_with_restart(
     // large end-to-end fixture's debug poll frame under their production stack.
     let request_db = db.clone();
     let Response::Task { task: draft_task } = actix_web::rt::spawn(async move {
-        crate::schedule_management::manage(&request_db, 1, Request::CreateDraft { draft }).await
+        crate::schedule_management::manage(&request_db, 1, Request::CreateTask { task: draft })
+            .await
     })
     .await
     .unwrap()

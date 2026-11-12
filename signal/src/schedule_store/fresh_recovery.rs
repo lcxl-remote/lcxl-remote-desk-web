@@ -233,7 +233,8 @@ impl ScheduleStore {
                     .is_none_or(|deadline| deadline.timestamp_millis() > now))
             || session.execution_state.interrupted()
             || session.terminal_permission_request_id.is_some()
-            || (work.result_ref.is_none() && !session.permission_requests.is_empty())
+            // Decided per-call approvals are ordinary history of the run; only an
+            // undecided request keeps the original wait open.
             || session.permission_requests.iter().any(|request| {
                 matches!(request.state,
             desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
@@ -243,7 +244,6 @@ impl ScheduleStore {
         {
             return Ok(false);
         }
-        super::directory_receipt::restore_results(&txn, &mut session).await?;
         if !session.unclosed_tool_call_ids().is_empty()
             || session.execution_state != ExecutionState::None
         {
@@ -349,7 +349,7 @@ impl ScheduleStore {
         let answered = session.turn_state == TurnState::Idle;
         if answered {
             let evidence = super::TaskReceiptContext::load(&txn, &work).await?;
-            if evidence.contract().contract().target_device_id != session.device_id {
+            if evidence.target_device_id() != session.device_id {
                 return Err(ScheduleStoreError::Conflict);
             }
             let message = session
@@ -369,20 +369,6 @@ impl ScheduleStore {
             result_ref = Some(reference);
             if action_failure {
                 incomplete_steps = !unknown_effect;
-            } else {
-                let steps = crate::capability_grant_store::task_grant::step_states_for_recovery(
-                    &txn, &evidence,
-                )
-                .await?;
-                use desk_agent_protocol::schedule::contract::TaskStepStatus;
-                if steps.values().any(|state| {
-                    !matches!(state, TaskStepStatus::Pending | TaskStepStatus::Succeeded)
-                }) {
-                    return Ok(false);
-                }
-                incomplete_steps = steps
-                    .values()
-                    .any(|state| *state != TaskStepStatus::Succeeded);
             }
         }
         if unknown_effect && session.delegation_group_id.is_some() {

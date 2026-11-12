@@ -22,13 +22,11 @@ import type { ScheduleManagementRequest, ScheduleSpec, ScheduleView, ScheduleTim
 import { ScheduleClient, ScheduleRequestError, scheduleErrorMessage } from './client';
 import { formatTime, ruleTimes, validTimezone, projectRule } from './time';
 import { RunHistory } from './run-history';
-import { RehearsalDetails } from './rehearsal-details';
-import { ContractReview } from './contract-review';
 import { AiAssistantHubLayout } from '@/features/desk/ai-assistant-hub-layout';
 
 export type ScheduleDevice = { id: string; name: string; connectionId?: string; assistantPath?: string };
 type ResumeSource = { conversation: string; device?: string; devices?: string[]; revision: number };
-type Editor = { resume?: ResumeSource; kind: 'create' | 'time' | 'rename' | 'delete' | 'revoke' | 'editPrompt' | 'failureThreshold'; task?: ScheduleView; key: string };
+type Editor = { resume?: ResumeSource; kind: 'create' | 'time' | 'rename' | 'delete' | 'editPrompt' | 'failureThreshold'; task?: ScheduleView; key: string };
 const selectClass = 'h-10 w-full rounded-md border bg-background px-3 text-sm';
 
 export default function SchedulePage({ devices, loadingDevices = false }: { devices: ScheduleDevice[]; loadingDevices?: boolean }) {
@@ -69,8 +67,6 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
         if (taskId && runId) next.set('scheduled_run', runId);
         setSearch(next);
     };
-    const [rehearsalTask, setRehearsalTask] = useState<ScheduleView | null>(null);
-    const [contractTask, setContractTask] = useState<string | null>(null);
     const generation = useRef(0);
     const mounted = useRef(true);
     const report = useCallback((err: unknown) => {
@@ -159,7 +155,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             <label className="space-y-1">{t('schedules.filters.status')}
                 <ScheduleSelect className={selectClass} value={filterStatus} onValueChange={value => setFilterStatus(value as ScheduleView['status'] | '')}>
                     <SelectItem value="__empty__">{t('schedules.filters.allStatuses')}</SelectItem>
-                    {(['draft', 'rehearsing', 'awaiting_authorization', 'active', 'paused', 'triggered', 'completed', 'expired'] as const).map(status =>
+                    {(['pending_review', 'active', 'paused', 'triggered', 'completed', 'expired'] as const).map(status =>
                         <SelectItem key={status} value={status}>{t(`schedules.status.${status}`)}</SelectItem>)}
                 </ScheduleSelect>
             </label>
@@ -183,8 +179,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                 {task.pause_reasons.map(reason => <p key={reason} className="text-sm">{t(`schedules.pause.${reason}`)}</p>)}
                 <div className="flex flex-wrap gap-2">
                     <Button variant="outline" disabled={!available} onClick={() => openHistory(task.schedule_id)}>{t('schedules.history.title')}</Button>
-                    {task.kind === 'fresh_task' && <Button variant="outline" disabled={!available} onClick={() => setContractTask(task.schedule_id)}>{t('schedules.contract.title')}</Button>}
-                    {task.kind === 'fresh_task' && <Button variant="outline" disabled={!available} onClick={() => setRehearsalTask(task)}>{t('schedules.rehearsal.view')}</Button>}
+                    {task.status === 'pending_review' && <Button disabled={!available} onClick={() => { const next = new URLSearchParams(search); next.set('review_task', task.schedule_id); setSearch(next); }}>{t('schedules.proposal.open')}</Button>}
                     {task.kind === 'fresh_task' && task.status === 'active' && <Button variant="outline"
                         disabled={!available || !!task.active_run_id || task.pause_reasons.length > 0}
                         onClick={() => void mutate({ operation: 'run_task_now', schedule_id: task.schedule_id, expected_revision: task.revision, client_request_key: v4() }).catch(() => {})}>{t('schedules.runNow')}</Button>}
@@ -195,15 +190,11 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                     <Collapsible className="w-full">
                         <CollapsibleTrigger asChild><Button variant="ghost">{t('schedules.moreActions')}<ChevronDown className="ml-2 h-4 w-4" /></Button></CollapsibleTrigger>
                         <CollapsibleContent className="flex flex-wrap gap-2 pt-2">
-                            {task.kind === 'fresh_task' && ['active', 'triggered', 'paused', 'completed'].includes(task.status)
-                                && !task.pause_reasons.includes('authorization_invalid') && <Button variant="outline" disabled={!available}
-                                    onClick={() => setEditor({ kind: 'revoke', task, key: v4() })}>{t('schedules.revoke')}</Button>}
-
-                            {!['completed', 'deleted', 'expired'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
+                            {!['completed', 'deleted', 'expired', 'pending_review'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
                                 onClick={() => setEditor({ kind: 'failureThreshold', task, key: v4() })}>{t('schedules.failureThreshold')}</Button>}
-                            {!['completed', 'deleted', 'expired'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
+                            {!['completed', 'deleted', 'expired', 'pending_review'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
                                 onClick={() => setEditor({ kind: 'editPrompt', task, key: v4() })}>{t('schedules.editPrompt')}</Button>}
-                            {(['rename', 'time', 'delete'] as const).filter(kind => kind !== 'time' || !['completed', 'deleted', 'expired'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
+                            {(['rename', 'time', 'delete'] as const).filter(kind => task.status === 'pending_review' ? kind === 'delete' : kind !== 'time' || !['completed', 'deleted', 'expired'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
                         </CollapsibleContent>
                     </Collapsible>
                 </div>
@@ -211,21 +202,12 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
         </div>
         <Dialog open={!!validReviewSelector} onOpenChange={open => { if (!open) { const next = new URLSearchParams(search); next.delete('review_task'); setSearch(next); void load(); } }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
             <DialogHeader><DialogTitle>{t('schedules.proposal.open')}</DialogTitle></DialogHeader>
-            {validReviewSelector && <ProposalReview key={validReviewSelector} client={client} scheduleId={validReviewSelector} connected={isConnected} zone={zone}
-                assistantPaths={Object.fromEntries(devices.filter(device => device.assistantPath).map(device => [device.id, device.assistantPath!]))} onChanged={() => void load()} />}
-        </DialogContent></Dialog>
-        <Dialog open={!!contractTask} onOpenChange={open => { if (!open) setContractTask(null); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
-            <DialogHeader><DialogTitle>{t('schedules.contract.title')}</DialogTitle></DialogHeader>
-            {contractTask && <ContractReview client={client} scheduleId={contractTask} connected={isConnected} onPublished={task => { ++generation.current; setTasks(previous => previous.map(item => item.schedule_id === task.schedule_id ? task : item)); }} />}
+            {validReviewSelector && <ProposalReview key={validReviewSelector} client={client} scheduleId={validReviewSelector} connected={isConnected} zone={zone} onChanged={() => void load()} />}
         </DialogContent></Dialog>
         {cursor && <Button variant="outline" disabled={!available} onClick={() => void load(cursor)}>{t('schedules.more')}</Button>}
         <Dialog open={!!historyTask} onOpenChange={open => { if (!open) openHistory(null); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
             <DialogHeader><DialogTitle>{t('schedules.history.title')}</DialogTitle></DialogHeader>
             {historyTask && <RunHistory key={historyTask} client={client} scheduleId={historyTask} connectionIds={Object.fromEntries(devices.filter(d => d.connectionId).map(d => [d.id, d.connectionId!]))} connected={isConnected} zone={zone} selectedRun={runSelector} onSelectRun={run => openHistory(historyTask, run)} />}
-        </DialogContent></Dialog>
-        <Dialog open={!!rehearsalTask} onOpenChange={open => { if (!open) setRehearsalTask(null); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
-            <DialogHeader><DialogTitle>{t('schedules.rehearsal.view')}</DialogTitle></DialogHeader>
-            {rehearsalTask && <RehearsalDetails key={rehearsalTask.schedule_id} client={client} scheduleId={rehearsalTask.schedule_id} connected={isConnected} zone={zone} assistantPaths={Object.fromEntries(allDevices.filter(device => device.assistantPath).map(device => [device.id, device.assistantPath!]))} />}
         </DialogContent></Dialog>
         <Dialog open={choosingConversation} onOpenChange={setChoosingConversation}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
             <DialogHeader><DialogTitle>{t('schedules.chooseConversation')}</DialogTitle></DialogHeader>
@@ -288,7 +270,6 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
             const task = editor.task;
             let request: ScheduleManagementRequest;
             if (editor.kind === 'delete' && task) request = { operation: 'delete', schedule_id: task.schedule_id, expected_revision: task.revision };
-            else if (editor.kind === 'revoke' && task) request = { operation: 'revoke_task_authorization', schedule_id: task.schedule_id, expected_revision: task.revision };
             else if (editor.kind === 'failureThreshold' && task) {
                 const value = Number(threshold);
                 if (!Number.isInteger(value) || value < 1 || value > 4294967295) throw new ScheduleRequestError('invalid');
@@ -313,7 +294,7 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
                     return;
                 }
                 const time_confirmation = { input, conversion_version: converted.conversion.conversion_version };
-                request = task ? { operation: 'change_time', schedule_id: task.schedule_id, expected_revision: task.revision, spec, time_confirmation } : { operation: 'create_draft', draft: { client_create_key: editor.key, kind: editor.resume ? 'conversation_resume' : 'fresh_task', target_device_id: device, title, prompt, spec, time_confirmation, creation_source: 'manual', locale: null, model_id: null, source_conversation_id: editor.resume?.conversation ?? null, requirement_revision: editor.resume?.revision ?? null } };
+                request = task ? { operation: 'change_time', schedule_id: task.schedule_id, expected_revision: task.revision, spec, time_confirmation } : { operation: 'create_task', task: { client_create_key: editor.key, kind: editor.resume ? 'conversation_resume' : 'fresh_task', target_device_id: device, title, prompt, spec, time_confirmation, creation_source: 'manual', locale: null, model_id: null, source_conversation_id: editor.resume?.conversation ?? null, requirement_revision: editor.resume?.revision ?? null } };
             }
             frozen.current = request;
             await submit(request);
@@ -327,7 +308,7 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
     };
     const locked = disabled || saving || !!frozen.current;
     return <form onSubmit={event => void onSubmit(event)} className="space-y-3">
-        {editor.kind === 'revoke' ? <p>{t('schedules.revokeConfirm', { title: editor.task?.title })}</p> : editor.kind === 'delete' ? <p>{t('schedules.deleteConfirm', { title: editor.task?.title })}</p> : <fieldset disabled={locked} className="space-y-3">
+        {editor.kind === 'delete' ? <p>{t('schedules.deleteConfirm', { title: editor.task?.title })}</p> : <fieldset disabled={locked} className="space-y-3">
             {['create', 'rename'].includes(editor.kind) && <div><Label htmlFor="schedule-title">{t('schedules.name')}</Label><Input id="schedule-title" required value={title} onChange={e => setTitle(e.target.value)} /></div>}
             {editor.kind === 'create' && <>
                 <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><ScheduleSelect id="schedule-device" disabled={!!editor.resume?.device} className={selectClass} value={device} onValueChange={value => setDevice(value)}>{availableDevices.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</ScheduleSelect></div>
@@ -365,6 +346,6 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
         </section>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {frozen.current && !saving && <p className="text-sm">{t('schedules.retryNote')}</p>}
-        <Button type="submit" disabled={disabled || saving}>{t(saving ? 'schedules.saving' : editor.kind === 'delete' ? 'schedules.delete' : editor.kind === 'revoke' ? 'schedules.revoke' : timeForm && !frozen.current ? (unchangedTime ? 'schedules.save' : previewMatches ? 'schedules.timePreview.confirm' : 'schedules.timePreview.show') : 'schedules.save')}</Button>
+        <Button type="submit" disabled={disabled || saving}>{t(saving ? 'schedules.saving' : editor.kind === 'delete' ? 'schedules.delete' : timeForm && !frozen.current ? (unchangedTime ? 'schedules.save' : previewMatches ? 'schedules.timePreview.confirm' : 'schedules.timePreview.show') : 'schedules.save')}</Button>
     </form>;
 }

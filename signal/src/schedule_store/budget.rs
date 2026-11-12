@@ -1,7 +1,7 @@
 //! Task quotas are reserved with current authority in the caller's dispatch transaction.
 use super::authority::authority_now;
-use super::publication::{key, valid_digest};
 use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, entity, json};
+use super::{key, valid_digest};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_task_budget_reservation as ledger;
 use sea_orm::{
@@ -32,7 +32,6 @@ pub struct TaskBudgetRequest<'a> {
     pub node: &'a str,
     pub lease_epoch: i64,
     pub kind: TaskBudgetKind,
-    pub rule_id: Option<&'a str>,
     pub logical_key: &'a str,
     pub input_sha256: &'a str,
     pub units: u64,
@@ -54,7 +53,6 @@ async fn insert(
     logical_key: &str,
     input: Option<&str>,
     units: i64,
-    rule_id: Option<&str>,
 ) -> Result<ledger::Model, ScheduleStoreError> {
     let id = reservation_id(&authority.run().run_id, kind, logical_key)?;
     ledger::Entity::insert(ledger::ActiveModel {
@@ -63,7 +61,6 @@ async fn insert(
         run_id: Set(authority.run().run_id.clone()),
         owner_user_id: Set(authority.run().owner_user_id),
         kind: Set(kind.into()),
-        rule_id: Set(rule_id.map(str::to_owned)),
         exception_grant_id: Set(None),
         utc_day: Set(authority.verified_at().div_euclid(86_400_000)),
         logical_key: Set(logical_key.into()),
@@ -94,10 +91,8 @@ pub(crate) fn authority_of(
 }
 
 fn validate_row(row: &ledger::Model) -> Result<(), ScheduleStoreError> {
-    match (row.kind.as_str(), row.rule_id.as_deref()) {
-        ("tool_call", Some(rule)) => key(rule)?,
-        ("model_tokens" | "run", None) => {}
-        _ => return Err(ScheduleStoreError::Invalid),
+    if !matches!(row.kind.as_str(), "tool_call" | "model_tokens" | "run") {
+        return Err(ScheduleStoreError::Invalid);
     }
     if let Some(grant) = &row.exception_grant_id {
         if row.kind != "tool_call" {
@@ -177,10 +172,10 @@ pub(super) async fn reserve_run_budget(
             .filter(ledger::Column::UtcDay.eq(authority.verified_at().div_euclid(86_400_000)))
             .count(txn)
             .await?;
-        if count >= u64::from(authority.contract().contract().budget.max_runs_per_utc_day) {
+        if count >= u64::from(authority.definition().budget.max_runs_per_utc_day) {
             return Err(ScheduleStoreError::BudgetExceeded);
         }
-        insert(txn, authority, "run", "run", None, 1, None).await?;
+        insert(txn, authority, "run", "run", None, 1).await?;
     }
     Ok(())
 }
@@ -216,12 +211,11 @@ impl ScheduleStore {
     ) -> Result<ledger::Model, ScheduleStoreError> {
         let request = TaskBudgetRequest {
             owner: authority.run().owner_user_id,
-            device: &authority.contract().contract().target_device_id,
+            device: &authority.definition().target_device_id,
             run_id: &authority.provenance().scheduled_run_id,
             node: "",
             lease_epoch: 0,
             kind: TaskBudgetKind::ModelTokens,
-            rule_id: None,
             logical_key,
             input_sha256,
             units,
@@ -242,11 +236,6 @@ impl ScheduleStore {
         request: &TaskBudgetRequest<'_>,
     ) -> Result<ledger::Model, ScheduleStoreError> {
         key(request.logical_key)?;
-        match (request.kind, request.rule_id) {
-            (TaskBudgetKind::ToolCall, Some(rule)) => key(rule)?,
-            (TaskBudgetKind::ModelTokens, None) => {}
-            _ => return Err(ScheduleStoreError::Invalid),
-        }
         if !valid_digest(request.input_sha256)
             || request.units == 0
             || (request.kind == TaskBudgetKind::ToolCall && request.units != 1)
@@ -254,19 +243,6 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let units = i64::try_from(request.units).map_err(|_| ScheduleStoreError::Invalid)?;
-        let rule_limit = request
-            .rule_id
-            .map(|id| {
-                authority
-                    .contract()
-                    .contract()
-                    .permissions
-                    .iter()
-                    .find(|rule| rule.rule_id == id)
-                    .map(|rule| rule.automatic.limits.max_calls)
-                    .ok_or(ScheduleStoreError::Invalid)
-            })
-            .transpose()?;
         let base = ledger::Entity::find()
             .filter(ledger::Column::RunId.eq(request.run_id))
             .filter(ledger::Column::OwnerUserId.eq(request.owner));
@@ -290,24 +266,12 @@ impl ScheduleStore {
             validate_row(&existing)?;
             if existing.schedule_id != authority.provenance().schedule_id
                 || existing.input_sha256.as_deref() != Some(request.input_sha256)
-                || existing.rule_id.as_deref() != request.rule_id
                 || existing.reserved_units != units
                 || authority_of(&existing)? != *authority.provenance()
             {
                 return Err(ScheduleStoreError::Conflict);
             }
             return Ok(existing);
-        }
-        if let (Some(rule_id), Some(maximum)) = (request.rule_id, rule_limit) {
-            let used = base
-                .clone()
-                .filter(ledger::Column::Kind.eq("tool_call"))
-                .filter(ledger::Column::RuleId.eq(rule_id))
-                .count(txn)
-                .await?;
-            if used >= u64::from(maximum) {
-                return Err(ScheduleStoreError::BudgetExceeded);
-            }
         }
         let query = base.filter(ledger::Column::Kind.eq(request.kind.name()));
         // Corrupt negative or undercharged pending rows must not manufacture budget.
@@ -344,16 +308,8 @@ impl ScheduleStore {
             .flatten()
             .unwrap_or(0);
         let maximum = match request.kind {
-            TaskBudgetKind::ToolCall => {
-                u64::from(authority.contract().contract().budget.max_calls_per_run)
-            }
-            TaskBudgetKind::ModelTokens => {
-                authority
-                    .contract()
-                    .contract()
-                    .budget
-                    .max_model_tokens_per_run
-            }
+            TaskBudgetKind::ToolCall => u64::from(authority.definition().budget.max_calls_per_run),
+            TaskBudgetKind::ModelTokens => authority.definition().budget.max_model_tokens_per_run,
         };
         if used < 0
             || u64::try_from(used)
@@ -370,7 +326,6 @@ impl ScheduleStore {
             request.logical_key,
             Some(request.input_sha256),
             units,
-            request.rule_id,
         )
         .await
     }

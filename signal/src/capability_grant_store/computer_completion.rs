@@ -12,7 +12,7 @@ use desk_diagnose_core::{
 };
 
 mod history;
-pub(crate) mod observation;
+mod task_history;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

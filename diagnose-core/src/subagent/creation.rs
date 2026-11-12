@@ -324,13 +324,13 @@ fn task_context_from_source(
 
 impl CreationEnvelope {
     /// Called for the original isolated occurrence before its first model call.
-    /// The store supplies publication evidence under the current task fence.
+    /// The store supplies occurrence evidence under the current run fence.
     pub fn capture_scheduled(
         session: &PersistedAgentSession,
         source: ScheduledCreationSource,
         model_destination: DestinationIdentity,
     ) -> Result<Self, AgentError> {
-        let contract = source.validate()?;
+        let definition = source.validate()?.clone();
         let run_id = &source.provenance.scheduled_run_id;
         let original = session
             .conversation
@@ -364,7 +364,7 @@ impl CreationEnvelope {
         let owner_requirement = crate::schedule::published_input::model_bound_published_input(
             run_id,
             &original.text,
-            &contract,
+            &definition,
             model_destination.clone(),
         )?;
         if original.data_envelope.is_some() && original != &owner_requirement {
@@ -555,12 +555,12 @@ impl CreationEnvelope {
                 },
                 Some(source),
             ) => {
-                let contract = source.validate()?;
+                let definition = source.validate()?;
                 if schedule_id != &source.provenance.schedule_id
                     || occurrence_id != &source.provenance.scheduled_run_id
                     || occurrence_id != &self.root_conversation_id
                     || self.parent_input_revision != 1
-                    || contract.contract().target_device_id != self.device_id
+                    || definition.target_device_id != self.device_id
                     || self.original_read_context.is_some()
                 {
                     return Err(super::invalid(
@@ -570,7 +570,7 @@ impl CreationEnvelope {
                 crate::schedule::published_input::validate_published_input(
                     message,
                     occurrence_id,
-                    &contract,
+                    definition,
                     &self.model_destination,
                 )?;
             }
@@ -745,12 +745,12 @@ impl CreationEnvelope {
                     .scheduled_source
                     .as_ref()
                     .ok_or_else(|| super::invalid("scheduled source missing"))?;
-                let contract = source.validate()?;
+                let definition = source.validate()?;
                 limits.total.tool_calls = limits
                     .total
                     .tool_calls
-                    .min(u64::from(contract.contract().budget.max_calls_per_run));
-                limits.total.tokens = Some(contract.contract().budget.max_model_tokens_per_run);
+                    .min(u64::from(definition.budget.max_calls_per_run));
+                limits.total.tokens = Some(definition.budget.max_model_tokens_per_run);
                 limits.deadline_ms = limits.deadline_ms.min(source.deadline_ms()?);
             }
             _ => {}

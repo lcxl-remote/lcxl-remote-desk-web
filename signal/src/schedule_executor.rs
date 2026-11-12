@@ -499,7 +499,6 @@ impl SignalScheduleExecutor {
         actix_web::rt::spawn(self.clone().run_subagent_recovery());
         actix_web::rt::spawn(self.clone().run_approval_reviews());
         let mut cursor = 0;
-        let mut rehearsal_cursor = 0;
         loop {
             match self.scan_once(cursor).await {
                 Ok(report) => {
@@ -514,16 +513,6 @@ impl SignalScheduleExecutor {
                 Err(_) => {
                     cursor = 0;
                     log::warn!("[schedule-executor] candidate scan unavailable; retrying");
-                }
-            }
-            match ScheduleStore::new(self.db.clone())
-                .recover_terminal_rehearsals(rehearsal_cursor, BATCH_SIZE)
-                .await
-            {
-                Ok(report) => rehearsal_cursor = report.next_cursor.unwrap_or(0),
-                Err(_) => {
-                    rehearsal_cursor = 0;
-                    log::warn!("[schedule-executor] rehearsal recovery unavailable; retrying");
                 }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;

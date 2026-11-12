@@ -42,7 +42,10 @@ async fn current_device_context(
     subject: &PendingPermissionReview,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<ReviewDeviceContext> {
-    if subject.kind == PendingRequestKind::Goal {
+    if matches!(
+        subject.kind,
+        PendingRequestKind::Goal | PendingRequestKind::Schedule
+    ) {
         return Some(ReviewDeviceContext {
             connection_id: String::new(),
             registry: ai_assistant_provider_registry(),
@@ -298,6 +301,10 @@ pub async fn process_pending_permission_review(
                 {
                     return false;
                 }
+                // An unavailable reviewer leaves the proposal to the owner.
+                if subject.kind == PendingRequestKind::Schedule {
+                    return true;
+                }
                 if subject.kind == PendingRequestKind::Goal {
                     return crate::agent_approval_store::deny_goal_unavailable(
                         &db,
@@ -370,7 +377,10 @@ pub async fn process_pending_permission_review(
     if retry_required {
         return false;
     }
-    if subject.kind == PendingRequestKind::Goal {
+    if matches!(
+        subject.kind,
+        PendingRequestKind::Goal | PendingRequestKind::Schedule
+    ) {
         return true;
     }
     if subject.kind == PendingRequestKind::Directory {

@@ -1163,7 +1163,16 @@ async fn personal_worker_web_request_scenario() {
         .await
         .unwrap();
     assert_eq!(task.kind, "fresh_task");
-    assert_eq!(task.status, "draft");
+    // A child's fresh-task proposal waits for a decision in the child's turn.
+    assert_eq!(task.status, "pending_review");
+    assert_eq!(
+        task.proposal_conversation_id.as_deref(),
+        Some(child.conversation_id.as_str())
+    );
+    assert_eq!(
+        child.pending_schedule_review.as_deref(),
+        Some(task.schedule_id.as_str())
+    );
     let request = desk_diagnose_core::permission_tools::build_permission_request(
         &desk_diagnose_core::chat::ToolCall {
             id: "worker-web-plan".into(),

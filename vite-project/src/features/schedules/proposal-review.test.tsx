@@ -2,69 +2,51 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, expect, it, vi } from 'vitest';
 import { ProposalReview } from './proposal-review';
 import type { ScheduleClient } from './client';
-const translate = vi.hoisted(() => (key: string, args?: { seconds: number }) => args ? `${key}:${args.seconds}` : key);
+const translate = vi.hoisted(() => (key: string, args?: { count: number }) => args ? `${key}:${args.count}` : key);
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: translate, i18n: { language: 'en' } }) }));
-vi.mock('./contract-review', () => ({ ContractReview: () => null }));
-vi.mock('./rehearsal-details', () => ({ RehearsalDetails: () => null }));
 afterEach(cleanup);
-it('reviews server data and activates only the reviewed task revision after a click', async () => {
-    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 300 } } };
-    const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? task : { ...task, revision: 8, status: 'active', spec: { schema_version: 1, rule: { kind: 'once', at: '2026-09-10T12:00:00Z' } } } }));
-    const changed = vi.fn();
-    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={changed} />);
-    await screen.findByText('schedules.proposal.afterConfirmation:300');
-    expect(request.mock.calls).toEqual([[{ operation: 'get', schedule_id: 'task' }]]);
-    fireEvent.click(screen.getByRole('button', { name: 'schedules.activateResume' }));
-    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
-    expect(request.mock.calls[1]).toEqual([{ operation: 'activate_conversation_resume', schedule_id: 'task', expected_revision: 7 }]);
-    expect(screen.getByText('schedules.status.active')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'schedules.activateResume' })).toBeNull();
-});
 
-it('rejects the exact reviewed draft and exposes explicit approval choices', async () => {
-    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Hello later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
-    const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? task : { ...task, revision: 8, status: 'deleted' } }));
+const proposal = { schedule_id: 'task', revision: 7, kind: 'fresh_task', status: 'pending_review', title: 'Morning check', prompt: 'Report status',
+    spec: { schema_version: 1, rule: { kind: 'interval', every_seconds: 3600 } }, upcoming_runs: [] };
+
+it('approves only the reviewed proposal revision after a click', async () => {
+    const request = vi.fn(async (input: { operation: string }) => ({ result: 'task', task: input.operation === 'get' ? proposal : { ...proposal, revision: 8, status: 'active' } }));
     const changed = vi.fn();
-    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={changed} approvalCard />);
-    await screen.findByRole('button', { name: 'schedules.proposal.approve' });
-    fireEvent.click(screen.getByRole('button', { name: 'schedules.proposal.reject' }));
+    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" onChanged={changed} />);
+    await screen.findByText('schedules.everySeconds:3600');
+    expect(request.mock.calls).toEqual([[{ operation: 'get', schedule_id: 'task' }]]);
+    fireEvent.click(screen.getByRole('button', { name: 'schedules.proposal.approve' }));
     await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
-    expect(request.mock.calls[1]).toEqual([{ operation: 'delete', schedule_id: 'task', expected_revision: 7 }]);
+    expect(request.mock.calls[1]).toEqual([{ operation: 'decide_schedule_proposal', schedule_id: 'task', expected_revision: 7, approve: true }]);
+    expect(screen.getByText('schedules.status.active')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'schedules.proposal.approve' })).toBeNull();
 });
 
-it('waits for explicit rejection and server acknowledgement in the approval card', async () => {
-    const task = { schedule_id: 'task', revision: 7, kind: 'conversation_resume', status: 'pending_review', title: 'Later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
+it('rejects the exact reviewed proposal and waits for the server acknowledgement', async () => {
     let finish!: (value: unknown) => void;
-    const request = vi.fn((input: { operation: string }) => input.operation === 'get' ? Promise.resolve({ result: 'task', task }) : new Promise(resolve => { finish = resolve; }));
+    const request = vi.fn((input: { operation: string }) => input.operation === 'get' ? Promise.resolve({ result: 'task', task: proposal }) : new Promise(resolve => { finish = resolve; }));
     const changed = vi.fn();
-    const props = { client: { request } as unknown as ScheduleClient, scheduleId: 'task', connected: true, zone: 'UTC', assistantPaths: {}, onChanged: changed, approvalCard: true };
-    render(<ProposalReview {...props} />);
-    await screen.findByRole('button', { name: 'schedules.proposal.approve' });
-    expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.keyDown(document.body, { key: 'Escape' });
-    expect(request).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole('button', { name: 'schedules.proposal.reject' }));
-    await waitFor(() => expect(request).toHaveBeenCalledWith({ operation: 'delete', schedule_id: 'task', expected_revision: 7 }));
+    render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" onChanged={changed} approvalCard />);
+    fireEvent.click(await screen.findByRole('button', { name: 'schedules.proposal.reject' }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith({ operation: 'decide_schedule_proposal', schedule_id: 'task', expected_revision: 7, approve: false }));
     expect(changed).not.toHaveBeenCalled();
-    finish({ result: 'task', task: { ...task, status: 'deleted', revision: 8 } });
+    finish({ result: 'task', task: { ...proposal, status: 'deleted', revision: 8 } });
     await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
 });
 
-it('does not render completed timer approvals in the conversation', async () => {
-    const request = vi.fn(async () => ({ result: 'task', task: { schedule_id: 'task', kind: 'conversation_resume', status: 'completed', title: 'Completed timer' } }));
-    const { container } = render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" assistantPaths={{}} onChanged={() => {}} approvalCard />);
+it('does not render a decided proposal in the conversation', async () => {
+    const request = vi.fn(async () => ({ result: 'task', task: { ...proposal, status: 'active' } }));
+    const { container } = render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC" onChanged={() => {}} approvalCard />);
     await waitFor(() => expect(request).toHaveBeenCalled());
     await waitFor(() => expect(container.textContent).toBe(''));
 });
 
 it('reports the refreshed server state without treating it as a new decision', async () => {
-    const task = { schedule_id: 'task', kind: 'conversation_resume', status: 'pending_review', title: 'Later', prompt: 'hello', spec: { schema_version: 1, rule: { kind: 'after_confirmation', delay_seconds: 60 } } };
-    const request = vi.fn(async () => ({ result: 'task', task }));
+    const request = vi.fn(async () => ({ result: 'task', task: proposal }));
     const loaded = vi.fn();
     const changed = vi.fn();
     render(<ProposalReview client={{ request } as unknown as ScheduleClient} scheduleId="task" connected zone="UTC"
-        assistantPaths={{}} onLoaded={loaded} onChanged={changed} approvalCard />);
-    await waitFor(() => expect(loaded).toHaveBeenCalledWith(task));
+        onLoaded={loaded} onChanged={changed} approvalCard />);
+    await waitFor(() => expect(loaded).toHaveBeenCalledWith(proposal));
     expect(changed).not.toHaveBeenCalled();
 });

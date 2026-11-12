@@ -19,13 +19,7 @@ pub mod model_egress_receipt;
 pub mod model_probe_observation;
 pub mod turn_usage;
 
-pub mod agent_task_contract;
-
-pub mod agent_task_authorization;
-
 pub mod agent_task_budget_reservation;
-
-pub mod agent_task_rehearsal;
 
 pub mod agent_file_recovery_cleanup;
 pub mod agent_file_recovery_scope;

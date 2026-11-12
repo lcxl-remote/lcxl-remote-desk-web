@@ -102,8 +102,6 @@ impl ScheduleStore {
             || task.status != "active"
             || task.active_run_id.is_some()
             || !failures.pause_reasons.is_empty()
-            || task.contract_revision.is_none()
-            || task.authorization_revision.is_none()
             || task.calc_version != SCHEDULE_CALC_VERSION
         {
             return Err(ScheduleStoreError::Conflict);
@@ -405,8 +403,6 @@ impl ScheduleStore {
             || snapshot.prompt != schedule.prompt
             || snapshot.locale != schedule.locale
             || snapshot.model_id != schedule.model_id
-            || snapshot.contract_revision != schedule.contract_revision
-            || snapshot.authorization_revision != schedule.authorization_revision
             || schedule.calc_version != SCHEDULE_CALC_VERSION
         {
             return Err(ScheduleStoreError::Conflict);
@@ -439,6 +435,7 @@ impl ScheduleStore {
         // Waiting for the task fence can outlive the start window. Re-read
         // the occurrence as cancellation and settlement may have changed it.
         let now = super::authority::authority_now(txn).await?;
+        let policy = crate::schedule_budget_policy::read(txn).await?;
         if now >= work.start_deadline
             || run::Entity::find_by_id(work.id).one(txn).await?.as_ref() != Some(&work)
         {
@@ -460,6 +457,7 @@ impl ScheduleStore {
                     .checked_add(1)
                     .ok_or(ScheduleStoreError::Invalid)?),
                 started_at: Set(Some(now)),
+                budget_policy_json: Set(Some(super::json(&policy)?)),
                 updated_at: Set(now),
                 ..Default::default()
             })

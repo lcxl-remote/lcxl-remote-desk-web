@@ -63,7 +63,8 @@ async fn exercise(model_budget: u64) {
     )
     .await
     .unwrap();
-    let (store, task, contract, mut publication) = fixture_on(db.clone()).await;
+    let (store, task) =
+        crate::schedule_store::tests::enabled_fresh_task_on(db.clone(), None, 1, None).await;
     crate::assistant_data_config::update_instructions(
         &db,
         &UserInstructionsUpdate {
@@ -74,17 +75,18 @@ async fn exercise(model_budget: u64) {
     .await
     .unwrap();
     // The full orchestration prompt is larger than the storage fixture's request.
-    let mut definition: desk_agent_protocol::schedule::contract::TaskContract =
-        serde_json::from_str(&contract.canonical_json).unwrap();
-    definition.budget.max_model_tokens_per_run = model_budget;
-    let contract = store
-        .save_contract(1, task.revision, &definition)
-        .await
-        .unwrap();
-    let task = store.read(1, &task.schedule_id).await.unwrap();
-    publication.expected_revision = task.revision;
-    publication.contract_revision = contract.contract_revision;
-    publication.contract_sha256 = contract.digest_sha256;
+    let current = crate::schedule_budget_policy::read(&db).await.unwrap();
+    let mut maximum = current.maximum.clone();
+    maximum.max_model_tokens_per_run = model_budget;
+    crate::schedule_budget_policy::update(
+        &db,
+        &desk_agent_protocol::schedule::policy::UpdateScheduleBudgetPolicy {
+            expected_revision: current.revision,
+            maximum,
+        },
+    )
+    .await
+    .unwrap();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -102,10 +104,6 @@ async fn exercise(model_budget: u64) {
     )
     .await
     .unwrap();
-    store
-        .publish_task(1, &publication, &Verifier(true))
-        .await
-        .unwrap();
     let queued = store
         .enqueue_manual(1, &task.schedule_id, "fresh-executor")
         .await

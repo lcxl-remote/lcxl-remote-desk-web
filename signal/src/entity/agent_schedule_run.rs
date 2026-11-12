@@ -42,6 +42,9 @@ pub struct Model {
     /// Immutable owner acknowledgement of the original outcome after receipt reconciliation.
     pub outcome_review_json: Option<String>,
     pub cancel_requested_at: Option<i64>,
+    /// Budget policy pinned when a fresh occurrence was claimed; later policy
+    /// changes do not affect a running occurrence.
+    pub budget_policy_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

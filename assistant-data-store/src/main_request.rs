@@ -32,8 +32,8 @@ const SUPERSEDED: &str = "superseded";
 const FAILED: &str = "failed";
 pub const PENDING_PER_CONVERSATION: u64 = 32;
 
-/// Only ordinary conversational input enters the queue. Native Goal and
-/// rehearsal entry points retain their separate admission contracts.
+/// Only ordinary conversational input enters the queue. Native Goal entry
+/// points retain their separate admission contract.
 pub fn accepts_owner_ask(ask: &AiAssistantAsk) -> bool {
     !ask.start_goal
         && ask

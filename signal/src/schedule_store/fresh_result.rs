@@ -202,17 +202,10 @@ impl ScheduleStore {
                 }
                 Some(reference)
             }
-            FreshResult::Permission(id) => {
-                if authority.contract().contract().exception_mode
-                    != desk_agent_protocol::schedule::contract::TaskExceptionMode::RequestApproval
-                {
-                    return Err(ScheduleStoreError::Conflict);
-                }
-                Some(
-                    desk_diagnose_core::schedule::permission_wait::reference(&session, id)
-                        .ok_or(ScheduleStoreError::Conflict)?,
-                )
-            }
+            FreshResult::Permission(id) => Some(
+                desk_diagnose_core::schedule::permission_wait::reference(&session, id)
+                    .ok_or(ScheduleStoreError::Conflict)?,
+            ),
             FreshResult::Children(id) => {
                 let wait = session
                     .subagent_wait
@@ -288,12 +281,6 @@ impl ScheduleStore {
             {
                 unknown = true;
             }
-        }
-        if matches!(result, FreshResult::Answer(_))
-            && !crate::capability_grant_store::task_grant::all_steps_succeeded_on(&txn, &authority)
-                .await?
-        {
-            return Err(ScheduleStoreError::Conflict);
         }
         use desk_agent_protocol::schedule::ScheduledRunStatus;
         let (outcome, error_kind) = match result {

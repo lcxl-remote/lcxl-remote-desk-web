@@ -75,19 +75,17 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let (_, contract) = super::publication::load_contract(
-            &txn,
-            work.owner_user_id,
-            &work.schedule_id,
-            snapshot
-                .contract_revision
-                .ok_or(ScheduleStoreError::Invalid)?,
-        )
-        .await?;
+        let policy: desk_agent_protocol::schedule::policy::ScheduleBudgetPolicy =
+            serde_json::from_str(
+                work.budget_policy_json
+                    .as_deref()
+                    .ok_or(ScheduleStoreError::Invalid)?,
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
         let deadline = work
             .started_at
             .ok_or(ScheduleStoreError::Invalid)?
-            .checked_add(i64::from(contract.contract().budget.max_runtime_seconds) * 1000)
+            .checked_add(i64::from(policy.maximum.max_runtime_seconds) * 1000)
             .ok_or(ScheduleStoreError::Invalid)?;
         let now = super::authority::authority_now(&txn).await?;
         let row = agent_session::Entity::find()
@@ -118,10 +116,7 @@ impl ScheduleStore {
         );
 
         let cancelled = work.cancel_requested_at.is_some();
-        let policy = crate::schedule_budget_policy::read(&txn).await?;
-        let budget_rejected =
-            !desk_diagnose_core::schedule::policy::permits(&policy, &contract.contract().budget);
-        if !cancelled && !denied && !budget_rejected && now < deadline {
+        if !cancelled && !denied && now < deadline {
             return Ok(false);
         }
         // Approval entry required every original action to be complete. Recheck
@@ -198,8 +193,6 @@ impl ScheduleStore {
             error_kind: Some(
                 if cancelled {
                     "cancelled"
-                } else if budget_rejected {
-                    "budget_policy_exceeded"
                 } else if denied {
                     "approval_denied"
                 } else {

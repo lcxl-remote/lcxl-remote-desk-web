@@ -129,11 +129,18 @@ impl ScheduleStore {
                     Self::record_prompt_retention_on(&txn, &mut task, session, parents[0])
                 })
                 .await?;
-                if task.kind == "conversation_resume" {
+                let message = if task.kind == "conversation_resume" {
+                    // A continuation needs no approval: enable it in this turn's
+                    // transaction without writing to the running session.
+                    task = Self::activate_on(&txn, owner, &task, false).await?;
+                    "The conversation timer is enabled. It grants no tool permissions; its run approves device actions one at a time."
+                } else {
                     awaiting_review = Some(task.schedule_id.clone());
-                }
-                (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":task.status,"awaiting_confirmation":awaiting_review.is_some(),
-                    "message":"The application displays an owner review dialog. For a conversation timer, this model turn waits until the owner approves or rejects. Do not report success before the final owner decision. No extra chat confirmation is needed. No tool permission is granted."}).to_string(), "schedule_proposal")
+                    "The AI reviewer or the owner decides this proposal in the application review dialog, and this turn waits for that decision. Do not report success before it. No extra chat confirmation is needed. No tool permission is granted; every run approves device actions one at a time."
+                };
+                (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":task.status,
+                    "next_run_at_utc_ms":task.next_run_at,"awaiting_decision":awaiting_review.is_some(),
+                    "message":message}).to_string(), "schedule_proposal")
             }
             Action::List { after, limit } => {
                 observation.stage(Stage::Preflight, StageOutcome::Passed);
@@ -158,6 +165,22 @@ impl ScheduleStore {
         )
         .map_err(|_| ScheduleStoreError::Invalid)?;
         let mut next = session.clone();
+        let mut row = row;
+        if awaiting_review.is_some()
+            && crate::agent_approval_store::open_for_schedule_proposal_on(
+                &txn,
+                &row,
+                &mut next,
+                u64::try_from(now).map_err(|_| ScheduleStoreError::Invalid)?,
+            )
+            .await?
+        {
+            // The audit event advanced the row; the receipt follows it.
+            row = agent_session::Entity::find_by_id(row.id)
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?;
+        }
         next.pending_schedule_review = awaiting_review;
         let mut message =
             ChatMessage::tool_result(format!("schedule-proposal:{}", call.id), &call.id, content);

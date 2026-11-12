@@ -62,12 +62,6 @@ pub fn preflight_capacity(
     };
     let (pending, _) = crate::file_scope::transaction::prepare(session, &update, now_unix_ms)
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
-    if pending.file_scope.records().iter().any(|record| {
-        record.proposal.request_id == request_id
-            && record.proposal.source == DirectoryConsentSource::TaskContract
-    }) {
-        return Ok(());
-    }
     let mut candidate = candidate(&pending, &request_id, delegation, goal, now_unix_ms)?;
     fit_review_context(&mut candidate, &pending, configured_bytes)
 }

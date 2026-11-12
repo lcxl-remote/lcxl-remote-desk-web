@@ -1,6 +1,5 @@
 //! Versioned UTC scheduling rules shared by both central runtimes.
 
-pub mod contract;
 pub mod management;
 pub mod policy;
 
@@ -142,9 +141,6 @@ pub enum ScheduledTaskKind {
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledTaskStatus {
     PendingReview,
-    Draft,
-    Rehearsing,
-    AwaitingAuthorization,
     Active,
     Triggered,
     Paused,
@@ -174,7 +170,6 @@ pub enum SchedulePauseReason {
     User,
     ConsecutiveFailures,
     UnknownSideEffect,
-    AuthorizationInvalid,
     ScheduleUpgradeRequired,
 }
 

@@ -1,16 +1,16 @@
 //! Drive only the pristine context returned by atomic fresh-task admission.
 use super::*;
 use crate::schedule::{
-    contract::ValidatedTaskContract,
+    definition::ScheduledTaskDefinition,
     fresh_session::{FreshSessionInput, initial_session},
 };
 use crate::subagent::creation::CreationEnvelope;
 
-/// Frozen publication evidence proves the context's origin. Each physical seam
-/// must still fence current publication, source state and its own planner lease.
+/// Frozen occurrence evidence proves the context's origin. Each physical seam
+/// must still fence the current run, source state and its own planner lease.
 fn validate_source_context(
     session: &PersistedAgentSession,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     source: &CreationEnvelope,
     destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
 ) -> Result<(), AgentError> {
@@ -19,7 +19,7 @@ fn validate_source_context(
         .scheduled_source
         .as_ref()
         .ok_or_else(|| crate::subagent::invalid("published source is missing"))?;
-    if published.validate()?.canonical_json() != contract.canonical_json()
+    if published.validate()?.canonical_json() != definition.canonical_json()
         || source.root_conversation_id != session.conversation_id
         || source.actor_id != session.actor_id
         || source.device_id != session.device_id
@@ -40,7 +40,7 @@ fn validate_source_context(
 pub async fn resume_claimed_fresh_task_turn(
     deps: &LoopDeps<'_>,
     session: PersistedAgentSession,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     source: &CreationEnvelope,
     run_id: &str,
     initial_assistant_data: Option<&crate::ai_assistant::data_control::AssistantDataSession>,
@@ -58,9 +58,9 @@ pub async fn resume_claimed_fresh_task_turn(
         return Err(denied());
     }
     let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
-    validate_source_context(&session, contract, source, &policy.destination)?;
+    validate_source_context(&session, definition, source, &policy.destination)?;
     let mut expected = initial_session(
-        contract,
+        definition,
         FreshSessionInput {
             run_id,
             actor_id: &session.actor_id,
@@ -94,11 +94,11 @@ pub async fn resume_claimed_fresh_task_turn(
 
 /// Resume the existing task context after the central store atomically consumed
 /// one owner decision and renewed both leases. This does not create user input,
-/// copy rehearsal state, replenish budgets, or grant a tool permission.
+/// replenish budgets, or grant a tool permission.
 pub async fn resume_claimed_fresh_task_permission_turn(
     deps: &LoopDeps<'_>,
     session: PersistedAgentSession,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     source: &CreationEnvelope,
     run_id: &str,
     approval_reference: &str,
@@ -128,7 +128,7 @@ pub async fn resume_claimed_fresh_task_permission_turn(
         || session.execution_state != ExecutionState::None
         || session.conversation_id != run_id
         || session.current_request_id.as_deref() != Some(run_id)
-        || session.device_id != contract.contract().target_device_id
+        || session.device_id != definition.target_device_id
         || session.input_revision != 1
         || session.latest_input_seq != 1
         || session.active_control_connection_id.is_some()
@@ -143,11 +143,11 @@ pub async fn resume_claimed_fresh_task_permission_turn(
         return Err(denied());
     }
     let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
-    validate_source_context(&session, contract, source, &policy.destination)?;
+    validate_source_context(&session, definition, source, &policy.destination)?;
     crate::schedule::published_input::validate_published_input(
         original,
         run_id,
-        contract,
+        definition,
         &policy.destination,
     )?;
     let turn_id = session.current_turn_id.clone().ok_or_else(denied)?;
@@ -173,7 +173,7 @@ pub async fn resume_claimed_fresh_task_permission_turn(
 pub async fn resume_claimed_fresh_task_children_turn(
     deps: &LoopDeps<'_>,
     session: PersistedAgentSession,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     source: &CreationEnvelope,
     run_id: &str,
     wait_id: &str,
@@ -183,7 +183,7 @@ pub async fn resume_claimed_fresh_task_children_turn(
         crate::subagent::invalid("published child dependency requires its original paired claim")
     };
     let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
-    validate_source_context(&session, contract, source, &policy.destination)?;
+    validate_source_context(&session, definition, source, &policy.destination)?;
     let wait = session.ready_subagent_wait.as_ref().ok_or_else(denied)?;
     wait.validate().map_err(crate::subagent::invalid)?;
     if deps.heartbeat.is_none()
@@ -225,7 +225,7 @@ pub async fn resume_claimed_fresh_task_children_turn(
 pub async fn resume_claimed_fresh_task_notification_turn(
     deps: &LoopDeps<'_>,
     session: PersistedAgentSession,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     source: &CreationEnvelope,
     run_id: &str,
     message_id: &str,
@@ -235,7 +235,7 @@ pub async fn resume_claimed_fresh_task_notification_turn(
         crate::subagent::invalid("published child notification requires its original paired claim")
     };
     let policy = deps.model.model_egress_policy()?.ok_or_else(denied)?;
-    validate_source_context(&session, contract, source, &policy.destination)?;
+    validate_source_context(&session, definition, source, &policy.destination)?;
     let notice = session
         .ready_subagent_notification
         .as_ref()

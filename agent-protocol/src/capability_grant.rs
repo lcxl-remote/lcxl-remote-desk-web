@@ -47,7 +47,8 @@ pub enum CapabilityRiskTier {
 pub enum CapabilityGrantIssuer {
     PolicyAuto,
     UserDecision,
-    TaskAuthorization(TaskGrantProvenance),
+    /// A dispatch inside one scheduled run, linked to its per-call approval.
+    ScheduledRun(TaskGrantProvenance),
     AiApproval(AiApprovalGrantProvenance),
     OwnerNoReview(NoReviewGrantProvenance),
 }
@@ -114,7 +115,7 @@ impl AiApprovalGrantProvenance {
     }
 }
 
-/// Immutable parent binding. Current authority must still be loaded and checked at dispatch.
+/// Immutable run binding. Current run authority must still be loaded and checked at dispatch.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -123,10 +124,8 @@ pub struct TaskGrantProvenance {
     pub schedule_id: String,
     pub scheduled_run_id: String,
     pub task_revision: u64,
-    pub contract_revision: u64,
-    pub contract_sha256: String,
-    pub authorization_id: String,
-    pub authorization_revision: u64,
+    /// Budget policy revision pinned when the run was claimed.
+    pub policy_revision: u64,
     pub recovery_epoch: u64,
 }
 
@@ -135,25 +134,20 @@ impl TaskGrantProvenance {
         for (field, value) in [
             ("schedule_id", self.schedule_id.as_str()),
             ("scheduled_run_id", self.scheduled_run_id.as_str()),
-            ("authorization_id", self.authorization_id.as_str()),
         ] {
             validate_id(field, value)?;
             if value.trim() != value {
                 return Err(CapabilityGrantError::InvalidId(field));
             }
         }
-        if [
-            self.task_revision,
-            self.contract_revision,
-            self.authorization_revision,
-            self.recovery_epoch,
-        ]
-        .iter()
-        .any(|v| *v == 0 || *v > i64::MAX as u64)
+        if [self.task_revision, self.recovery_epoch]
+            .iter()
+            .any(|v| *v == 0 || *v > i64::MAX as u64)
+            || self.policy_revision > i64::MAX as u64
         {
             return Err(CapabilityGrantError::InvalidLimitOrRevision);
         }
-        validate_digest(&self.contract_sha256)
+        Ok(())
     }
 }
 
@@ -228,7 +222,7 @@ impl CapabilityGrant {
             ));
         }
         match &self.issued_by {
-            CapabilityGrantIssuer::TaskAuthorization(parent) => parent.validate()?,
+            CapabilityGrantIssuer::ScheduledRun(parent) => parent.validate()?,
             CapabilityGrantIssuer::AiApproval(parent) => parent.validate()?,
             CapabilityGrantIssuer::OwnerNoReview(parent) => {
                 parent.validate()?;
@@ -475,10 +469,7 @@ mod task_tests {
             schedule_id: "schedule-1".into(),
             scheduled_run_id: "scheduled-run-1".into(),
             task_revision: 1,
-            contract_revision: 2,
-            contract_sha256: "a".repeat(64),
-            authorization_id: "authorization-1".into(),
-            authorization_revision: 3,
+            policy_revision: 0,
             recovery_epoch: 4,
         }
     }
@@ -494,10 +485,10 @@ mod task_tests {
         bad.recovery_epoch = u64::MAX;
         assert!(bad.validate().is_err());
         bad = valid.clone();
-        bad.authorization_id = " authorization-1".into();
+        bad.scheduled_run_id = " scheduled-run-1".into();
         assert!(bad.validate().is_err());
         bad = valid.clone();
-        bad.contract_sha256 = "A".repeat(64);
+        bad.policy_revision = u64::MAX;
         assert!(bad.validate().is_err());
         let mut value = serde_json::to_value(&valid).unwrap();
         value["allow_all"] = serde_json::json!(true);
@@ -533,7 +524,7 @@ mod task_tests {
         for issuer in [
             CapabilityGrantIssuer::PolicyAuto,
             CapabilityGrantIssuer::UserDecision,
-            CapabilityGrantIssuer::TaskAuthorization(parent()),
+            CapabilityGrantIssuer::ScheduledRun(parent()),
             CapabilityGrantIssuer::AiApproval(ai_parent()),
         ] {
             let bytes = wincode::config::serialize(&issuer, cfg).unwrap();

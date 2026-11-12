@@ -638,7 +638,7 @@ impl SignalModelEgressStore {
         export_authorization_id: &str,
         ordinal: u64,
         message: &desk_diagnose_core::chat::ChatMessage,
-    ) -> Result<desk_diagnose_core::schedule::rehearsal::sources::RehearsalModelCall, DbErr> {
+    ) -> Result<Vec<desk_diagnose_core::model_egress::ModelInputLineage>, DbErr> {
         let invalid = || DbErr::Custom("invalid completed model output evidence".into());
         let row = model_egress_receipt::Entity::find_by_id(receipt_id)
             .one(db)
@@ -655,14 +655,7 @@ impl SignalModelEgressStore {
         }
         let output = desk_diagnose_core::model_egress::model_output_message_envelope(message)
             .map_err(|_| invalid())?;
-        let inputs = completed_inputs_on(db, &row, output).await?;
-        Ok(
-            desk_diagnose_core::schedule::rehearsal::sources::RehearsalModelCall {
-                output_message_id: message.message_id.clone(),
-                export_authorization_id: row.export_authorization_id,
-                inputs,
-            },
-        )
+        completed_inputs_on(db, &row, output).await
     }
 
     /// The export scope must be derived from the owner-bound original session.
@@ -702,78 +695,6 @@ impl SignalModelEgressStore {
             return Err(invalid());
         }
         completed_inputs_on(db, row, output).await
-    }
-
-    /// The caller must first authenticate and freeze the rehearsal session.
-    /// Derive historical scope from its unique original input and the stored
-    /// output turn, never from a transport request or a client-supplied receipt.
-    pub async fn find_rehearsal_output_evidence_on<
-        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
-    >(
-        db: &C,
-        session: &desk_diagnose_core::session::PersistedAgentSession,
-        original_input_id: &str,
-        message: &desk_diagnose_core::chat::ChatMessage,
-    ) -> Result<desk_diagnose_core::schedule::rehearsal::sources::RehearsalModelCall, DbErr> {
-        use crate::assistant_model::{ModelExportSource, model_export_id};
-        use desk_diagnose_core::schedule::rehearsal::model_source::{
-            RehearsalModelSource, rehearsal_model_source,
-        };
-        let source =
-            match rehearsal_model_source(session, original_input_id, message).map_err(|_| {
-                DbErr::Custom("model output is not bound to the original rehearsal input".into())
-            })? {
-                RehearsalModelSource::Input(id) => ModelExportSource::Input(id),
-                RehearsalModelSource::Turn(id) => ModelExportSource::Turn(id),
-            };
-        let export_id = model_export_id(
-            &session.actor_id,
-            &session.device_id,
-            &session.conversation_id,
-            source,
-        );
-        Self::find_output_evidence_on(db, &export_id, message).await
-    }
-
-    /// Resolve only within the original owner/run export identity. An output ID
-    /// alone is never a lookup scope, and multiple matching receipts are rejected.
-    pub async fn find_output_evidence_on<
-        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
-    >(
-        db: &C,
-        export_authorization_id: &str,
-        message: &desk_diagnose_core::chat::ChatMessage,
-    ) -> Result<desk_diagnose_core::schedule::rehearsal::sources::RehearsalModelCall, DbErr> {
-        use sea_orm::QuerySelect;
-        let invalid =
-            || DbErr::Custom("model output cannot be uniquely located in its export".into());
-        if export_authorization_id.trim().is_empty() {
-            return Err(invalid());
-        }
-        let output = desk_diagnose_core::model_egress::model_output_message_envelope(message)
-            .map_err(|_| invalid())?;
-        let rows = model_egress_receipt::Entity::find()
-            .filter(model_egress_receipt::Column::ExportAuthorizationId.eq(export_authorization_id))
-            .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
-            .filter(
-                model_egress_receipt::Column::ModelOutputDigestSha256
-                    .eq(output.content_sha256().unwrap_or_default()),
-            )
-            .limit(2)
-            .all(db)
-            .await?;
-        if rows.len() != 1 {
-            return Err(invalid());
-        }
-        let row = &rows[0];
-        Self::read_output_evidence_on(
-            db,
-            &row.receipt_id,
-            export_authorization_id,
-            u64::try_from(row.model_call_ordinal).map_err(|_| invalid())?,
-            message,
-        )
-        .await
     }
 
     pub async fn mark_failed(&self, receipt_id: &str) -> Result<(), DbErr> {
@@ -1180,11 +1101,16 @@ mod tests {
         );
         message.data_envelope = Some(valid);
         assert_eq!(
-            SignalModelEgressStore::find_output_evidence_on(&db, "export", &message)
-                .await
-                .unwrap()
-                .inputs
-                .len(),
+            SignalModelEgressStore::read_output_evidence_on(
+                &db,
+                "output-binding",
+                "export",
+                1,
+                &message
+            )
+            .await
+            .unwrap()
+            .len(),
             2
         );
         use sea_orm::IntoActiveModel;
@@ -1193,11 +1119,6 @@ mod tests {
         other.export_authorization_id = Set("another-export".into());
         other.model_call_ordinal = Set(2);
         other.insert(&db).await.unwrap();
-        assert!(
-            SignalModelEgressStore::find_output_evidence_on(&db, "export", &message)
-                .await
-                .is_ok()
-        );
         let mut duplicate = finished.into_active_model();
         duplicate.receipt_id = Set("duplicate-output".into());
         duplicate.model_call_ordinal = Set(2);
@@ -1211,11 +1132,6 @@ mod tests {
             )
             .await
             .is_err()
-        );
-        assert!(
-            SignalModelEgressStore::find_output_evidence_on(&db, "export", &message)
-                .await
-                .is_err()
         );
         assert_eq!(
             model_egress_receipt::Entity::find().all(&db).await.unwrap(),

@@ -16,7 +16,6 @@ pub struct Model {
     pub owner_user_id: i32,
     pub kind: String,
     /// Exactly one published rule for a tool call; absent for model/run allocations.
-    pub rule_id: Option<String>,
     /// Original one-use owner decision consumed for this exact call, if exceptional.
     pub exception_grant_id: Option<String>,
     pub utc_day: i64,

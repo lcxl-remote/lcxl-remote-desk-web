@@ -1381,6 +1381,7 @@ impl Store {
                 "permission_item",
                 "directory_proposal",
                 "goal_proposal",
+                "schedule_proposal",
                 "concrete_call",
                 "oss_command",
                 "manager_command",

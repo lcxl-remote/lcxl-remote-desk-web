@@ -167,10 +167,6 @@ pub fn scheduled_message(run: &str) -> String {
     stable(Kind::Message, &("scheduled-task-input", run))
 }
 
-pub fn rehearsal_message(rehearsal: &str) -> String {
-    stable(Kind::Message, &("rehearsal-input", rehearsal))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +179,6 @@ mod tests {
             "m_AAECAwQFBgcICQoLDA0ODw"
         );
         assert!(is(Kind::Message, &scheduled_message("run")));
-        assert_ne!(scheduled_message("run"), rehearsal_message("run"));
         assert!(is(Kind::Message, &capability_completion("call")));
         assert_eq!(capability_completion("call"), capability_completion("call"));
         assert_ne!(

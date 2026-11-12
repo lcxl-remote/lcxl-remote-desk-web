@@ -567,3 +567,39 @@ impl ArtifactCallPreflight {
 
 #[cfg(test)]
 mod tests;
+
+/// Verify a created text artifact against its original, store-authenticated
+/// create call. Other artifact formats need their own native evidence.
+pub fn verify_text_artifact_output(
+    tool_name: &str,
+    canonical_input: &str,
+    artifact: &desk_agent_protocol::computer_use::CreatedFileArtifactOutput,
+) -> Result<(), &'static str> {
+    use sha2::{Digest, Sha256};
+    artifact
+        .validate()
+        .map_err(|_| "invalid created artifact")?;
+    if tool_name != "create_text_file" {
+        return Ok(());
+    }
+    let call = ToolCall {
+        id: "artifact-evidence".into(),
+        name: tool_name.into(),
+        arguments_json: canonical_input.into(),
+    };
+    let FilePatchAction::CreateTextArtifact {
+        file_name,
+        content_utf8,
+    } = artifact_action_from_call(&call).map_err(|_| "invalid artifact call")?
+    else {
+        return Err("artifact call is not a text artifact");
+    };
+    if artifact.file_name != file_name
+        || artifact.size_bytes != content_utf8.len() as u64
+        || artifact.media_type != TEXT_ARTIFACT_MEDIA_TYPE
+        || artifact.digest_sha256 != format!("{:x}", Sha256::digest(content_utf8.as_bytes()))
+    {
+        return Err("created artifact differs from its call");
+    }
+    Ok(())
+}

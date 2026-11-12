@@ -4091,6 +4091,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     if let Some(schedule_id) =
                                                         session.pending_schedule_review.clone()
                                                     {
+                                                        // Persist the finished-tool mark so the
+                                                        // decision receipt is appended to this
+                                                        // exact snapshot.
+                                                        deps.session_seam.save(session).await?;
                                                         loop {
                                                             ensure_lease_healthy(deps).await?;
                                                             if deps
@@ -4232,41 +4236,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                 {
                                     tool_observation.bind(alias);
                                 }
-                                                let task_approved =
-                                                    session.file_scope.records().iter().any(
-                                                        |record| {
-                                                            record.proposal.request_id == request_id
-                                    && record.proposal.source
-                                        == crate::file_scope::DirectoryConsentSource::TaskContract
-                                    && record.state
-                                        == crate::file_scope::DirectoryConsentState::Approved
-                                                        },
-                                                    );
-                                                if task_approved {
-                                                    tool_observation.permission(
-                                        crate::model_observability::PermissionOutcome::Approved,
-                                    );
-                                                    append_internal_tool_result(
-                                                    session,
-                                                    turn.provider_meta.data_envelope.as_ref(),
-                                                    (state.mint)(),
-                                                    &call.id,
-                                                    crate::directory_tools::task_approved_result(
-                                                        &request_id,
-                                                    )
-                                                    .to_string(),
-                                                    "task_directory_resolved",
-                                                )?;
-                                                    deps.session_seam.save(session).await?;
-                                                    finish_tool(session, &call.id, true, sink);
-                                                    return Ok(None);
-                                                }
                                                 tool_observation.permission(
                                             crate::model_observability::PermissionOutcome::Waiting,
                                         );
-                                                // Fresh automation approvals belong to the scheduler's durable
-                                                // contract review flow. Interactive directory requests wait in
-                                                // this turn, like schedule reviews, without another model call.
+                                                // A scheduled run pauses for its durable approval flow.
+                                                // Interactive directory requests wait in this turn, like
+                                                // schedule reviews, without another model call.
                                                 if session.trigger_origin
                                                     != crate::session::TriggerOrigin::ScheduledTask
                                                 {

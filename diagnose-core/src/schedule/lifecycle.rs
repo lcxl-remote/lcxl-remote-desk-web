@@ -87,7 +87,7 @@ impl FailureState {
         Ok(())
     }
 
-    /// Resolution of authorization/unknown-result blockers happens separately after
+    /// Resolution of upgrade/unknown-result blockers happens separately after
     /// evidence checks. An ordinary resume can clear only user/threshold pauses.
     pub fn resume(&mut self) -> Result<(), FailureTransitionError> {
         if self.pause_reasons.iter().any(|r| {
@@ -139,14 +139,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_authorization_blockers_cannot_be_cleared_by_resume() {
+    fn unknown_and_upgrade_blockers_cannot_be_cleared_by_resume() {
         let mut state = FailureState::default();
         state
             .settle(1, ScheduledRunStatus::OutcomeUnknown, false)
             .unwrap();
         state
             .pause_reasons
-            .insert(SchedulePauseReason::AuthorizationInvalid);
+            .insert(SchedulePauseReason::ScheduleUpgradeRequired);
         assert_eq!(state.resume(), Err(FailureTransitionError::BlockingReasons));
         state
             .pause_reasons

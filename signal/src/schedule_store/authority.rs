@@ -1,34 +1,36 @@
-//! Current parent authority read under the same task fence as publication and revocation.
-use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
+//! Current run authority, read under the task fence shared with dispatch and cancellation.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::config::connection::DatabaseTransaction;
-use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
-use desk_agent_protocol::{capability_grant::TaskGrantProvenance, schedule::SchedulePauseReason};
+use crate::entity::agent_schedule_run as run;
+use desk_agent_protocol::{
+    capability_grant::TaskGrantProvenance,
+    schedule::{SchedulePauseReason, policy::ScheduleBudgetPolicy},
+};
 use desk_diagnose_core::schedule::{
-    SCHEDULE_CALC_VERSION, contract::ValidatedTaskContract, lifecycle::FailureState,
+    SCHEDULE_CALC_VERSION, definition::ScheduledTaskDefinition, lifecycle::FailureState,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set,
     sea_query::{Alias, Expr, Query},
 };
 
-/// Database-verified parent binding. This is not a capability grant or a budget reservation.
+/// Database-verified run binding. This is not a capability grant or a budget reservation.
 /// Its validity ends with the caller's transaction; it must never be cached for later dispatch.
 pub struct CurrentTaskAuthority {
     provenance: TaskGrantProvenance,
-    contract: ValidatedTaskContract,
+    definition: ScheduledTaskDefinition,
     run: run::Model,
     verified_at: i64,
     valid_until: i64,
     original_started_at_ms: i64,
-    authorization_expires_at_ms: Option<i64>,
 }
 impl CurrentTaskAuthority {
     pub fn provenance(&self) -> &TaskGrantProvenance {
         &self.provenance
     }
-    pub fn contract(&self) -> &ValidatedTaskContract {
-        &self.contract
+    /// The task and limits pinned when the occurrence was claimed.
+    pub fn definition(&self) -> &ScheduledTaskDefinition {
+        &self.definition
     }
     pub fn run(&self) -> &run::Model {
         &self.run
@@ -44,14 +46,13 @@ impl CurrentTaskAuthority {
     {
         desk_diagnose_core::subagent::creation::ScheduledCreationSource::capture(
             self.provenance.clone(),
-            &self.contract,
+            &self.definition,
             self.original_started_at_ms,
-            self.authorization_expires_at_ms,
         )
         .map_err(|_| ScheduleStoreError::Invalid)
     }
 
-    /// Upper bound for a derived grant, including parent, lease and runtime expiry.
+    /// Upper bound for a derived grant, including lease and runtime expiry.
     pub fn valid_until(&self) -> i64 {
         self.valid_until
     }
@@ -67,8 +68,8 @@ impl CurrentDelegationSourceAuthority {
     pub fn provenance(&self) -> &TaskGrantProvenance {
         self.current.provenance()
     }
-    pub fn contract(&self) -> &ValidatedTaskContract {
-        self.current.contract()
+    pub fn definition(&self) -> &ScheduledTaskDefinition {
+        self.current.definition()
     }
     pub fn run(&self) -> &run::Model {
         self.current.run()
@@ -114,7 +115,6 @@ pub(super) async fn authority_now(txn: &DatabaseTransaction) -> Result<i64, Sche
 /// Approval inspection cannot be passed to model/tool budget or dispatch APIs.
 /// It deliberately has no execution-authority accessor.
 pub(super) struct PendingTaskApproval {
-    pub contract: ValidatedTaskContract,
     pub verified_at: i64,
     pub valid_until: i64,
 }
@@ -160,13 +160,12 @@ impl ScheduleStore {
         )
         .await?;
         Ok(PendingTaskApproval {
-            contract: current.contract,
             verified_at: current.verified_at,
             valid_until: current.valid_until,
         })
     }
 
-    /// Callers hold owner/root/child control before this publication fence and
+    /// Callers hold owner/root/child control before this run fence and
     /// recheck their own planner before dispatch. No device/model I/O is allowed.
     pub(crate) async fn lock_delegation_source_authority(
         txn: &DatabaseTransaction,
@@ -308,65 +307,34 @@ impl ScheduleStore {
             || snapshot.prompt != task.prompt
             || snapshot.model_id != task.model_id
             || snapshot.locale != task.locale
-            || snapshot.contract_revision != task.contract_revision
-            || snapshot.authorization_revision != task.authorization_revision
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let contract_revision = task.contract_revision.ok_or(ScheduleStoreError::Conflict)?;
-        let authorization_revision = task
-            .authorization_revision
-            .ok_or(ScheduleStoreError::Conflict)?;
-        let (_, contract) = load_contract(txn, owner, &task.schedule_id, contract_revision).await?;
-        let policy = crate::schedule_budget_policy::read(txn).await?;
-        if !desk_diagnose_core::schedule::policy::permits(&policy, &contract.contract().budget) {
-            return Err(ScheduleStoreError::BudgetExceeded);
-        }
-        let parent = authorization::Entity::find()
-            .filter(authorization::Column::OwnerUserId.eq(owner))
-            .filter(authorization::Column::ScheduleId.eq(&task.schedule_id))
-            .filter(authorization::Column::AuthorizationRevision.eq(authorization_revision))
-            .one(txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if parent.task_revision != task.task_revision
-            || parent.contract_revision != contract_revision
-            || parent.contract_sha256 != contract.digest()
-            || parent.revoked_at.is_some()
-            || parent.revoked_reason.is_some()
-            || parent.version <= 0
-            || parent.approved_at <= 0
-            || parent.approved_at > now
-            || parent.expires_at.is_some_and(|deadline| deadline <= now)
-            || contract.contract().task_revision != task.task_revision as u64
-            || contract.contract().target_device_id != device
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let proof: TaskRehearsalEvidence = serde_json::from_str(&parent.rehearsal_evidence_json)
+        let policy: ScheduleBudgetPolicy = serde_json::from_str(
+            work.budget_policy_json
+                .as_deref()
+                .ok_or(ScheduleStoreError::Conflict)?,
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+        let definition = ScheduledTaskDefinition {
+            schedule_id: task.schedule_id.clone(),
+            task_revision: u64::try_from(task.task_revision)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+            target_device_id: task.target_device_id.clone(),
+            prompt: task.prompt.clone(),
+            locale: task.locale.clone(),
+            model_id: task.model_id,
+            policy_revision: policy.revision,
+            budget: policy.maximum,
+        };
+        definition
+            .validate()
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        key(&proof.conversation_id)?;
-        key(&proof.rehearsal_run_id)?;
-        if !valid_digest(&proof.evidence_sha256)
-            || proof.rehearsal_run_id != parent.rehearsal_run_id
-            || proof.input_revision == 0
-            || proof.input_revision > i64::MAX as u64
-            || proof.finished_at <= 0
-            || proof.finished_at > parent.approved_at
-        {
-            return Err(ScheduleStoreError::Invalid);
-        }
         let provenance = TaskGrantProvenance {
             schedule_id: task.schedule_id,
             scheduled_run_id: work.run_id.clone(),
-            task_revision: u64::try_from(task.task_revision)
-                .map_err(|_| ScheduleStoreError::Invalid)?,
-            contract_revision: u64::try_from(contract_revision)
-                .map_err(|_| ScheduleStoreError::Invalid)?,
-            contract_sha256: contract.digest().to_owned(),
-            authorization_id: parent.authorization_id,
-            authorization_revision: u64::try_from(authorization_revision)
-                .map_err(|_| ScheduleStoreError::Invalid)?,
+            task_revision: definition.task_revision,
+            policy_revision: definition.policy_revision,
             recovery_epoch: failures.recovery_epoch,
         };
         provenance
@@ -376,29 +344,25 @@ impl ScheduleStore {
             .started_at
             .filter(|at| *at > 0 && *at <= now)
             .ok_or(ScheduleStoreError::Invalid)?;
-        let runtime = i64::from(contract.contract().budget.max_runtime_seconds)
-            .checked_mul(1000)
-            .and_then(|limit| started.checked_add(limit))
+        let runtime = definition
+            .deadline_ms(started)
             .ok_or(ScheduleStoreError::Invalid)?;
-        let valid_until = runtime
-            .min(match purpose {
-                AuthorityPurpose::Planner { .. } => {
-                    work.lease_deadline.ok_or(ScheduleStoreError::Invalid)?
-                }
-                AuthorityPurpose::Approval { .. } | AuthorityPurpose::Delegation(_) => i64::MAX,
-            })
-            .min(parent.expires_at.unwrap_or(i64::MAX));
+        let valid_until = runtime.min(match purpose {
+            AuthorityPurpose::Planner { .. } => {
+                work.lease_deadline.ok_or(ScheduleStoreError::Invalid)?
+            }
+            AuthorityPurpose::Approval { .. } | AuthorityPurpose::Delegation(_) => i64::MAX,
+        });
         if valid_until <= now {
             return Err(ScheduleStoreError::Conflict);
         }
         Ok(CurrentTaskAuthority {
             provenance,
-            contract,
+            definition,
             run: work,
             verified_at: now,
             valid_until,
             original_started_at_ms: started,
-            authorization_expires_at_ms: parent.expires_at,
         })
     }
 }

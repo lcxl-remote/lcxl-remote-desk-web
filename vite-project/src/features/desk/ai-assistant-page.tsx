@@ -66,9 +66,8 @@ import {
     ownerSelectableWindows,
     useAiAssistantObservation,
 } from './use-ai-assistant-observation';
-import { useAiAssistantChat, type RehearsalConversation } from './use-ai-assistant-chat';
+import { useAiAssistantChat } from './use-ai-assistant-chat';
 import { fetchGoalBudgetPolicy, type GoalBudgetPolicy } from '../settings/goal-budget-policy-settings';
-import { AiAssistantRehearsalGate } from './ai-assistant-rehearsal-gate';
 import { SessionTargetDialog } from './session-target-selection';
 import { useAiAssistantCapabilities } from './use-ai-assistant-capabilities';
 import { AssistantCapabilityList } from './assistant-capability-list';
@@ -240,7 +239,6 @@ function ObservationCard({
 }
 
 export function AiAssistantWorkspace({
-    rehearsal,
     initialConversationId,
     deskId,
     stableDeviceId,
@@ -250,7 +248,6 @@ export function AiAssistantWorkspace({
     assistantEnabled,
     backTo,
 }: {
-    rehearsal?: RehearsalConversation;
     initialConversationId?: string | null;
     deskId: string;
     stableDeviceId: string;
@@ -273,7 +270,6 @@ export function AiAssistantWorkspace({
     const navigate = useNavigate();
     const setupOrigin = useLocation();
     const chat = useAiAssistantChat({
-        rehearsal,
         initialConversationId,
         deskId,
         connected: isConnected,
@@ -319,8 +315,7 @@ export function AiAssistantWorkspace({
     });
     const provider = useGetModelProvider();
     const providerConfig = provider.data?.data;
-    const [question, setQuestion] = useState(rehearsal?.status === 'pending' ? rehearsal.prompt : '');
-    const rehearsalCanStart = !rehearsal || (rehearsal.status === 'pending' && !chat.running && !chat.messages.some(message => message.role === 'user'));
+    const [question, setQuestion] = useState('');
     const [schedulesOpen, setSchedulesOpen] = useState(false);
     const [taskPanelSession, setTaskPanelSession] = useState<string | null>(null);
     const [attachmentsOpen, setAttachmentsOpen] = useState(false);
@@ -362,7 +357,7 @@ export function AiAssistantWorkspace({
     const selectedChildTask = subagents.detail?.result.task ?? subagents.selected;
     const selectedChildDraft = selectedChildTask && childDrafts[selectedChildTask.task_id];
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(!subagents.selected, permissionHistoryKey);
-    const approvalSettingsAvailable = !rehearsal && target?.orgId == null && !!(hasDevice || personalScope) && featureProfile.approval_delegation;
+    const approvalSettingsAvailable = target?.orgId == null && !!(hasDevice || personalScope) && featureProfile.approval_delegation;
     const approvalMode = useAssistantApprovalMode(chat.sessionId, approvalSettingsAvailable);
     const noReview = approvalMode.data?.mode === 'no_review';
     const automaticApproval = approvalMode.data?.mode !== 'manual' && chat.approvalDelegation?.status === 'active';
@@ -484,8 +479,8 @@ export function AiAssistantWorkspace({
         setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
     }, [chat.acceptedInput]);
 
-    const canQueueInput = !rehearsal && !startGoal;
-    const sendDisabled = (!canQueueInput && chat.turnRunning) || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
+    const canQueueInput = !startGoal;
+    const sendDisabled = (!canQueueInput && chat.turnRunning) || chat.stopping || !!chat.deliveryState
         || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || chat.historyRestoreFailed || !chat.sessionTargetReady
         || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
         || !providerConfig?.model || !requestDevices.ready || (startGoal && (!goalBudgetPolicy || (!hasDevice && !goalDevice)));
@@ -653,7 +648,7 @@ export function AiAssistantWorkspace({
                 { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
                     onSelect: () => setSchedulesOpen(true) },
             ] : []),
-            ...((hasDevice || personalScope) && !rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
+            ...((hasDevice || personalScope) ? [{ label: t('schedules.createResume'), icon: CalendarClock,
                 disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.sessionId || !chat.inputRevision || (!hasDevice && !requestDevices.selected.length),
                 onSelect: () => { if (chat.sessionId && chat.inputRevision) navigate(`/schedules?${new URLSearchParams({
                     resume_conversation: chat.sessionId,
@@ -678,8 +673,8 @@ export function AiAssistantWorkspace({
         ] },
     ];
 
-    const issueSources = !rehearsal ? <AssistantIssueSources value={selectedIssues} onChange={setSelectedIssues}
-        disabled={!assistantEnabled || chat.hydrating || !!chat.deliveryState || chat.historyRestoreFailed} /> : null;
+    const issueSources = <AssistantIssueSources value={selectedIssues} onChange={setSelectedIssues}
+        disabled={!assistantEnabled || chat.hydrating || !!chat.deliveryState || chat.historyRestoreFailed} />;
 
     const contextSection = <>
         {featureProfile.object_context && (hasDevice || personalScope) && (
@@ -895,7 +890,7 @@ export function AiAssistantWorkspace({
                             </CardTitle>
                         </div>
                         <div className="assistant-header-actions flex shrink-0 items-center gap-1">
-                            <AssistantHistory deskId={deskId} deviceId={recoveryConnection?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} deviceId={recoveryConnection?.device_id} disabled={chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) { setSelectedCapabilityIds([]); setSelectedIssues([]); } }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -1031,7 +1026,7 @@ export function AiAssistantWorkspace({
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />}
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
+                    <AssistantPermissionRecords approvalRecords={featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
                             if (record.task) {
                                 subagents.openDetail(record.task);
                                 if (record.source_kind === 'directory_proposal') setChildPanel({ taskId: record.task.task_id, panel: 'directories' });
@@ -1089,7 +1084,6 @@ export function AiAssistantWorkspace({
                             ) : chat.error === 'selected_context_expired' ? t('pages.aiAssistant.selectedContextExpired') : chat.error}</AlertDescription>
                         </Alert>
                     )}
-                    {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
                     </div>
                     </div>
                     {showJumpToLatest && (
@@ -1111,16 +1105,16 @@ export function AiAssistantWorkspace({
                                 {t('pages.aiAssistant.deliveryRetry')}
                             </Button>}
                         </div>}
-                        {!rehearsal && startGoal && !offPageReminderAvailable && (
+                        {startGoal && !offPageReminderAvailable && (
                             <p className="text-xs text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.goalNoOffPageReminder')}</p>
                         )}
-                        {!rehearsal && startGoal && previousCompletedGoalId && (
+                        {startGoal && previousCompletedGoalId && (
                             <p className="text-xs text-muted-foreground">
                                 {t('pages.aiAssistant.goalContinuesPrevious', { goalId: previousCompletedGoalId })}
                             </p>
                         )}
                         <AssistantSubagentApprovalNotice agents={subagents} />
-                        {!rehearsal && chat.mainStopped && <Button type="button" variant="outline" size="sm"
+                        {chat.mainStopped && <Button type="button" variant="outline" size="sm"
                             disabled={chat.resumingQueue} onClick={() => void chat.resumeQueue()}>
                             {t('pages.aiAssistant.resumeQueue')}
                         </Button>}
@@ -1156,7 +1150,6 @@ export function AiAssistantWorkspace({
                             ref={goalReplyRef}
                             sendDisabled={sendDisabled}
                             value={question}
-                            readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}
                             placeholder={t('pages.aiAssistant.questionPlaceholder')}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
@@ -1164,7 +1157,7 @@ export function AiAssistantWorkspace({
                         />
                         <div className="flex min-w-0 items-center gap-1">
                             <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={hasDevice || issueSources ? () => setPanel('context') : undefined}
-                                goal={(hasDevice || personalScope) && !rehearsal ? {
+                                goal={(hasDevice || personalScope) ? {
                                     checked: startGoal, disabled: !assistantEnabled || chat.turnRunning || !!chat.deliveryState,
                                     onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
                                     summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
@@ -1194,7 +1187,7 @@ export function AiAssistantWorkspace({
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
-                                    stopping={chat.stopping} onStop={chat.stop} rehearsal={!!rehearsal}
+                                    stopping={chat.stopping} onStop={chat.stop}
                                     allowQueue={canQueueInput}
                                     sendDisabled={sendDisabled} />
                             </div>
@@ -1210,7 +1203,7 @@ export function AiAssistantWorkspace({
                         panel={childPanel?.taskId === subagents.selected?.task_id ? childPanel?.panel ?? null : null}
                         onPanelChange={setSelectedChildPanel} deskId={deskId}
                         onDeviceSettings={() => setDeviceSettingsOpen(true)}
-                        onApprovalSettings={!rehearsal && featureProfile.approval_delegation ? () => setApprovalSettingsOpen(true) : undefined}
+                        onApprovalSettings={featureProfile.approval_delegation ? () => setApprovalSettingsOpen(true) : undefined}
                         sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         capabilityList={<AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
                             loading={capabilities.loading} error={Boolean(capabilities.error)}
@@ -1394,31 +1387,15 @@ function AiAssistantLivePage({
 
     return (
         <div className="absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden">
-            {searchParams.has('rehearsal') ? <AiAssistantRehearsalGate
-                rehearsalId={searchParams.get('rehearsal') ?? ''}
-                deviceId={String(connection.device_id ?? '')}
-            >
-                {row => <AiAssistantWorkspace
-                    key={row.rehearsal_id}
-                    rehearsal={row}
-                    backTo={target!.basePath}
-                    deskId={deskId}
-                    stableDeviceId={connection.device_id ?? ''}
-                    localPairingAvailable={localPairingAvailable}
-                    featureProfile={featureProfile}
-                    assistantEnabled={isAiAssistantEnabled(connection.ai_assistant_settings)}
-                />}
-            </AiAssistantRehearsalGate> : (
-                <AiAssistantWorkspace
-                    backTo={target!.basePath}
-                    initialConversationId={searchParams.get('conversation')}
-                    deskId={deskId}
-                    stableDeviceId={connection.device_id ?? ''}
-                    localPairingAvailable={localPairingAvailable}
-                    featureProfile={featureProfile}
-                    assistantEnabled={isAiAssistantEnabled(connection.ai_assistant_settings)}
-                />
-            )}
+            <AiAssistantWorkspace
+                backTo={target!.basePath}
+                initialConversationId={searchParams.get('conversation')}
+                deskId={deskId}
+                stableDeviceId={connection.device_id ?? ''}
+                localPairingAvailable={localPairingAvailable}
+                featureProfile={featureProfile}
+                assistantEnabled={isAiAssistantEnabled(connection.ai_assistant_settings)}
+            />
         </div>
     );
 }

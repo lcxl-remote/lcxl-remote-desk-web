@@ -46,21 +46,6 @@ pub(super) async fn recover(
     {
         return Err(ScheduleStoreError::Conflict);
     }
-    let (_, contract) = super::publication::load_contract(
-        &txn,
-        work.owner_user_id,
-        &work.schedule_id,
-        snapshot
-            .contract_revision
-            .ok_or(ScheduleStoreError::Invalid)?,
-    )
-    .await?;
-    if contract.contract().exception_mode
-        != desk_agent_protocol::schedule::contract::TaskExceptionMode::RequestApproval
-        || i64::try_from(contract.contract().task_revision).ok() != Some(snapshot.task_revision)
-    {
-        return Err(ScheduleStoreError::Conflict);
-    }
     if work_item::Entity::find()
         .filter(work_item::Column::ConversationId.eq(&work.run_id))
         .filter(

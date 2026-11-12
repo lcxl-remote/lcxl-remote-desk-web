@@ -5977,35 +5977,6 @@ export type BrowserExtensionPairing = {
     pairing_code: string;
 };
 
-export const browserOriginKindEnum = {
-    https: "https",
-    http_loopback: "http_loopback",
-    http: "http"
-} as const;
-
-export type BrowserOriginKindEnumKey = (typeof browserOriginKindEnum)[keyof typeof browserOriginKindEnum];
-
-export type BrowserOriginKind = BrowserOriginKindEnumKey;
-
-/**
- * @description Canonical origin identity. Paths, query strings, fragments, and credentials\nare deliberately excluded so they cannot leak through readiness metadata.
-*/
-export type BrowserOrigin = {
-    /**
-     * @type string
-    */
-    host_ascii: string;
-    /**
-     * @type string
-    */
-    kind: BrowserOriginKind;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    port: number;
-};
-
 export type CancelWaylandRequest = {
     /**
      * @minLength 0
@@ -6016,24 +5987,6 @@ export type CancelWaylandRequest = {
      * @type string
     */
     operation_id: string;
-};
-
-export type CapabilityGrantLimits = {
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    max_bytes_per_call: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_calls: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_items_per_call: number;
 };
 
 export type CapabilityGrantRevokeBody = {
@@ -6059,17 +6012,6 @@ export type CapabilityGrantRevokeBody = {
     */
     session?: string | null;
 };
-
-export const capabilityRiskTierEnum = {
-    r0: "r0",
-    r1: "r1",
-    r2: "r2",
-    r3: "r3"
-} as const;
-
-export type CapabilityRiskTierEnumKey = (typeof capabilityRiskTierEnum)[keyof typeof capabilityRiskTierEnum];
-
-export type CapabilityRiskTier = CapabilityRiskTierEnumKey;
 
 /**
  * @description Persisted edge collection policy. Mirrors the runtime\n[`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at\ncollection time.
@@ -6102,50 +6044,6 @@ export type CollectionPolicySettingsUpdate = {
     */
     allow_screen?: boolean | null;
 };
-
-export const communicationSurfaceKindEnum = {
-    classic_outlook_desktop: "classic_outlook_desktop",
-    outlook_new_desktop: "outlook_new_desktop",
-    chrome_extension: "chrome_extension",
-    assistive_ui: "assistive_ui"
-} as const;
-
-export type CommunicationSurfaceKindEnumKey = (typeof communicationSurfaceKindEnum)[keyof typeof communicationSurfaceKindEnum];
-
-export type CommunicationSurfaceKind = CommunicationSurfaceKindEnumKey;
-
-export const communicationSurfaceScopeKindEnum = {
-    web_origin: "web_origin"
-} as const;
-
-export type CommunicationSurfaceScopeKindEnumKey = (typeof communicationSurfaceScopeKindEnum)[keyof typeof communicationSurfaceScopeKindEnum];
-
-export const communicationSurfaceScopeKindEnum2 = {
-    desktop_application: "desktop_application"
-} as const;
-
-export type CommunicationSurfaceScopeKindEnum2Key = (typeof communicationSurfaceScopeKindEnum2)[keyof typeof communicationSurfaceScopeKindEnum2];
-
-export type CommunicationSurfaceScope = ({
-    /**
-     * @type string
-    */
-    kind: CommunicationSurfaceScopeKindEnumKey;
-    /**
-     * @description Canonical origin identity. Paths, query strings, fragments, and credentials\nare deliberately excluded so they cannot leak through readiness metadata.
-     * @type object
-    */
-    origin: BrowserOrigin;
-} | {
-    /**
-     * @type string
-    */
-    application_id: string;
-    /**
-     * @type string
-    */
-    kind: CommunicationSurfaceScopeKindEnum2Key;
-});
 
 export const componentStateEnum = {
     ready: "ready",
@@ -10786,88 +10684,6 @@ export type ReadAttachment = {
     start_line?: number | null;
 };
 
-export const recipientDisplayWarningEnum = {
-    unicode_address: "unicode_address",
-    mixed_ascii_and_non_ascii: "mixed_ascii_and_non_ascii",
-    bidirectional_or_invisible_control: "bidirectional_or_invisible_control"
-} as const;
-
-export type RecipientDisplayWarningEnumKey = (typeof recipientDisplayWarningEnum)[keyof typeof recipientDisplayWarningEnum];
-
-export type RecipientDisplayWarning = RecipientDisplayWarningEnumKey;
-
-export const recipientKindEnum = {
-    email_mailbox: "email_mailbox",
-    chat_user: "chat_user",
-    chat_channel: "chat_channel",
-    chat_group: "chat_group"
-} as const;
-
-export type RecipientKindEnumKey = (typeof recipientKindEnum)[keyof typeof recipientKindEnum];
-
-export type RecipientKind = RecipientKindEnumKey;
-
-export type ResolvedRecipientMember = {
-    /**
-     * @type string
-    */
-    canonical_address: string;
-    /**
-     * @type string
-    */
-    stable_id: string;
-};
-
-export const recipientRoleEnum = {
-    to: "to",
-    cc: "cc",
-    bcc: "bcc",
-    chat_destination: "chat_destination"
-} as const;
-
-export type RecipientRoleEnumKey = (typeof recipientRoleEnum)[keyof typeof recipientRoleEnum];
-
-export type RecipientRole = RecipientRoleEnumKey;
-
-export type RecipientIdentity = {
-    /**
-     * @description Server-canonicalized address retained for exact UI review and sealing.
-     * @type string
-    */
-    canonical_address: string;
-    /**
-     * @type string,null
-    */
-    display_name?: string | null;
-    /**
-     * @description Fixed warning tokens computed by trusted canonicalization logic. They\nare sealed with the recipient identity and rendered by local UI text.
-     * @type array
-    */
-    display_warnings: RecipientDisplayWarning[];
-    /**
-     * @type string
-    */
-    kind: RecipientKind;
-    /**
-     * @type string,null
-    */
-    member_snapshot_sha256?: string | null;
-    /**
-     * @description Empty for a direct recipient. A group must contain the resolved,\ndeterministic member snapshot that the edge adapter promises to recheck\nimmediately before dispatch.
-     * @type array
-    */
-    resolved_members: ResolvedRecipientMember[];
-    /**
-     * @type string
-    */
-    role: RecipientRole;
-    /**
-     * @description Connector-owned immutable mailbox/user/channel/group identity.
-     * @type string
-    */
-    stable_id: string;
-};
-
 export type RedeemCodeParams = {
     /**
      * @description The access-grant code (device code or support code) to redeem.
@@ -10897,136 +10713,6 @@ export type RedeemCodeResult = {
      * @type integer,null, int32
     */
     target_org_id?: number | null;
-};
-
-export const rehearsalApprovalSourceEnum = {
-    policy_auto: "policy_auto",
-    user_decision: "user_decision"
-} as const;
-
-export type RehearsalApprovalSourceEnumKey = (typeof rehearsalApprovalSourceEnum)[keyof typeof rehearsalApprovalSourceEnum];
-
-export type RehearsalApprovalSource = RehearsalApprovalSourceEnumKey;
-
-/**
- * @description Historical successful scope, not a grant or a statement of future necessity.
-*/
-export type RehearsalPermissionObservation = {
-    /**
-     * @type string
-    */
-    approval_source: RehearsalApprovalSource;
-    /**
-     * @type string
-    */
-    capability_id: string;
-    /**
-     * @type string
-    */
-    completed_at: string;
-    /**
-     * @type string
-    */
-    effect: CapabilityEffect;
-    /**
-     * @type array
-    */
-    export_destinations: DestinationIdentity[];
-    /**
-     * @type array
-    */
-    operations: string[];
-    /**
-     * @type string
-    */
-    provider_id: string;
-    /**
-     * @type array
-    */
-    resources: string[];
-    /**
-     * @type string
-    */
-    risk_tier: CapabilityRiskTier;
-    /**
-     * @type string
-    */
-    tool_call_id: string;
-    /**
-     * @type string
-    */
-    tool_name: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    tool_schema_version: number;
-};
-
-export const rehearsalStatusEnum = {
-    failed: "failed",
-    pending: "pending",
-    running: "running",
-    completed: "completed",
-    cancelled: "cancelled"
-} as const;
-
-export type RehearsalStatusEnumKey = (typeof rehearsalStatusEnum)[keyof typeof rehearsalStatusEnum];
-
-export type RehearsalStatus = RehearsalStatusEnumKey;
-
-/**
- * @description Only public conversation intent and frozen task text are exposed to the owner.
-*/
-export type RehearsalView = {
-    /**
-     * @type string
-    */
-    client_conversation_id: string;
-    /**
-     * @type string,null
-    */
-    finished_at?: string | null;
-    /**
-     * @type string
-    */
-    initial_message_id: string;
-    /**
-     * @type string,null
-    */
-    locale?: string | null;
-    /**
-     * @type integer,null, int32
-    */
-    model_id?: number | null;
-    /**
-     * @type string
-    */
-    prompt: string;
-    /**
-     * @type string
-    */
-    rehearsal_id: string;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-    /**
-     * @type string,null
-    */
-    started_at?: string | null;
-    /**
-     * @type string
-    */
-    status: RehearsalStatus;
-    /**
-     * @type string,null
-    */
-    target_device_id?: string | null;
-    /**
-     * @type integer, int64
-    */
-    task_revision: number;
 };
 
 export const turnInterfaceFaultEnum = {
@@ -15348,6 +15034,9 @@ export type RestResponseRedeemCodeResult = {
     success: boolean;
 };
 
+/**
+ * @description Per-run and per-day limits for scheduled tasks.
+*/
 export type TaskBudget = {
     /**
      * @minLength 0
@@ -15381,6 +15070,7 @@ export type RestResponseScheduleBudgetPolicy = {
     */
     data?: {
         /**
+         * @description Per-run and per-day limits for scheduled tasks.
          * @type object
         */
         maximum: TaskBudget;
@@ -17016,6 +16706,7 @@ export type ResumeConversationSource = {
 
 export type ScheduleBudgetPolicy = {
     /**
+     * @description Per-run and per-day limits for scheduled tasks.
      * @type object
     */
     maximum: TaskBudget;
@@ -17243,9 +16934,6 @@ export type ScheduleDraft = {
 
 export const scheduledTaskStatusEnum = {
     pending_review: "pending_review",
-    draft: "draft",
-    rehearsing: "rehearsing",
-    awaiting_authorization: "awaiting_authorization",
     active: "active",
     triggered: "triggered",
     paused: "paused",
@@ -17257,330 +16945,6 @@ export const scheduledTaskStatusEnum = {
 export type ScheduledTaskStatusEnumKey = (typeof scheduledTaskStatusEnum)[keyof typeof scheduledTaskStatusEnum];
 
 export type ScheduledTaskStatus = ScheduledTaskStatusEnumKey;
-
-export const taskExceptionModeEnum = {
-    deny: "deny",
-    request_approval: "request_approval"
-} as const;
-
-export type TaskExceptionModeEnumKey = (typeof taskExceptionModeEnum)[keyof typeof taskExceptionModeEnum];
-
-export type TaskExceptionMode = TaskExceptionModeEnumKey;
-
-export type TaskPermissionScope = {
-    /**
-     * @type array
-    */
-    export_destinations: DestinationIdentity[];
-    /**
-     * @type object
-    */
-    limits: CapabilityGrantLimits;
-    /**
-     * @type array
-    */
-    operations: string[];
-    /**
-     * @type array
-    */
-    resources: string[];
-};
-
-/**
- * @description Attachment quotas are additional to resource, lineage and destination authority.
-*/
-export type TaskAttachmentLimits = {
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    max_bytes_per_attachment: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_count: number;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    max_total_bytes: number;
-    /**
-     * @description Exact normalized media types; wildcard matching is not supported.
-     * @type array
-    */
-    media_types: string[];
-};
-
-export type TaskAttachmentPolicy = {
-    /**
-     * @description Attachment quotas are additional to resource, lineage and destination authority.
-     * @type object
-    */
-    approval_ceiling: TaskAttachmentLimits;
-    /**
-     * @description Attachment quotas are additional to resource, lineage and destination authority.
-     * @type object
-    */
-    automatic: TaskAttachmentLimits;
-};
-
-export const taskInputConstraintKindEnum = {
-    exact: "exact"
-} as const;
-
-export type TaskInputConstraintKindEnumKey = (typeof taskInputConstraintKindEnum)[keyof typeof taskInputConstraintKindEnum];
-
-export const taskInputConstraintKindEnum2 = {
-    scoped_read: "scoped_read"
-} as const;
-
-export type TaskInputConstraintKindEnum2Key = (typeof taskInputConstraintKindEnum2)[keyof typeof taskInputConstraintKindEnum2];
-
-export const taskInputConstraintKindEnum3 = {
-    generated_text_artifact: "generated_text_artifact"
-} as const;
-
-export type TaskInputConstraintKindEnum3Key = (typeof taskInputConstraintKindEnum3)[keyof typeof taskInputConstraintKindEnum3];
-
-export const taskInputConstraintKindEnum4 = {
-    generated_message: "generated_message"
-} as const;
-
-export type TaskInputConstraintKindEnum4Key = (typeof taskInputConstraintKindEnum4)[keyof typeof taskInputConstraintKindEnum4];
-
-export type TaskInputConstraint = ({
-    /**
-     * @type string
-    */
-    canonical_json: string;
-    /**
-     * @type string
-    */
-    kind: TaskInputConstraintKindEnumKey;
-} | {
-    /**
-     * @type string
-    */
-    kind: TaskInputConstraintKindEnum2Key;
-} | {
-    /**
-     * @type string
-    */
-    file_name: string;
-    /**
-     * @type string
-    */
-    kind: TaskInputConstraintKindEnum3Key;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_content_bytes: number;
-} | {
-    attachment_policy?: (null | TaskAttachmentPolicy);
-    /**
-     * @type string
-    */
-    kind: TaskInputConstraintKindEnum4Key;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_body_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    max_subject_bytes: number;
-});
-
-export type TaskPermissionRule = {
-    /**
-     * @type object
-    */
-    approval_ceiling: TaskPermissionScope;
-    /**
-     * @type object
-    */
-    automatic: TaskPermissionScope;
-    /**
-     * @type string
-    */
-    capability_id: string;
-    /**
-     * @type string
-    */
-    effect: CapabilityEffect;
-    input: TaskInputConstraint;
-    /**
-     * @type string
-    */
-    provider_id: string;
-    /**
-     * @type string
-    */
-    risk_tier: CapabilityRiskTier;
-    /**
-     * @type string
-    */
-    rule_id: string;
-    /**
-     * @type string
-    */
-    tool_name: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    tool_schema_version: number;
-};
-
-/**
- * @description Stable destination identity. Per-run session/readiness and UI references are resolved afresh.
-*/
-export type TaskMessageDestination = {
-    /**
-     * @type string
-    */
-    account_id: string;
-    /**
-     * @type string
-    */
-    adapter_id: string;
-    /**
-     * @type string
-    */
-    adapter_version: string;
-    /**
-     * @type string
-    */
-    channel: CommunicationChannel;
-    /**
-     * @type string
-    */
-    profile_id: string;
-    /**
-     * @type array
-    */
-    recipients: RecipientIdentity[];
-    scope: CommunicationSurfaceScope;
-    /**
-     * @type string
-    */
-    surface_kind: CommunicationSurfaceKind;
-};
-
-export const taskStepBindingKindEnum = {
-    exact: "exact"
-} as const;
-
-export type TaskStepBindingKindEnumKey = (typeof taskStepBindingKindEnum)[keyof typeof taskStepBindingKindEnum];
-
-export const taskStepBindingKindEnum2 = {
-    produce_text_artifact: "produce_text_artifact"
-} as const;
-
-export type TaskStepBindingKindEnum2Key = (typeof taskStepBindingKindEnum2)[keyof typeof taskStepBindingKindEnum2];
-
-export const taskStepBindingKindEnum3 = {
-    send_message: "send_message"
-} as const;
-
-export type TaskStepBindingKindEnum3Key = (typeof taskStepBindingKindEnum3)[keyof typeof taskStepBindingKindEnum3];
-
-export type TaskStepBinding = ({
-    /**
-     * @type string
-    */
-    kind: TaskStepBindingKindEnumKey;
-} | {
-    /**
-     * @type array
-    */
-    allowed_source_scopes: string[];
-    /**
-     * @type string
-    */
-    canonical_directory: string;
-    /**
-     * @type string
-    */
-    kind: TaskStepBindingKindEnum2Key;
-} | {
-    /**
-     * @type array
-    */
-    allowed_source_scopes: string[];
-    /**
-     * @description Stable destination identity. Per-run session/readiness and UI references are resolved afresh.
-     * @type object
-    */
-    destination: TaskMessageDestination;
-    /**
-     * @type string
-    */
-    kind: TaskStepBindingKindEnum3Key;
-});
-
-export type TaskFixedStep = {
-    binding: TaskStepBinding;
-    /**
-     * @type array
-    */
-    depends_on: string[];
-    /**
-     * @type string
-    */
-    rule_id: string;
-    /**
-     * @type string
-    */
-    step_id: string;
-};
-
-export type TaskContract = {
-    /**
-     * @type object
-    */
-    budget: TaskBudget;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    contract_revision: number;
-    /**
-     * @type string
-    */
-    exception_mode: TaskExceptionMode;
-    /**
-     * @type array
-    */
-    permissions: TaskPermissionRule[];
-    /**
-     * @type string
-    */
-    schedule_id: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    schema_version: number;
-    /**
-     * @description Steps are stored in execution order; dependencies can only reference earlier steps.
-     * @type array
-    */
-    steps: TaskFixedStep[];
-    /**
-     * @type string
-    */
-    target_device_id: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    task_revision: number;
-};
 
 export const scheduleManagementRequestOperationEnum = {
     list_resume_sources: "list_resume_sources"
@@ -17655,118 +17019,58 @@ export const scheduleManagementRequestOperationEnum12 = {
 export type ScheduleManagementRequestOperationEnum12Key = (typeof scheduleManagementRequestOperationEnum12)[keyof typeof scheduleManagementRequestOperationEnum12];
 
 export const scheduleManagementRequestOperationEnum13 = {
-    revoke_task_authorization: "revoke_task_authorization"
+    list_runs: "list_runs"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum13Key = (typeof scheduleManagementRequestOperationEnum13)[keyof typeof scheduleManagementRequestOperationEnum13];
 
 export const scheduleManagementRequestOperationEnum14 = {
-    get_task_contract: "get_task_contract"
+    create_task: "create_task"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum14Key = (typeof scheduleManagementRequestOperationEnum14)[keyof typeof scheduleManagementRequestOperationEnum14];
 
 export const scheduleManagementRequestOperationEnum15 = {
-    generate_task_contract: "generate_task_contract"
+    decide_schedule_proposal: "decide_schedule_proposal"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum15Key = (typeof scheduleManagementRequestOperationEnum15)[keyof typeof scheduleManagementRequestOperationEnum15];
 
 export const scheduleManagementRequestOperationEnum16 = {
-    save_task_contract: "save_task_contract"
+    rename: "rename"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum16Key = (typeof scheduleManagementRequestOperationEnum16)[keyof typeof scheduleManagementRequestOperationEnum16];
 
 export const scheduleManagementRequestOperationEnum17 = {
-    publish_task: "publish_task"
+    set_failure_threshold: "set_failure_threshold"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum17Key = (typeof scheduleManagementRequestOperationEnum17)[keyof typeof scheduleManagementRequestOperationEnum17];
 
 export const scheduleManagementRequestOperationEnum18 = {
-    list_runs: "list_runs"
+    change_prompt: "change_prompt"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum18Key = (typeof scheduleManagementRequestOperationEnum18)[keyof typeof scheduleManagementRequestOperationEnum18];
 
 export const scheduleManagementRequestOperationEnum19 = {
-    create_draft: "create_draft"
+    change_time: "change_time"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum19Key = (typeof scheduleManagementRequestOperationEnum19)[keyof typeof scheduleManagementRequestOperationEnum19];
 
 export const scheduleManagementRequestOperationEnum20 = {
-    activate_conversation_resume: "activate_conversation_resume"
+    pause: "pause"
 } as const;
 
 export type ScheduleManagementRequestOperationEnum20Key = (typeof scheduleManagementRequestOperationEnum20)[keyof typeof scheduleManagementRequestOperationEnum20];
 
 export const scheduleManagementRequestOperationEnum21 = {
-    reserve_rehearsal: "reserve_rehearsal"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum21Key = (typeof scheduleManagementRequestOperationEnum21)[keyof typeof scheduleManagementRequestOperationEnum21];
-
-export const scheduleManagementRequestOperationEnum22 = {
-    get_rehearsal: "get_rehearsal"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum22Key = (typeof scheduleManagementRequestOperationEnum22)[keyof typeof scheduleManagementRequestOperationEnum22];
-
-export const scheduleManagementRequestOperationEnum23 = {
-    get_task_rehearsal: "get_task_rehearsal"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum23Key = (typeof scheduleManagementRequestOperationEnum23)[keyof typeof scheduleManagementRequestOperationEnum23];
-
-export const scheduleManagementRequestOperationEnum24 = {
-    get_rehearsal_permissions: "get_rehearsal_permissions"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum24Key = (typeof scheduleManagementRequestOperationEnum24)[keyof typeof scheduleManagementRequestOperationEnum24];
-
-export const scheduleManagementRequestOperationEnum25 = {
-    cancel_pending_rehearsal: "cancel_pending_rehearsal"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum25Key = (typeof scheduleManagementRequestOperationEnum25)[keyof typeof scheduleManagementRequestOperationEnum25];
-
-export const scheduleManagementRequestOperationEnum26 = {
-    rename: "rename"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum26Key = (typeof scheduleManagementRequestOperationEnum26)[keyof typeof scheduleManagementRequestOperationEnum26];
-
-export const scheduleManagementRequestOperationEnum27 = {
-    set_failure_threshold: "set_failure_threshold"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum27Key = (typeof scheduleManagementRequestOperationEnum27)[keyof typeof scheduleManagementRequestOperationEnum27];
-
-export const scheduleManagementRequestOperationEnum28 = {
-    change_prompt: "change_prompt"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum28Key = (typeof scheduleManagementRequestOperationEnum28)[keyof typeof scheduleManagementRequestOperationEnum28];
-
-export const scheduleManagementRequestOperationEnum29 = {
-    change_time: "change_time"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum29Key = (typeof scheduleManagementRequestOperationEnum29)[keyof typeof scheduleManagementRequestOperationEnum29];
-
-export const scheduleManagementRequestOperationEnum30 = {
-    pause: "pause"
-} as const;
-
-export type ScheduleManagementRequestOperationEnum30Key = (typeof scheduleManagementRequestOperationEnum30)[keyof typeof scheduleManagementRequestOperationEnum30];
-
-export const scheduleManagementRequestOperationEnum31 = {
     delete: "delete"
 } as const;
 
-export type ScheduleManagementRequestOperationEnum31Key = (typeof scheduleManagementRequestOperationEnum31)[keyof typeof scheduleManagementRequestOperationEnum31];
+export type ScheduleManagementRequestOperationEnum21Key = (typeof scheduleManagementRequestOperationEnum21)[keyof typeof scheduleManagementRequestOperationEnum21];
 
 export type ScheduleManagementRequest = ({
     /**
@@ -18007,9 +17311,14 @@ export type ScheduleManagementRequest = ({
     run_id: string;
 } | {
     /**
-     * @type integer, int64
+     * @type string,null
     */
-    expected_revision: number;
+    before?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    limit: number;
     /**
      * @type string
     */
@@ -18024,10 +17333,15 @@ export type ScheduleManagementRequest = ({
     */
     operation: ScheduleManagementRequestOperationEnum14Key;
     /**
-     * @type string
+     * @description Control-end draft intent. Identity, status, grants and leases are server-owned.
+     * @type object
     */
-    schedule_id: string;
+    task: ScheduleDraft;
 } | {
+    /**
+     * @type boolean
+    */
+    approve: boolean;
     /**
      * @type integer, int64
     */
@@ -18042,10 +17356,6 @@ export type ScheduleManagementRequest = ({
     schedule_id: string;
 } | {
     /**
-     * @type object
-    */
-    contract: TaskContract;
-    /**
      * @type integer, int64
     */
     expected_revision: number;
@@ -18053,147 +17363,6 @@ export type ScheduleManagementRequest = ({
      * @type string
     */
     operation: ScheduleManagementRequestOperationEnum16Key;
-} | {
-    /**
-     * @type string
-    */
-    client_publish_key: string;
-    /**
-     * @type integer, int64
-    */
-    contract_revision: number;
-    /**
-     * @type string
-    */
-    contract_sha256: string;
-    /**
-     * @type integer, int64
-    */
-    expected_revision: number;
-    /**
-     * @description Exclusive authorization expiry as UTC Unix milliseconds.
-     * @type integer,null, int64
-    */
-    expires_at?: number | null;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum17Key;
-    /**
-     * @type string
-    */
-    rehearsal_run_id: string;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-} | {
-    /**
-     * @type string,null
-    */
-    before?: string | null;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    limit: number;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum18Key;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-} | {
-    /**
-     * @description Control-end draft intent. Identity, status, grants and leases are server-owned.
-     * @type object
-    */
-    draft: ScheduleDraft;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum19Key;
-} | {
-    /**
-     * @type integer, int64
-    */
-    expected_revision: number;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum20Key;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-} | {
-    /**
-     * @type string
-    */
-    client_request_key: string;
-    /**
-     * @type integer, int64
-    */
-    expected_revision: number;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum21Key;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-} | {
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum22Key;
-    /**
-     * @type string
-    */
-    rehearsal_id: string;
-} | {
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum23Key;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-} | {
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum24Key;
-    /**
-     * @type string
-    */
-    rehearsal_id: string;
-} | {
-    /**
-     * @type integer, int64
-    */
-    expected_revision: number;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum25Key;
-    /**
-     * @type string
-    */
-    rehearsal_id: string;
-} | {
-    /**
-     * @type integer, int64
-    */
-    expected_revision: number;
-    /**
-     * @type string
-    */
-    operation: ScheduleManagementRequestOperationEnum26Key;
     /**
      * @type string
     */
@@ -18215,7 +17384,7 @@ export type ScheduleManagementRequest = ({
     /**
      * @type string
     */
-    operation: ScheduleManagementRequestOperationEnum27Key;
+    operation: ScheduleManagementRequestOperationEnum17Key;
     /**
      * @type string
     */
@@ -18228,7 +17397,7 @@ export type ScheduleManagementRequest = ({
     /**
      * @type string
     */
-    operation: ScheduleManagementRequestOperationEnum28Key;
+    operation: ScheduleManagementRequestOperationEnum18Key;
     /**
      * @type string
     */
@@ -18245,7 +17414,7 @@ export type ScheduleManagementRequest = ({
     /**
      * @type string
     */
-    operation: ScheduleManagementRequestOperationEnum29Key;
+    operation: ScheduleManagementRequestOperationEnum19Key;
     /**
      * @type string
     */
@@ -18263,7 +17432,7 @@ export type ScheduleManagementRequest = ({
     /**
      * @type string
     */
-    operation: ScheduleManagementRequestOperationEnum30Key;
+    operation: ScheduleManagementRequestOperationEnum20Key;
     /**
      * @type string
     */
@@ -18276,130 +17445,12 @@ export type ScheduleManagementRequest = ({
     /**
      * @type string
     */
-    operation: ScheduleManagementRequestOperationEnum31Key;
+    operation: ScheduleManagementRequestOperationEnum21Key;
     /**
      * @type string
     */
     schedule_id: string;
 });
-
-/**
- * @description Historical owner approval metadata; current dispatch policy is always rechecked.
-*/
-export type TaskAuthorizationView = {
-    /**
-     * @type string
-    */
-    approved_at: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    authorization_revision: number;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    contract_revision: number;
-    /**
-     * @type string,null
-    */
-    expires_at?: string | null;
-    /**
-     * @type string,null
-    */
-    revoked_at?: string | null;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    task_revision: number;
-};
-
-export const schedulePauseReasonEnum = {
-    user: "user",
-    consecutive_failures: "consecutive_failures",
-    unknown_side_effect: "unknown_side_effect",
-    authorization_invalid: "authorization_invalid",
-    schedule_upgrade_required: "schedule_upgrade_required"
-} as const;
-
-export type SchedulePauseReasonEnumKey = (typeof schedulePauseReasonEnum)[keyof typeof schedulePauseReasonEnum];
-
-export type SchedulePauseReason = SchedulePauseReasonEnumKey;
-
-/**
- * @description Deliberate projection: never serialize a database row or its authority snapshot.
-*/
-export type ScheduleView = {
-    /**
-     * @type string,null
-    */
-    active_run_id?: string | null;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    consecutive_failures: number;
-    /**
-     * @type string
-    */
-    created_at: string;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    failure_threshold: number;
-    /**
-     * @type string
-    */
-    kind: ScheduledTaskKind;
-    /**
-     * @type string,null
-    */
-    next_run_at?: string | null;
-    /**
-     * @type array
-    */
-    pause_reasons: SchedulePauseReason[];
-    /**
-     * @type string
-    */
-    prompt: string;
-    /**
-     * @type integer, int64
-    */
-    revision: number;
-    /**
-     * @type string
-    */
-    schedule_id: string;
-    /**
-     * @type object
-    */
-    spec: ScheduleSpec;
-    /**
-     * @type string
-    */
-    status: ScheduledTaskStatus;
-    /**
-     * @description Manager public device handle or OSS stable device audience; absent when\nthe original target is no longer accessible. Never a manager database ID.
-     * @type string,null
-    */
-    target_device_id?: string | null;
-    /**
-     * @type string
-    */
-    title: string;
-    /**
-     * @type array
-    */
-    upcoming_runs: string[];
-    /**
-     * @type string
-    */
-    updated_at: string;
-};
 
 export const scheduledRunIssueKindEnum = {
     agent: "agent"
@@ -18426,28 +17477,22 @@ export const scheduledRunIssueKindEnum4 = {
 export type ScheduledRunIssueKindEnum4Key = (typeof scheduledRunIssueKindEnum4)[keyof typeof scheduledRunIssueKindEnum4];
 
 export const scheduledRunIssueKindEnum5 = {
-    budget_policy_exceeded: "budget_policy_exceeded"
+    executor_interrupted: "executor_interrupted"
 } as const;
 
 export type ScheduledRunIssueKindEnum5Key = (typeof scheduledRunIssueKindEnum5)[keyof typeof scheduledRunIssueKindEnum5];
 
 export const scheduledRunIssueKindEnum6 = {
-    executor_interrupted: "executor_interrupted"
+    outcome_unknown: "outcome_unknown"
 } as const;
 
 export type ScheduledRunIssueKindEnum6Key = (typeof scheduledRunIssueKindEnum6)[keyof typeof scheduledRunIssueKindEnum6];
 
 export const scheduledRunIssueKindEnum7 = {
-    outcome_unknown: "outcome_unknown"
-} as const;
-
-export type ScheduledRunIssueKindEnum7Key = (typeof scheduledRunIssueKindEnum7)[keyof typeof scheduledRunIssueKindEnum7];
-
-export const scheduledRunIssueKindEnum8 = {
     unavailable: "unavailable"
 } as const;
 
-export type ScheduledRunIssueKindEnum8Key = (typeof scheduledRunIssueKindEnum8)[keyof typeof scheduledRunIssueKindEnum8];
+export type ScheduledRunIssueKindEnum7Key = (typeof scheduledRunIssueKindEnum7)[keyof typeof scheduledRunIssueKindEnum7];
 
 /**
  * @description Closed public reason categories; provider messages and internal error text stay private.
@@ -18491,11 +17536,6 @@ export type ScheduledRunIssue = ({
      * @type string
     */
     kind: ScheduledRunIssueKindEnum7Key;
-} | {
-    /**
-     * @type string
-    */
-    kind: ScheduledRunIssueKindEnum8Key;
 });
 
 export const scheduledRunSourceEnum = {
@@ -18593,6 +17633,90 @@ export type ScheduleTimeConverted = {
     spec: ScheduleSpec;
 };
 
+export const schedulePauseReasonEnum = {
+    user: "user",
+    consecutive_failures: "consecutive_failures",
+    unknown_side_effect: "unknown_side_effect",
+    schedule_upgrade_required: "schedule_upgrade_required"
+} as const;
+
+export type SchedulePauseReasonEnumKey = (typeof schedulePauseReasonEnum)[keyof typeof schedulePauseReasonEnum];
+
+export type SchedulePauseReason = SchedulePauseReasonEnumKey;
+
+/**
+ * @description Deliberate projection: never serialize a database row or its authority snapshot.
+*/
+export type ScheduleView = {
+    /**
+     * @type string,null
+    */
+    active_run_id?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    consecutive_failures: number;
+    /**
+     * @type string
+    */
+    created_at: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    failure_threshold: number;
+    /**
+     * @type string
+    */
+    kind: ScheduledTaskKind;
+    /**
+     * @type string,null
+    */
+    next_run_at?: string | null;
+    /**
+     * @type array
+    */
+    pause_reasons: SchedulePauseReason[];
+    /**
+     * @type string
+    */
+    prompt: string;
+    /**
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string
+    */
+    schedule_id: string;
+    /**
+     * @type object
+    */
+    spec: ScheduleSpec;
+    /**
+     * @type string
+    */
+    status: ScheduledTaskStatus;
+    /**
+     * @description Manager public device handle or OSS stable device audience; absent when\nthe original target is no longer accessible. Never a manager database ID.
+     * @type string,null
+    */
+    target_device_id?: string | null;
+    /**
+     * @type string
+    */
+    title: string;
+    /**
+     * @type array
+    */
+    upcoming_runs: string[];
+    /**
+     * @type string
+    */
+    updated_at: string;
+};
+
 export const scheduleManagementResponseResultEnum = {
     resume_sources: "resume_sources"
 } as const;
@@ -18600,58 +17724,34 @@ export const scheduleManagementResponseResultEnum = {
 export type ScheduleManagementResponseResultEnumKey = (typeof scheduleManagementResponseResultEnum)[keyof typeof scheduleManagementResponseResultEnum];
 
 export const scheduleManagementResponseResultEnum2 = {
-    task_contract: "task_contract"
+    runs: "runs"
 } as const;
 
 export type ScheduleManagementResponseResultEnum2Key = (typeof scheduleManagementResponseResultEnum2)[keyof typeof scheduleManagementResponseResultEnum2];
 
 export const scheduleManagementResponseResultEnum3 = {
-    runs: "runs"
+    converted_time: "converted_time"
 } as const;
 
 export type ScheduleManagementResponseResultEnum3Key = (typeof scheduleManagementResponseResultEnum3)[keyof typeof scheduleManagementResponseResultEnum3];
 
 export const scheduleManagementResponseResultEnum4 = {
-    task_rehearsal: "task_rehearsal"
+    search_results: "search_results"
 } as const;
 
 export type ScheduleManagementResponseResultEnum4Key = (typeof scheduleManagementResponseResultEnum4)[keyof typeof scheduleManagementResponseResultEnum4];
 
 export const scheduleManagementResponseResultEnum5 = {
-    rehearsal_permissions: "rehearsal_permissions"
+    list: "list"
 } as const;
 
 export type ScheduleManagementResponseResultEnum5Key = (typeof scheduleManagementResponseResultEnum5)[keyof typeof scheduleManagementResponseResultEnum5];
 
 export const scheduleManagementResponseResultEnum6 = {
-    rehearsal: "rehearsal"
-} as const;
-
-export type ScheduleManagementResponseResultEnum6Key = (typeof scheduleManagementResponseResultEnum6)[keyof typeof scheduleManagementResponseResultEnum6];
-
-export const scheduleManagementResponseResultEnum7 = {
-    converted_time: "converted_time"
-} as const;
-
-export type ScheduleManagementResponseResultEnum7Key = (typeof scheduleManagementResponseResultEnum7)[keyof typeof scheduleManagementResponseResultEnum7];
-
-export const scheduleManagementResponseResultEnum8 = {
-    search_results: "search_results"
-} as const;
-
-export type ScheduleManagementResponseResultEnum8Key = (typeof scheduleManagementResponseResultEnum8)[keyof typeof scheduleManagementResponseResultEnum8];
-
-export const scheduleManagementResponseResultEnum9 = {
-    list: "list"
-} as const;
-
-export type ScheduleManagementResponseResultEnum9Key = (typeof scheduleManagementResponseResultEnum9)[keyof typeof scheduleManagementResponseResultEnum9];
-
-export const scheduleManagementResponseResultEnum10 = {
     task: "task"
 } as const;
 
-export type ScheduleManagementResponseResultEnum10Key = (typeof scheduleManagementResponseResultEnum10)[keyof typeof scheduleManagementResponseResultEnum10];
+export type ScheduleManagementResponseResultEnum6Key = (typeof scheduleManagementResponseResultEnum6)[keyof typeof scheduleManagementResponseResultEnum6];
 
 export type ScheduleManagementResponse = ({
     /**
@@ -18668,28 +17768,6 @@ export type ScheduleManagementResponse = ({
     */
     sources: ResumeConversationSource[];
 } | {
-    authorization?: (null | TaskAuthorizationView);
-    contract?: (null | TaskContract);
-    /**
-     * @type string,null
-    */
-    contract_sha256?: string | null;
-    previous_contract?: (null | TaskContract);
-    /**
-     * @type string
-    */
-    result: ScheduleManagementResponseResultEnum2Key;
-    /**
-     * @description Deliberate projection: never serialize a database row or its authority snapshot.
-     * @type object
-    */
-    task: ScheduleView;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    task_revision: number;
-} | {
     /**
      * @type string,null
     */
@@ -18697,7 +17775,7 @@ export type ScheduleManagementResponse = ({
     /**
      * @type string
     */
-    result: ScheduleManagementResponseResultEnum3Key;
+    result: ScheduleManagementResponseResultEnum2Key;
     /**
      * @type array
     */
@@ -18707,53 +17785,6 @@ export type ScheduleManagementResponse = ({
     */
     schedule_id: string;
 } | {
-    rehearsal?: (null | RehearsalView);
-    /**
-     * @type string
-    */
-    result: ScheduleManagementResponseResultEnum4Key;
-    /**
-     * @description Deliberate projection: never serialize a database row or its authority snapshot.
-     * @type object
-    */
-    task: ScheduleView;
-} | {
-    /**
-     * @type array
-    */
-    observations: RehearsalPermissionObservation[];
-    /**
-     * @type string
-    */
-    rehearsal_id: string;
-    /**
-     * @type string
-    */
-    result: ScheduleManagementResponseResultEnum5Key;
-    /**
-     * @type array
-    */
-    unclassified_tool_call_ids: string[];
-    /**
-     * @type array
-    */
-    unconfirmed_tool_call_ids: string[];
-} | {
-    /**
-     * @description Only public conversation intent and frozen task text are exposed to the owner.
-     * @type object
-    */
-    rehearsal: RehearsalView;
-    /**
-     * @type string
-    */
-    result: ScheduleManagementResponseResultEnum6Key;
-    /**
-     * @description Deliberate projection: never serialize a database row or its authority snapshot.
-     * @type object
-    */
-    task: ScheduleView;
-} | {
     /**
      * @type object
     */
@@ -18761,7 +17792,7 @@ export type ScheduleManagementResponse = ({
     /**
      * @type string
     */
-    result: ScheduleManagementResponseResultEnum7Key;
+    result: ScheduleManagementResponseResultEnum3Key;
     /**
      * @type array
     */
@@ -18779,7 +17810,7 @@ export type ScheduleManagementResponse = ({
     /**
      * @type string
     */
-    result: ScheduleManagementResponseResultEnum8Key;
+    result: ScheduleManagementResponseResultEnum4Key;
     /**
      * @type array
     */
@@ -18797,7 +17828,7 @@ export type ScheduleManagementResponse = ({
     /**
      * @type string
     */
-    result: ScheduleManagementResponseResultEnum9Key;
+    result: ScheduleManagementResponseResultEnum5Key;
     /**
      * @type array
     */
@@ -18806,7 +17837,7 @@ export type ScheduleManagementResponse = ({
     /**
      * @type string
     */
-    result: ScheduleManagementResponseResultEnum10Key;
+    result: ScheduleManagementResponseResultEnum6Key;
     /**
      * @description Deliberate projection: never serialize a database row or its authority snapshot.
      * @type object
@@ -19705,6 +18736,7 @@ export type UpdateScheduleBudgetPolicy = {
     */
     expected_revision: number;
     /**
+     * @description Per-run and per-day limits for scheduled tasks.
      * @type object
     */
     maximum: TaskBudget;

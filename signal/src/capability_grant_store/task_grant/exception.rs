@@ -22,7 +22,7 @@ pub(super) async fn consume(
     checked.now_unix_ms = u64::try_from(now).map_err(|_| invalid())?;
     for row in rows {
         let mut grant = crate::capability_grant_store::decode_grant(&row)?;
-        if !desk_diagnose_core::schedule::contract::exception::matches_one_call_approval(
+        if !desk_diagnose_core::schedule::run_approval::matches_one_call_approval(
             session, &grant, &checked,
         ) {
             continue;

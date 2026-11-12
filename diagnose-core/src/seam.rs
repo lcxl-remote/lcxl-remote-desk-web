@@ -1499,8 +1499,8 @@ pub trait SessionSeam {
         crate::permission_tools::DEFAULT_APPLICATION_SCOPE_USES
     }
 
-    /// Validate a scheduled-task exception against current frozen authority.
-    /// Runtimes without task admission must not expose an expanding approval card.
+    /// Validate a scheduled run's per-call approval request against current run
+    /// authority. Runtimes without run admission must not expose an approval card.
     async fn validate_task_permission_request(
         &self,
         session: &PersistedAgentSession,

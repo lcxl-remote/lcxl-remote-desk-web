@@ -4222,14 +4222,11 @@ mod tests {
         let store = SignalCapabilityGrantStore::new(db.clone());
         let mut task = grant(1);
         task.schema_version = CAPABILITY_GRANT_SCHEMA_VERSION;
-        task.issued_by = CapabilityGrantIssuer::TaskAuthorization(TaskGrantProvenance {
+        task.issued_by = CapabilityGrantIssuer::ScheduledRun(TaskGrantProvenance {
             schedule_id: "schedule-1".into(),
             scheduled_run_id: "scheduled-run-1".into(),
             task_revision: 1,
-            contract_revision: 2,
-            contract_sha256: "a".repeat(64),
-            authorization_id: "authorization-1".into(),
-            authorization_revision: 3,
+            policy_revision: 3,
             recovery_epoch: 4,
         });
         let row = store.issue(&task).await.unwrap();
@@ -4245,8 +4242,8 @@ mod tests {
             vec![task.clone()]
         );
         let mut substituted = task.clone();
-        if let CapabilityGrantIssuer::TaskAuthorization(parent) = &mut substituted.issued_by {
-            parent.authorization_revision += 1;
+        if let CapabilityGrantIssuer::ScheduledRun(parent) = &mut substituted.issued_by {
+            parent.policy_revision += 1;
         }
         assert!(store.issue(&substituted).await.is_err());
         agent_capability_grant::Entity::update_many()

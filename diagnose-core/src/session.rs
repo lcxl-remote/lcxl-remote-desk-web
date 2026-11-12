@@ -433,8 +433,9 @@ impl TriggerOrigin {
     }
     /// A permission decision can lead to another legitimate request under the
     /// same owner task, as can a continuation of that task after its background
-    /// result. Interpretation and schedule origins never inherit the session's
-    /// AI-review delegation for new requests.
+    /// result. Scheduled runs may use AI review for each action but never the
+    /// owner's no-review mode. Interpretation-only origins never inherit the
+    /// session's AI-review delegation for new requests.
     pub fn allows_delegated_review(self) -> bool {
         matches!(
             self,
@@ -442,6 +443,8 @@ impl TriggerOrigin {
                 | TriggerOrigin::IssueSubscription
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::WorkContinuation
+                | TriggerOrigin::ScheduledContinuation
+                | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::DelegatedTask
                 | TriggerOrigin::SubAgentCompletion
@@ -453,7 +456,7 @@ impl TriggerOrigin {
     /// still require current policy and exact grants. Interpretation-only completions
     /// cannot start executions, and work continuations stay under the automation
     /// Direct tool calls without a matching grant become permission proposals.
-    /// Published tasks instead derive per-call grants from their task contract.
+    /// Scheduled tasks instead pause their run for a single-call approval.
     pub fn uses_call_time_approval(self) -> bool {
         self != TriggerOrigin::ScheduledTask
     }
@@ -4434,14 +4437,15 @@ mod tests {
     }
 
     #[test]
-    fn delegated_review_continues_after_a_permission_decision_but_not_an_automation_trigger() {
+    fn delegated_review_covers_scheduled_runs_but_not_an_automation_trigger() {
         assert!(TriggerOrigin::User.allows_delegated_review());
         assert!(TriggerOrigin::PermissionDecision.allows_delegated_review());
         assert!(TriggerOrigin::WorkContinuation.allows_delegated_review());
         assert!(TriggerOrigin::WorkContinuation.allows_new_mutation());
         assert!(TriggerOrigin::GoalContinuation.allows_delegated_review());
-        assert!(!TriggerOrigin::ScheduledContinuation.allows_delegated_review());
-        assert!(!TriggerOrigin::ScheduledTask.allows_delegated_review());
+        // Scheduled runs review each action; they never inherit no-review.
+        assert!(TriggerOrigin::ScheduledContinuation.allows_delegated_review());
+        assert!(TriggerOrigin::ScheduledTask.allows_delegated_review());
         assert!(
             !TriggerOrigin::WorkCompletion {
                 kind: WorkKind::AgentExec

@@ -70,9 +70,6 @@ pub use scheduled::resume_scheduled_turn;
 mod scheduled_permission;
 pub use scheduled_permission::{ClaimedScheduledPermission, claim_scheduled_permission};
 
-mod rehearsal;
-pub use rehearsal::run_rehearsal_turn;
-
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUSY_FOLLOWUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
@@ -896,48 +893,6 @@ async fn run_incoming_turn(
         ask.client_message_id,
         ask.conversation_id
     );
-    let reserved = crate::schedule_store::ScheduleStore::new(db.clone())
-        .rehearsal_for_input(actor_user_id, &target_device_id, &ask)
-        .await;
-    match reserved {
-        Ok(Some(row)) => {
-            if let Err(error) = rehearsal::run_rehearsal_turn(
-                connections.clone(),
-                db,
-                request_id.clone(),
-                browser_connection_id.clone(),
-                target_connection_id,
-                actor_user_id,
-                target_device_id,
-                &row.rehearsal_id,
-                ask,
-            )
-            .await
-            {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(&request_id, 0, error),
-                )
-                .await;
-            }
-            return;
-        }
-        Err(_) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(
-                    &request_id,
-                    0,
-                    transport_error("rehearsal input is unavailable or changed"),
-                ),
-            )
-            .await;
-            return;
-        }
-        Ok(None) => {}
-    }
     run_turn_inner_with_queue(
         connections,
         db,
@@ -1585,10 +1540,6 @@ async fn prepare_composed_turn(
             } else {
                 client_conversation_id
             };
-            let rehearsal_conversation = client_conversation_id
-                .as_deref()
-                .filter(|id| id.starts_with("rehearsal_"))
-                .map(|_| conversation_id.clone());
             let subject = crate::agent_run_event_store::InputSubject {
                 run_id: &conversation_id,
                 actor_id: &actor_id,
@@ -2179,15 +2130,25 @@ async fn prepare_composed_turn(
                         &conversation_id,
                         export_source,
                     );
-                    if let Some(fresh) = scheduled.as_ref().and_then(|resume| resume.fresh.as_ref())
+                    // A scheduled run reads back the tools approved within this run.
+                    if scheduled
+                        .as_ref()
+                        .is_some_and(|resume| resume.fresh.is_some())
+                        && let Some(session) = snapshot.as_ref()
                     {
                         selected_source_tools.extend(
-                            fresh
-                                .contract
-                                .contract()
-                                .permissions
+                            session
+                                .permission_requests
                                 .iter()
-                                .map(|rule| rule.tool_name.clone()),
+                                .filter(|request| {
+                                    matches!(
+                                        request.state,
+                                        desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
+                                            | desk_diagnose_core::dynamic_run::PermissionRequestState::PartiallyApproved
+                                    )
+                                })
+                                .flat_map(|request| &request.items)
+                                .map(|item| item.tool_name.clone()),
                         );
                     }
                     if let Some(resume) = scheduled.as_mut()
@@ -2417,8 +2378,9 @@ async fn prepare_composed_turn(
                 || original.tool_names.iter().any(|name| name == tool.name())
         });
                             }
-                            if let Some(fresh) =
-                                scheduled.as_ref().and_then(|resume| resume.fresh.as_ref())
+                            if scheduled
+                                .as_ref()
+                                .is_some_and(|resume| resume.fresh.is_some())
                             {
                                 registry = filter_model_compatible_tools(
                                     &callable,
@@ -2426,13 +2388,6 @@ async fn prepare_composed_turn(
                                         image_input: config.supports_image_input,
                                     },
                                 );
-                                registry.retain(|tool| {
-                                    fresh::contains_tool(
-                                        &fresh.contract,
-                                        &provider_registry,
-                                        tool.name(),
-                                    )
-                                });
                             }
                             let capability_catalog_metrics =
                                 desk_diagnose_core::permission_tools::capability_catalog_metrics(
@@ -3275,13 +3230,6 @@ async fn prepare_composed_turn(
                     // this grant-triggered resume, so no retry is appropriate.
                 }
                 Ok(outcome) => {
-                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_answer(
-                        &db,
-                        actor_user_id,
-                        rehearsal_conversation.as_deref(),
-                        &outcome,
-                    )
-                    .await }).await?;
                     sink.finish_outcome(&outcome);
                 }
                 Err(error) => {
@@ -3291,8 +3239,6 @@ async fn prepare_composed_turn(
                         error.retryable,
                         error.message
                     );
-                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
-                        .await }).await;
                     if emitted.get() {
                         sink.error(error);
                     }
@@ -3567,13 +3513,6 @@ async fn prepare_composed_turn(
                     }
                 }
                 Ok(outcome) => {
-                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_answer(
-                        &db,
-                        actor_user_id,
-                        rehearsal_conversation.as_deref(),
-                        &outcome,
-                    )
-                    .await }).await?;
                     sink.finish_outcome(&outcome);
                     break;
                 }
@@ -3584,8 +3523,6 @@ async fn prepare_composed_turn(
                         error.retryable,
                         error.message
                     );
-                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
-                        .await }).await;
                     sink.error(error);
                     break;
                 }
@@ -3616,7 +3553,6 @@ mod tests {
     mod live_subagents;
     mod original_input;
     mod permission_object;
-    mod rehearsal_entry;
     mod reply_history;
     mod scheduled;
     mod work_continuation;
@@ -4390,31 +4326,7 @@ expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_fac
         )
         .await
         .unwrap();
-        assert_eq!(observed.inputs, lineage);
-        assert_eq!(
-            observed.export_authorization_id,
-            receipt.export_authorization_id
-        );
-        assert_eq!(observed.output_message_id, stored_message.message_id);
-        assert_eq!(
-            crate::model_egress_store::SignalModelEgressStore::find_output_evidence_on(
-                &db,
-                &receipt.export_authorization_id,
-                &stored_message
-            )
-            .await
-            .unwrap(),
-            observed
-        );
-        assert!(
-            crate::model_egress_store::SignalModelEgressStore::find_output_evidence_on(
-                &db,
-                "another-owner-export",
-                &stored_message
-            )
-            .await
-            .is_err()
-        );
+        assert_eq!(observed, lineage);
 
         assert!(
             crate::model_egress_store::SignalModelEgressStore::read_output_evidence_on(
@@ -4433,44 +4345,6 @@ expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_fac
                 &receipt.receipt_id,
                 &receipt.export_authorization_id,
                 2,
-                &stored_message,
-            )
-            .await
-            .is_err()
-        );
-        stored_message.turn_id = Some("initial-turn".into());
-        history.conversation.push(stored_message.clone());
-        history.current_request_id = Some("later-transport-request".into());
-        assert_eq!(
-            crate::model_egress_store::SignalModelEgressStore::find_rehearsal_output_evidence_on(
-                &db,
-                &history,
-                "user-message-1",
-                &stored_message,
-            )
-            .await
-            .unwrap(),
-            observed
-        );
-        let mut wrong = history.clone();
-        wrong.actor_id = "2".into();
-        assert!(
-            crate::model_egress_store::SignalModelEgressStore::find_rehearsal_output_evidence_on(
-                &db,
-                &wrong,
-                "user-message-1",
-                &stored_message,
-            )
-            .await
-            .is_err()
-        );
-        wrong = history.clone();
-        wrong.conversation.push(stored_message.clone());
-        assert!(
-            crate::model_egress_store::SignalModelEgressStore::find_rehearsal_output_evidence_on(
-                &db,
-                &wrong,
-                "user-message-1",
                 &stored_message,
             )
             .await

@@ -38,8 +38,9 @@ pub struct Model {
     pub retrieval_consent_json: Option<String>,
     /// Native prompt copy policy, frozen into each occurrence's task snapshot.
     pub prompt_retention_json: Option<String>,
-    pub contract_revision: Option<i64>,
-    pub authorization_revision: Option<i64>,
+    /// The conversation whose AI proposal awaits a decision; used only to write
+    /// the decision back. Continuations use `source_conversation_id` instead.
+    pub proposal_conversation_id: Option<String>,
     /// Validated shared FailureState, including its recovery epoch and blockers.
     pub failure_state_json: String,
     /// One slot fences calendar runs, manual runs, and pending approval.

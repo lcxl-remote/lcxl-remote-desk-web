@@ -18,43 +18,6 @@ pub struct ObservedCapabilityAuthority {
 }
 
 impl ObservedCapabilityAuthority {
-    /// Public history excludes grant handles, session IDs, input hashes and data envelopes.
-    pub fn review_observation(
-        &self,
-        tool_call_id: String,
-        issuer: &desk_agent_protocol::capability_grant::CapabilityGrantIssuer,
-        completed_at: i64,
-    ) -> Option<desk_agent_protocol::schedule::management::RehearsalPermissionObservation> {
-        use desk_agent_protocol::{
-            capability_grant::CapabilityGrantIssuer,
-            schedule::management::{RehearsalApprovalSource, RehearsalPermissionObservation},
-        };
-        let approval_source = match issuer {
-            CapabilityGrantIssuer::PolicyAuto => RehearsalApprovalSource::PolicyAuto,
-            CapabilityGrantIssuer::UserDecision => RehearsalApprovalSource::UserDecision,
-            CapabilityGrantIssuer::TaskAuthorization(_)
-            | CapabilityGrantIssuer::AiApproval(_)
-            | CapabilityGrantIssuer::OwnerNoReview(_) => {
-                return None;
-            }
-        };
-        let at = chrono::DateTime::from_timestamp_millis(completed_at)?;
-        Some(RehearsalPermissionObservation {
-            tool_call_id,
-            provider_id: self.provider_id.clone(),
-            capability_id: self.capability_id.clone(),
-            tool_name: self.tool_name.clone(),
-            tool_schema_version: self.tool_schema_version,
-            effect: self.effect,
-            risk_tier: self.risk_tier,
-            resources: self.resources.clone(),
-            operations: self.operations.clone(),
-            export_destinations: self.export_destinations.clone(),
-            approval_source,
-            completed_at: at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        })
-    }
-
     pub fn from_call(call: &crate::capability_grant::CapabilityGrantCall<'_>) -> Self {
         Self {
             target_session_id: call.target_session_id.map(str::to_owned),

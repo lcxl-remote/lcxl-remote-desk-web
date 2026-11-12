@@ -933,7 +933,7 @@ mod tests {
                     .contains(&exported_id(&authorized, &owner))
             );
         }
-        for invalid in 0..4 {
+        for invalid in 0..3 {
             let mut altered = session.clone();
             match invalid {
                 0 => {
@@ -944,15 +944,6 @@ mod tests {
                 }
                 1 => altered.actor_id = "other-owner".into(),
                 2 => altered.device_id = "other-device".into(),
-                3 => {
-                    let AgentRole::SubAgent { binding } = &mut altered.agent_role else {
-                        unreachable!()
-                    };
-                    binding.source = DelegationSource::ScheduledOccurrence {
-                        schedule_id: "schedule".into(),
-                        occurrence_id: "occurrence".into(),
-                    };
-                }
                 _ => unreachable!(),
             }
             assert!(

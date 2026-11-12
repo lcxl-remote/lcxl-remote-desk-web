@@ -137,7 +137,7 @@ impl PendingDirectoryUpdate {
             record.proposal.request_id == *request_id
                 && matches!(
                     record.proposal.source,
-                    DirectoryConsentSource::ModelProposal | DirectoryConsentSource::TaskContract
+                    DirectoryConsentSource::ModelProposal
                 )
         });
         Self {
@@ -715,7 +715,6 @@ mod tests {
         for source in [
             DirectoryConsentSource::ModelProposal,
             DirectoryConsentSource::OwnerSelection,
-            DirectoryConsentSource::TaskContract,
         ] {
             for revoke in [false, true] {
                 let mut session = crate::session::PersistedAgentSession::new(

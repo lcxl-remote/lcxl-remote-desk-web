@@ -10,7 +10,7 @@ vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reac
 const transport = vi.hoisted(() => ({ subscriber: (() => {}) as SignalingSubscriber, send: vi.fn(), cancel: vi.fn() }));
 vi.mock('@/features/desk/use-desk-signaling', () => ({ useDeskSignaling: () => ({ isConnected: true, subscribe, sendTracked: transport.send, cancelQueued: transport.cancel }) }));
 function subscribe(callback: SignalingSubscriber) { transport.subscriber = callback; return () => {}; }
-const task = { schedule_id: 'task-1', target_device_id: 'device-1', kind: 'fresh_task', title: 'Original', prompt: 'Report status', status: 'draft', revision: 1, spec: { schema_version: 1, rule: { kind: 'daily', utc_time: '06:00:00' } }, next_run_at: null, active_run_id: null, pause_reasons: [], upcoming_runs: [], consecutive_failures: 0, failure_threshold: 3, created_at: '2026-09-06T00:00:00Z', updated_at: '2026-09-06T00:00:00Z' };
+const task = { schedule_id: 'task-1', target_device_id: 'device-1', kind: 'fresh_task', title: 'Original', prompt: 'Report status', status: 'active', revision: 1, spec: { schema_version: 1, rule: { kind: 'daily', utc_time: '06:00:00' } }, next_run_at: null, active_run_id: null, pause_reasons: [], upcoming_runs: [], consecutive_failures: 0, failure_threshold: 3, created_at: '2026-09-06T00:00:00Z', updated_at: '2026-09-06T00:00:00Z' };
 let storedTasks = [task];
 function respond(request: SendTrackedOptions, data: unknown) {
     const mutation = data as { result?: string; task?: typeof task };
@@ -73,8 +73,7 @@ describe('scheduled task management page', () => {
                     : { schema_version: 1, rule: { kind: 'once', at } };
                 queueMicrotask(() => respond(request, { result: 'converted_time', upcoming_runs: ['2027-01-01T22:00:00Z'], conversion: { conversion_version: '1', offset_seconds: -28800, spec } }));
             }
-            if (request.data.operation === 'create_draft') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 3 } }));
-            if (request.data.operation === 'activate_conversation_resume') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 4 } }));
+            if (request.data.operation === 'create_task') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 3 } }));
             return { requestId: request.requestId!, disposition: 'sent' };
         });
         render(<MemoryRouter initialEntries={[selectable ? '/schedules?resume_conversation=chat-1&resume_devices=device-1,device-2&resume_revision=7' : '/schedules?resume_conversation=chat-1&resume_device=device-1&resume_revision=7']}><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }, { id: 'device-2', name: 'Mac' }, { id: 'unselected', name: 'Other device' }]} /></MemoryRouter>);
@@ -98,10 +97,10 @@ describe('scheduled task management page', () => {
             expect(operations().filter(operation => operation !== 'search')).toEqual(['convert_time', 'convert_time']);
             fireEvent.click(screen.getByRole('button', { name: 'Confirm time and save' }));
         }
-        await waitFor(() => expect(operations()).toContain('create_draft'));
+        await waitFor(() => expect(operations()).toContain('create_task'));
         expect(operations().filter(operation => operation !== 'search')).toEqual(preview === 'changed'
-            ? ['convert_time', 'convert_time', 'convert_time', 'create_draft'] : ['convert_time', 'convert_time', 'create_draft']);
-        expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_draft')![0].data.draft).toMatchObject({ kind: 'conversation_resume', target_device_id: selectable ? 'device-2' : 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
+            ? ['convert_time', 'convert_time', 'convert_time', 'create_task'] : ['convert_time', 'convert_time', 'create_task']);
+        expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_task')![0].data.task).toMatchObject({ kind: 'conversation_resume', target_device_id: selectable ? 'device-2' : 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
         await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable scheduled continuation' })).not.toBeInTheDocument());
     });
 
@@ -156,17 +155,12 @@ describe('scheduled task management page', () => {
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
-    it('opens guided run history by task without starting or publishing anything', async () => {
-        render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
+    it('opens a pending AI proposal for a decision from its task card', async () => {
+        storedTasks = [{ ...task, status: 'pending_review' }];
+        render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /><Location /></MemoryRouter>);
         await screen.findByText('Original');
-        fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-        fireEvent.click(screen.getByRole('button', { name: 'Guided run and permissions' }));
-        await waitFor(() => expect(operations()).toEqual(['search', 'get_task_rehearsal']));
-        const request = transport.send.mock.calls[1][0];
-        expect(request.data.schedule_id).toBe('task-1');
-        await act(async () => respond(request, { result: 'task_rehearsal', task, rehearsal: null }));
-        expect(within(screen.getByRole('dialog')).getByText('No guided run has been recorded for this task.')).toBeInTheDocument();
-        expect(operations()).toEqual(['search', 'get_task_rehearsal']);
+        fireEvent.click(screen.getByRole('button', { name: 'Review task' }));
+        expect(screen.getByTestId('location')).toHaveTextContent('review_task=task-1');
     });
 
     it('shows a rejected edit inside the dialog and retries the same request', async () => {
@@ -215,12 +209,12 @@ describe('scheduled task management page', () => {
         await act(async () => respond(request, { result: 'task', task: { ...task, title: 'New title', revision: 2 } }));
         expect(await screen.findByText('New title')).toBeInTheDocument();
     });
-    it('closing an editor during time conversion prevents a late draft creation', async () => {
+    it('closing an editor during time conversion prevents a late task creation', async () => {
         render(<MemoryRouter><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
         await screen.findByText('Original');
         fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-        fireEvent.click(screen.getByRole('button', { name: 'New automation draft' }));
-        fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New draft' } });
+        fireEvent.click(screen.getByRole('button', { name: 'New automation task' }));
+        fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New task' } });
         fireEvent.change(screen.getByLabelText('What should this task do?'), { target: { value: 'Read status' } });
         fireEvent.change(screen.getByLabelText('Reference / start date'), { target: { value: '2026-09-07' } });
         fireEvent.change(screen.getByLabelText('Time'), { target: { value: '14:00' } });

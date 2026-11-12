@@ -131,7 +131,7 @@ describe('assistant send shortcuts', () => {
         expect(onSubmit).not.toHaveBeenCalled();
     });
 
-    it('can submit a fixed rehearsal prompt when sending is available', () => {
+    it('can submit a read-only prompt when sending is available', () => {
         const { input, onSubmit } = mount({ readOnly: true });
         fireEvent.keyDown(input, { key: 'Enter' });
         expect(onSubmit).toHaveBeenCalledOnce();

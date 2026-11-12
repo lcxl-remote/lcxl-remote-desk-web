@@ -148,6 +148,7 @@ impl<'a> ReviewModelView<'a> {
             ApprovalSource::PermissionItem { .. } => "permission_item",
             ApprovalSource::DirectoryProposal { .. } => "directory_proposal",
             ApprovalSource::GoalProposal { .. } => "goal_proposal",
+            ApprovalSource::ScheduleProposal { .. } => "schedule_proposal",
             ApprovalSource::OssCommand { .. } | ApprovalSource::ManagerCommand { .. } => "command",
             ApprovalSource::ManagerAction { .. } => "action",
             ApprovalSource::ConcreteCall { .. } => "concrete_call",
@@ -166,6 +167,11 @@ impl<'a> ReviewModelView<'a> {
                 action = json!({"operation":if proposal["target_goal_id"].is_null(){"create_goal"}else{"revise_goal"},
                     "goal_text":proposal["goal_text"],"continues_previous_goal":!proposal["previous_completed_goal_id"].is_null(),
                     "budget_limits":action["budget_policy"]["limits"],"device_actions_authorized":false});
+            }
+            ApprovalSource::ScheduleProposal { .. } => {
+                let proposal = &action["schedule_proposal"];
+                action = json!({"operation":"enable_scheduled_task","title":proposal["title"],
+                    "prompt":proposal["prompt"],"spec":proposal["spec"],"device_actions_authorized":false});
             }
             ApprovalSource::PermissionItem { .. } => permission_action(&mut action),
             ApprovalSource::DirectoryProposal { .. } => {

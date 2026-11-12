@@ -733,7 +733,6 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../signal-facade/tests/fixtures/model_metrics_scheduled_permissions.rs"
     ));
-    use crate::entity::agent_task_authorization as authorization;
     use desk_agent_protocol::ai_assistant::subagent::{AiAssistantStopControl, SubAgentStopChoice};
 
     async fn original_run(
@@ -890,40 +889,6 @@ mod tests {
         assert_eq!(
             original_run(&db, &parent.conversation_id).await.status,
             "cancelled"
-        );
-    }
-
-    #[tokio::test]
-    async fn revoked_publication_finishes_the_wait_without_recording_an_owner_cancellation() {
-        let (db, schedule, _, parent, _) = children::scheduled_test_wait_fixture().await;
-        let work = original_run(&db, &parent.conversation_id).await;
-        authorization::Entity::update_many()
-            .set(authorization::ActiveModel {
-                revoked_at: Set(Some(chrono::Utc::now().timestamp_millis())),
-                revoked_reason: Set(Some("owner_revoked".into())),
-                ..Default::default()
-            })
-            .filter(authorization::Column::ScheduleId.eq(&work.schedule_id))
-            .exec(&db)
-            .await
-            .unwrap();
-        assert!(
-            schedule
-                .settle_fresh_children_wait(&parent.conversation_id)
-                .await
-                .unwrap()
-        );
-        let after = original_run(&db, &parent.conversation_id).await;
-        assert_eq!(after.status, "failed");
-        assert_eq!(after.error_kind.as_deref(), Some("source_withdrawn"));
-        assert!(after.cancel_requested_at.is_none());
-        assert!(
-            schedule
-                .read(1, &after.schedule_id)
-                .await
-                .unwrap()
-                .active_run_id
-                .is_none()
         );
     }
 

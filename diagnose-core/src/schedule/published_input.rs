@@ -1,6 +1,6 @@
 //! Published task input keeps its occurrence identity instead of impersonating a new owner message.
 
-use super::contract::ValidatedTaskContract;
+use super::definition::ScheduledTaskDefinition;
 use crate::ai_assistant::{
     source::{owner_text_policy, validate_history_dependencies, validate_policy},
     source_registry::NativeDerivedInputPolicy,
@@ -78,7 +78,7 @@ impl TaskPromptRetention {
 }
 
 /// Shape registration is not native authority. The host must reconstruct the
-/// full label from the original owner-bound occurrence and published contract.
+/// full label from the original owner-bound occurrence and its task definition.
 pub fn is_published_input_label(source: &DataEnvelope) -> bool {
     let Some(message_id) = source.provenance.source_object_id.as_deref() else {
         return false;
@@ -112,12 +112,12 @@ pub fn is_published_input_label(source: &DataEnvelope) -> bool {
                 && media_type == "text/plain;charset=utf-8")
 }
 
-/// The caller verifies current publication and occurrence authority. This label
+/// The caller verifies current occurrence authority. This label
 /// records provenance and the selected model; it grants no tool permission.
 pub fn model_bound_published_input(
     run_id: &str,
     text: &str,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     destination: DestinationIdentity,
 ) -> Result<ChatMessage, AgentError> {
     let denied = || crate::subagent::invalid("invalid published task input binding");
@@ -131,9 +131,13 @@ pub fn model_bound_published_input(
         return Err(denied());
     }
     destination.validate().map_err(|_| denied())?;
-    let identity =
-        serde_json::to_vec(&(run_id, &contract.contract().schedule_id, contract.digest()))
-            .map_err(|_| denied())?;
+    let identity = serde_json::to_vec(&(
+        run_id,
+        &definition.schedule_id,
+        definition.task_revision,
+        definition.policy_revision,
+    ))
+    .map_err(|_| denied())?;
     let key = format!("{:x}", Sha256::digest(identity));
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
@@ -168,11 +172,11 @@ pub fn model_bound_published_input(
 pub fn validate_published_input(
     message: &ChatMessage,
     run_id: &str,
-    contract: &ValidatedTaskContract,
+    definition: &ScheduledTaskDefinition,
     destination: &DestinationIdentity,
 ) -> Result<(), AgentError> {
     let expected =
-        model_bound_published_input(run_id, &message.text, contract, destination.clone())?;
+        model_bound_published_input(run_id, &message.text, definition, destination.clone())?;
     if message != &expected {
         return Err(crate::subagent::invalid(
             "published task input provenance changed",

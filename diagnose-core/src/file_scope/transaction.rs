@@ -221,12 +221,10 @@ impl FileScopeUpdate {
                     return Err(FileScopeError::RequestConflict);
                 }
                 let valid_source = match &self.mutation {
-                    FileScopeMutation::Select { .. } => matches!(
-                        proposal.source,
-                        DirectoryConsentSource::OwnerSelection
-                            | DirectoryConsentSource::TaskContract
-                    ),
-                    _ => proposal.source != DirectoryConsentSource::TaskContract,
+                    FileScopeMutation::Select { .. } => {
+                        proposal.source == DirectoryConsentSource::OwnerSelection
+                    }
+                    _ => true,
                 };
                 if !valid_source {
                     return Err(FileScopeError::InvalidProposal);
@@ -282,13 +280,6 @@ pub fn prepare(
         && !session.admits_assistant_device(&update.subject.device_id)
     {
         return Err(FileScopeError::WrongSubject);
-    }
-    if matches!(&update.mutation, FileScopeMutation::Select { proposal }
-        if proposal.source == DirectoryConsentSource::TaskContract)
-        && (session.trigger_origin != crate::session::TriggerOrigin::ScheduledTask
-            || !session.turn_state.is_active())
-    {
-        return Err(FileScopeError::InvalidProposal);
     }
     let mut next = session.clone();
     // The immutable ledger must have been checked by the caller first. A

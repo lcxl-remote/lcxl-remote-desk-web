@@ -296,7 +296,7 @@ pub fn is_capability_grant_candidate(
     call: &CapabilityGrantCall<'_>,
 ) -> bool {
     let (task, approval, no_review) = match &grant.issued_by {
-        CapabilityGrantIssuer::TaskAuthorization(parent) => (Some(parent), None, None),
+        CapabilityGrantIssuer::ScheduledRun(parent) => (Some(parent), None, None),
         CapabilityGrantIssuer::AiApproval(parent) => (None, Some(parent), None),
         CapabilityGrantIssuer::OwnerNoReview(parent) => (None, None, Some(parent)),
         CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => {
@@ -381,7 +381,7 @@ fn match_capability_grant_inner(
     }
     match &grant.issued_by {
         CapabilityGrantIssuer::OwnerNoReview(_) => {}
-        CapabilityGrantIssuer::TaskAuthorization(parent) => {
+        CapabilityGrantIssuer::ScheduledRun(parent) => {
             if current_task != Some(parent) || current_approval.is_some() {
                 return Err(GrantMismatch::TaskAuthorization);
             }
@@ -744,10 +744,7 @@ mod tests {
             schedule_id: "schedule-1".into(),
             scheduled_run_id: "scheduled-run-1".into(),
             task_revision: 1,
-            contract_revision: 2,
-            contract_sha256: digest('c'),
-            authorization_id: "authorization-1".into(),
-            authorization_revision: 3,
+            policy_revision: 3,
             recovery_epoch: 4,
         }
     }
@@ -763,7 +760,7 @@ mod tests {
         let parent = task_parent();
         let mut granted = grant();
         granted.schema_version = CAPABILITY_GRANT_SCHEMA_VERSION;
-        granted.issued_by = CapabilityGrantIssuer::TaskAuthorization(parent.clone());
+        granted.issued_by = CapabilityGrantIssuer::ScheduledRun(parent.clone());
         assert_eq!(
             match_capability_grant(&granted, &current_call),
             Err(GrantMismatch::TaskAuthorization)
@@ -777,7 +774,7 @@ mod tests {
             Ok(())
         );
         let mut stale = parent.clone();
-        stale.authorization_revision += 1;
+        stale.policy_revision += 1;
         assert_eq!(
             match_task_capability_grant(&granted, &current_call, &stale),
             Err(GrantMismatch::TaskAuthorization)
@@ -875,7 +872,7 @@ mod tests {
         for issuer in [
             CapabilityGrantIssuer::PolicyAuto,
             CapabilityGrantIssuer::UserDecision,
-            CapabilityGrantIssuer::TaskAuthorization(task_parent()),
+            CapabilityGrantIssuer::ScheduledRun(task_parent()),
             CapabilityGrantIssuer::AiApproval(AiApprovalGrantProvenance {
                 delegation_id: "delegation-1".into(),
                 delegation_revision: 1,

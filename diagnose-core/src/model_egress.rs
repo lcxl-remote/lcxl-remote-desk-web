@@ -1302,48 +1302,6 @@ mod tests {
         let derived = policy
             .derive_model_output_envelope(&turn, &authorized.input_envelopes)
             .unwrap();
-        use crate::schedule::source_graph::{
-            TaskSourceAuthority, TaskSourceBinding, resolve_task_sources,
-        };
-        let mut nodes = inputs.clone();
-        let read = ModelInputLineage {
-            public_system_prompt: false,
-            envelope_id: "read-envelope".into(),
-            size_bytes: 1,
-            source_provider_id: inputs[2].source_provider_id.clone(),
-            source_tool_name: inputs[2].source_tool_name.clone(),
-            source_envelope_ids: vec![],
-        };
-        nodes.push(read.clone());
-        nodes.push(ModelInputLineage {
-            public_system_prompt: false,
-            envelope_id: derived.envelope_id.clone(),
-            size_bytes: derived.content.size_bytes(),
-            source_provider_id: derived.provenance.source_provider_id.clone(),
-            source_tool_name: derived.provenance.source_tool_name.clone(),
-            source_envelope_ids: derived.provenance.source_envelope_ids.clone(),
-        });
-        let roots = [
-            TaskSourceBinding {
-                envelope_id: inputs[0].envelope_id.clone(),
-                authority: TaskSourceAuthority::SystemPrompt,
-            },
-            TaskSourceBinding {
-                envelope_id: inputs[1].envelope_id.clone(),
-                authority: TaskSourceAuthority::Scopes(vec!["fixed-input:question".into()]),
-            },
-            TaskSourceBinding {
-                envelope_id: read.envelope_id.clone(),
-                authority: TaskSourceAuthority::Scopes(vec!["office:selection".into()]),
-            },
-        ];
-        let resolved = resolve_task_sources(&derived.envelope_id, &nodes, &roots).unwrap();
-        assert_eq!(
-            resolved.scopes,
-            ["fixed-input:question", "office:selection"]
-        );
-        nodes.retain(|node| node.envelope_id != read.envelope_id);
-        assert!(resolve_task_sources(&derived.envelope_id, &nodes, &roots[..2],).is_err());
 
         assert_eq!(derived.sensitivity, Sensitivity::Sensitive);
         assert_eq!(derived.allowed_destinations, vec![destination]);
@@ -1380,18 +1338,6 @@ mod tests {
         private[0].sensitivity = Sensitivity::Sensitive;
         let private_lineage = project_model_input_lineage(&authorized.audit, &private).unwrap();
         assert!(!private_lineage[0].public_system_prompt);
-        let binding = crate::schedule::source_graph::TaskSourceBinding {
-            envelope_id: private_lineage[0].envelope_id.clone(),
-            authority: crate::schedule::source_graph::TaskSourceAuthority::SystemPrompt,
-        };
-        assert!(
-            crate::schedule::source_graph::resolve_task_sources(
-                &private_lineage[0].envelope_id,
-                &private_lineage,
-                &[binding]
-            )
-            .is_err()
-        );
         let mut changed = lineage.clone();
         changed[0].source_tool_name = "read_system_info".into();
         assert!(validate_model_input_lineage(&authorized.audit, &changed).is_err());
@@ -1408,9 +1354,6 @@ mod tests {
 
     #[test]
     fn evolving_system_catalog_keeps_distinct_sources_across_model_calls() {
-        use crate::schedule::source_graph::{
-            TaskSourceAuthority, TaskSourceBinding, resolve_task_sources,
-        };
         let policy = policy(&[]);
         let user = message(
             "user",
@@ -1480,33 +1423,6 @@ mod tests {
                 .source_envelope_ids
                 .contains(&output.envelope_id)
         );
-        let mut nodes = project_model_input_lineage(&first.audit, &first.input_envelopes).unwrap();
-        nodes.extend(project_model_input_lineage(&second.audit, &second.input_envelopes).unwrap());
-        nodes.push(ModelInputLineage {
-            public_system_prompt: false,
-            envelope_id: output.envelope_id.clone(),
-            size_bytes: output.content.size_bytes(),
-            source_provider_id: output.provenance.source_provider_id.clone(),
-            source_tool_name: output.provenance.source_tool_name.clone(),
-            source_envelope_ids: output.provenance.source_envelope_ids.clone(),
-        });
-        let bindings = vec![
-            TaskSourceBinding {
-                envelope_id: first.input_envelopes[0].envelope_id.clone(),
-                authority: TaskSourceAuthority::SystemPrompt,
-            },
-            TaskSourceBinding {
-                envelope_id: second.input_envelopes[0].envelope_id.clone(),
-                authority: TaskSourceAuthority::SystemPrompt,
-            },
-            TaskSourceBinding {
-                envelope_id: first.input_envelopes[1].envelope_id.clone(),
-                authority: TaskSourceAuthority::Scopes(vec!["fixed-input:report".into()]),
-            },
-        ];
-        let proof = resolve_task_sources(&output.envelope_id, &nodes, &bindings).unwrap();
-        assert_eq!(proof.scopes, ["fixed-input:report"]);
-        assert_eq!(proof.root_envelope_ids.len(), 3);
     }
 
     #[test]

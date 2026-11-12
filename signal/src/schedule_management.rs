@@ -1,11 +1,10 @@
-//! Owner-authenticated task management and explicit publication; no direct tool dispatch.
+//! Owner-authenticated task management; no direct tool dispatch.
 use crate::config::connection::DatabaseConnection;
 mod resume_sources;
 use crate::entity::agent_schedule as row;
 use crate::schedule_store::{ScheduleStore, ScheduleStoreError};
 use desk_agent_protocol::schedule::management::{
-    RehearsalView, ScheduleManagementRequest as Request, ScheduleManagementResponse as Response,
-    ScheduleView,
+    ScheduleManagementRequest as Request, ScheduleManagementResponse as Response, ScheduleView,
 };
 use desk_signal_facade::{
     model::{connection::ConnectionState, signal::SignalingModel},
@@ -15,7 +14,6 @@ use desk_signal_facade::{
     },
 };
 use desk_utils::error::DeskErrorCode;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 pub async fn handle(
     db: &DatabaseConnection,
@@ -48,68 +46,22 @@ pub async fn handle(
             return actix_web::rt::spawn(async move {
                 let store = ScheduleStore::new(db.clone());
                 let current = store.read(owner, &schedule_id).await?;
-                let verifier = super::schedule_store::SignalTaskPublicationVerifier {
+                if public_target(&db, owner, &current.target_device_id)
+                    .await?
+                    .is_none()
+                {
+                    return Err(ScheduleStoreError::NotFound);
+                }
+                let verifier = super::schedule_store::SignalTaskSubjectVerifier {
                     connections: &connections,
                     gate: &gate,
-                    maximum_budget: &crate::schedule_budget_policy::read(&db).await?.maximum,
                 };
-                if current.kind == "conversation_resume" {
-                    if public_target(&db, owner, &current.target_device_id)
-                        .await?
-                        .is_none()
-                    {
-                        return Err(ScheduleStoreError::NotFound);
-                    }
-                    let task = store
-                        .resume_conversation_task(owner, &schedule_id, expected_revision, &verifier)
-                        .await?;
-                    return Ok(Response::Task {
-                        task: view(&db, owner, task).await?,
-                    });
-                }
-                let task = ScheduleStore::new(db.clone())
-                    .resume_published_task(owner, &schedule_id, expected_revision, &verifier)
+                let task = store
+                    .resume_task(owner, &schedule_id, expected_revision, &verifier)
                     .await?;
                 Ok(Response::Task {
                     task: view(&db, owner, task).await?,
                 })
-            })
-            .await
-            .map_err(|_| ScheduleStoreError::Conflict)?;
-        }
-        if let Request::PublishTask {
-            schedule_id,
-            expected_revision,
-            contract_revision,
-            contract_sha256,
-            rehearsal_run_id,
-            expires_at,
-            client_publish_key,
-        } = request
-        {
-            let db = db.clone();
-            // The database transaction remains owned by this task if the browser disconnects.
-            return actix_web::rt::spawn(async move {
-                let verifier = crate::schedule_store::SignalTaskPublicationVerifier {
-                    connections: &connections,
-                    gate: &gate,
-                    maximum_budget: &crate::schedule_budget_policy::read(&db).await?.maximum,
-                };
-                publish(
-                    &db,
-                    owner,
-                    super::schedule_store::PublishTask {
-                        schedule_id,
-                        expected_revision,
-                        contract_revision,
-                        contract_sha256,
-                        rehearsal_run_id,
-                        expires_at,
-                        client_publish_key,
-                    },
-                    &verifier,
-                )
-                .await
             })
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
@@ -168,7 +120,7 @@ async fn manage_inner(
 ) -> Result<Response, ScheduleStoreError> {
     let store = ScheduleStore::new(db.clone());
     let row = match request {
-        Request::PublishTask { .. } | Request::ResumeTask { .. } => {
+        Request::ResumeTask { .. } => {
             return Err(ScheduleStoreError::Conflict);
         }
         Request::ListResumeSources {
@@ -401,83 +353,16 @@ async fn manage_inner(
         Request::Get { schedule_id } => {
             desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
-        Request::GenerateTaskContract {
-            schedule_id,
-            expected_revision,
-        } => {
-            let task =
-                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
-            if public_target(db, owner, &task.target_device_id)
-                .await?
-                .is_none()
-            {
-                return Err(ScheduleStoreError::NotFound);
-            }
-            let contract = desk_diagnose_core::future::boxed(|| {
-                store.generate_task_contract(owner, &schedule_id, expected_revision)
-            })
-            .await?;
-            desk_diagnose_core::future::boxed(|| {
-                store.save_contract(owner, expected_revision, &contract)
-            })
-            .await?;
-            return contract_response(
-                db,
-                owner,
-                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?,
-            )
-            .await;
-        }
-        Request::GetTaskContract { schedule_id } => {
-            let task =
-                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
-            return desk_diagnose_core::future::boxed(|| contract_response(db, owner, task)).await;
-        }
-        Request::SaveTaskContract {
-            expected_revision,
-            mut contract,
-        } => {
-            let task =
-                desk_diagnose_core::future::boxed(|| store.read(owner, &contract.schedule_id))
-                    .await?;
-            let target = public_target(db, owner, &task.target_device_id)
-                .await?
-                .ok_or(ScheduleStoreError::NotFound)?;
-            if contract.target_device_id != target {
-                return Err(ScheduleStoreError::NotFound);
-            }
-            // Resolve the public handle on the server; clients never choose an internal ID.
-            contract.target_device_id = task.target_device_id;
-            desk_diagnose_core::future::boxed(|| {
-                store.save_contract(owner, expected_revision, &contract)
-            })
-            .await?;
-            let task =
-                desk_diagnose_core::future::boxed(|| store.read(owner, &contract.schedule_id))
-                    .await?;
-            return desk_diagnose_core::future::boxed(|| contract_response(db, owner, task)).await;
-        }
-        Request::CreateDraft { mut draft } => {
+        Request::CreateTask { mut task } => {
             // Only the model proposal transaction can stamp AI origin.
-            draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
-            let draft =
-                desk_diagnose_core::future::boxed(|| resolve_draft(db, owner, draft)).await?;
-            if draft.kind == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume {
-                desk_diagnose_core::future::boxed(|| store.create_conversation_task(owner, &draft))
-                    .await?
-            } else {
-                store
-                    .create_draft(
-                        owner,
-                        &draft,
-                        desk_diagnose_core::future::boxed(|| store.database_time()).await?,
-                    )
-                    .await?
-            }
+            task.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
+            let task = desk_diagnose_core::future::boxed(|| resolve_draft(db, owner, task)).await?;
+            desk_diagnose_core::future::boxed(|| store.create_task(owner, &task)).await?
         }
-        Request::ActivateConversationResume {
+        Request::DecideScheduleProposal {
             schedule_id,
             expected_revision,
+            approve,
         } => {
             let task =
                 desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
@@ -488,79 +373,15 @@ async fn manage_inner(
                 return Err(ScheduleStoreError::NotFound);
             }
             desk_diagnose_core::future::boxed(|| {
-                store.activate_conversation_resume(owner, &schedule_id, expected_revision)
+                store.decide_proposal(
+                    owner,
+                    &schedule_id,
+                    expected_revision,
+                    approve,
+                    crate::schedule_store::ProposalDecider::Owner,
+                )
             })
             .await?
-        }
-        Request::ReserveRehearsal {
-            schedule_id,
-            expected_revision,
-            client_request_key,
-        } => {
-            let task =
-                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
-            if public_target(db, owner, &task.target_device_id)
-                .await?
-                .is_none()
-            {
-                return Err(ScheduleStoreError::NotFound);
-            }
-            let rehearsal = desk_diagnose_core::future::boxed(|| {
-                store.reserve_rehearsal(owner, &schedule_id, expected_revision, &client_request_key)
-            })
-            .await?;
-            return desk_diagnose_core::future::boxed(|| rehearsal_response(db, owner, rehearsal))
-                .await;
-        }
-        Request::GetTaskRehearsal { schedule_id } => {
-            let latest = desk_diagnose_core::future::boxed(|| {
-                store.read_latest_rehearsal(owner, &schedule_id)
-            })
-            .await?;
-            let rehearsal = match latest {
-                Some(row) => Some(
-                    desk_diagnose_core::future::boxed(|| rehearsal_view(db, owner, row)).await?,
-                ),
-                None => None,
-            };
-            return Ok(Response::TaskRehearsal {
-                task: Box::new(
-                    view(
-                        db,
-                        owner,
-                        desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id))
-                            .await?,
-                    )
-                    .await?,
-                ),
-                rehearsal,
-            });
-        }
-        Request::GetRehearsal { rehearsal_id } => {
-            return rehearsal_response(
-                db,
-                owner,
-                desk_diagnose_core::future::boxed(|| store.read_rehearsal(owner, &rehearsal_id))
-                    .await?,
-            )
-            .await;
-        }
-        Request::GetRehearsalPermissions { rehearsal_id } => {
-            return desk_diagnose_core::future::boxed(|| {
-                rehearsal_permissions::read(db, owner, &rehearsal_id)
-            })
-            .await;
-        }
-        Request::CancelPendingRehearsal {
-            rehearsal_id,
-            expected_revision,
-        } => {
-            let rehearsal = desk_diagnose_core::future::boxed(|| {
-                store.cancel_pending_rehearsal(owner, &rehearsal_id, expected_revision)
-            })
-            .await?;
-            return desk_diagnose_core::future::boxed(|| rehearsal_response(db, owner, rehearsal))
-                .await;
         }
         Request::Rename {
             schedule_id,
@@ -620,15 +441,6 @@ async fn manage_inner(
             })
             .await?
         }
-        Request::RevokeTaskAuthorization {
-            schedule_id,
-            expected_revision,
-        } => {
-            desk_diagnose_core::future::boxed(|| {
-                store.revoke_current_task_authorization(owner, &schedule_id, expected_revision)
-            })
-            .await?
-        }
         Request::Pause {
             schedule_id,
             expected_revision,
@@ -654,135 +466,6 @@ async fn manage_inner(
     };
     Ok(Response::Task {
         task: desk_diagnose_core::future::boxed(|| view(db, owner, row)).await?,
-    })
-}
-
-async fn contract_response(
-    db: &DatabaseConnection,
-    owner: i32,
-    task: row::Model,
-) -> Result<Response, ScheduleStoreError> {
-    if task.kind != "fresh_task" || task.status == "deleted" {
-        return Err(ScheduleStoreError::Conflict);
-    }
-    let target = public_target(db, owner, &task.target_device_id)
-        .await?
-        .ok_or(ScheduleStoreError::NotFound)?;
-    let (contract, contract_sha256) = if let Some(revision) = task.contract_revision {
-        let stored = ScheduleStore::new(db.clone())
-            .read_contract(owner, &task.schedule_id, revision)
-            .await?;
-        let mut contract: desk_agent_protocol::schedule::contract::TaskContract =
-            serde_json::from_str(&stored.canonical_json)
-                .map_err(|_| ScheduleStoreError::Invalid)?;
-        contract.target_device_id = target.clone();
-        (Some(Box::new(contract)), Some(stored.digest_sha256))
-    } else {
-        (None, None)
-    };
-    let previous_contract = if let Some(revision) = task.contract_revision {
-        use crate::entity::agent_task_contract as history;
-        use sea_orm::QueryOrder;
-        if let Some(previous) = history::Entity::find()
-            .filter(history::Column::OwnerUserId.eq(owner))
-            .filter(history::Column::ScheduleId.eq(&task.schedule_id))
-            .filter(history::Column::ContractRevision.lt(revision))
-            .order_by_desc(history::Column::ContractRevision)
-            .one(db)
-            .await?
-        {
-            let parsed =
-                desk_diagnose_core::schedule::contract::parse_contract(&previous.canonical_json)
-                    .map_err(|_| ScheduleStoreError::Invalid)?;
-            if parsed.digest() != previous.digest_sha256
-                || parsed.contract().target_device_id != task.target_device_id
-                || parsed.contract().schedule_id != task.schedule_id
-                || i64::try_from(parsed.contract().contract_revision).ok()
-                    != Some(previous.contract_revision)
-                || i64::try_from(parsed.contract().task_revision).ok()
-                    != Some(previous.task_revision)
-            {
-                return Err(ScheduleStoreError::Invalid);
-            }
-            let mut previous = parsed.contract().clone();
-            previous.target_device_id = target.clone();
-            Some(Box::new(previous))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let authorization = if let Some(revision) = task.authorization_revision {
-        use crate::entity::agent_task_authorization as grant;
-        let row = grant::Entity::find()
-            .filter(grant::Column::OwnerUserId.eq(owner))
-            .filter(grant::Column::ScheduleId.eq(&task.schedule_id))
-            .filter(grant::Column::AuthorizationRevision.eq(revision))
-            .one(db)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        Some(
-            desk_agent_protocol::schedule::management::TaskAuthorizationView {
-                authorization_revision: u64::try_from(row.authorization_revision)
-                    .map_err(|_| ScheduleStoreError::Invalid)?,
-                task_revision: u64::try_from(row.task_revision)
-                    .map_err(|_| ScheduleStoreError::Invalid)?,
-                contract_revision: u64::try_from(row.contract_revision)
-                    .map_err(|_| ScheduleStoreError::Invalid)?,
-                approved_at: utc(row.approved_at)?,
-                expires_at: row.expires_at.map(utc).transpose()?,
-                revoked_at: row.revoked_at.map(utc).transpose()?,
-            },
-        )
-    } else {
-        None
-    };
-    Ok(Response::TaskContract {
-        previous_contract,
-        authorization,
-        task_revision: u64::try_from(task.task_revision)
-            .map_err(|_| ScheduleStoreError::Invalid)?,
-        task: Box::new(view(db, owner, task).await?),
-        contract,
-        contract_sha256,
-    })
-}
-
-async fn rehearsal_response(
-    db: &DatabaseConnection,
-    owner: i32,
-    row: crate::entity::agent_task_rehearsal::Model,
-) -> Result<Response, ScheduleStoreError> {
-    let task = ScheduleStore::new(db.clone())
-        .read(owner, &row.schedule_id)
-        .await?;
-    Ok(Response::Rehearsal {
-        task: Box::new(view(db, owner, task).await?),
-        rehearsal: rehearsal_view(db, owner, row).await?,
-    })
-}
-
-async fn rehearsal_view(
-    db: &DatabaseConnection,
-    owner: i32,
-    row: crate::entity::agent_task_rehearsal::Model,
-) -> Result<RehearsalView, ScheduleStoreError> {
-    let target_device_id = public_target(db, owner, &row.target_device_id).await?;
-    Ok(RehearsalView {
-        rehearsal_id: row.rehearsal_id.clone(),
-        schedule_id: row.schedule_id,
-        task_revision: row.task_revision,
-        target_device_id,
-        client_conversation_id: row.client_conversation_id,
-        initial_message_id: desk_diagnose_core::native_ids::rehearsal_message(&row.rehearsal_id),
-        prompt: row.prompt,
-        locale: row.locale,
-        model_id: row.model_id,
-        status: serde_json::from_value(serde_json::Value::String(row.status))
-            .map_err(|_| ScheduleStoreError::Invalid)?,
-        started_at: row.started_at.map(utc).transpose()?,
-        finished_at: row.finished_at.map(utc).transpose()?,
     })
 }
 
@@ -946,17 +629,11 @@ async fn public_target(
 mod tests {
     #[tokio::test]
     async fn run_history_projects_only_public_occurrence_metadata() {
-        use crate::schedule_store::{
-            TestPublicationVerifier as Verifier, publication_test_fixture as fixture_on,
-        };
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
-        let (store, task, _, publication) = fixture_on(db.clone()).await;
-        store
-            .publish_task(1, &publication, &Verifier(true))
-            .await
-            .unwrap();
+        let (store, task) =
+            crate::schedule_store::tests::enabled_fresh_task_on(db.clone(), None, 1, None).await;
         let row = store
             .enqueue_manual(1, &task.schedule_id, "history-api")
             .await
@@ -1022,8 +699,6 @@ mod tests {
         ));
     }
 
-    mod contracts;
-    mod rehearsal;
     use super::*;
     use desk_agent_protocol::schedule::{
         ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
@@ -1145,32 +820,12 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(rejected.status, ScheduledTaskStatus::Deleted);
-        proposal.client_create_key = "pending-review-approved".into();
-        let pending = store
-            .create_draft(1, &proposal, chrono::Utc::now().timestamp_millis())
-            .await
-            .unwrap();
-        let approved = task(
-            manage(
-                &db,
-                1,
-                Request::ActivateConversationResume {
-                    schedule_id: pending.schedule_id,
-                    expected_revision: pending.revision,
-                },
-            )
-            .await
-            .unwrap(),
-        );
-        assert_eq!(approved.status, ScheduledTaskStatus::Active);
-        assert!(approved.next_run_at.is_some());
-        assert!(!approved.upcoming_runs.is_empty());
         let created = task(
             manage(
                 &db,
                 1,
-                Request::CreateDraft {
-                    draft: request.clone(),
+                Request::CreateTask {
+                    task: request.clone(),
                 },
             )
             .await
@@ -1194,9 +849,10 @@ mod tests {
             manage(
                 &db,
                 2,
-                Request::ActivateConversationResume {
+                Request::DecideScheduleProposal {
                     schedule_id: created.schedule_id.clone(),
                     expected_revision: created.revision,
+                    approve: true
                 }
             )
             .await
@@ -1212,9 +868,10 @@ mod tests {
             manage(
                 &db,
                 1,
-                Request::ActivateConversationResume {
+                Request::DecideScheduleProposal {
                     schedule_id: created.schedule_id.clone(),
                     expected_revision: created.revision,
+                    approve: true
                 }
             )
             .await
@@ -1230,21 +887,21 @@ mod tests {
         let mut stale = request.clone();
         stale.requirement_revision = Some(2);
         assert!(matches!(
-            manage(&db, 1, Request::CreateDraft { draft: stale }).await,
+            manage(&db, 1, Request::CreateTask { task: stale }).await,
             Err(ScheduleStoreError::Conflict)
         ));
         let mut raw = request.clone();
         raw.source_conversation_id = Some("chat-1".into());
         assert!(matches!(
-            manage(&db, 1, Request::CreateDraft { draft: raw }).await,
+            manage(&db, 1, Request::CreateTask { task: raw }).await,
             Err(ScheduleStoreError::NotFound)
         ));
         assert!(matches!(
             manage(
                 &db,
                 2,
-                Request::CreateDraft {
-                    draft: request.clone()
+                Request::CreateTask {
+                    task: request.clone()
                 }
             )
             .await,
@@ -1259,8 +916,8 @@ mod tests {
             manage(
                 &db,
                 1,
-                Request::CreateDraft {
-                    draft: request.clone()
+                Request::CreateTask {
+                    task: request.clone()
                 }
             )
             .await,
@@ -1272,10 +929,10 @@ mod tests {
         changed.state_json = Set(session.encode_json_for_storage().unwrap());
         changed.update(&db).await.unwrap();
         assert!(matches!(
-            manage(&db, 1, Request::CreateDraft { draft: request }).await,
+            manage(&db, 1, Request::CreateTask { task: request }).await,
             Err(ScheduleStoreError::NotFound)
         ));
-        assert_eq!(row::Entity::find().count(&db).await.unwrap(), 3);
+        assert_eq!(row::Entity::find().count(&db).await.unwrap(), 2);
     }
 
     fn draft() -> ScheduleDraft {
@@ -1307,10 +964,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_creates_only_drafts_projects_public_identity_and_preserves_owner_cas() {
+    async fn management_creates_enabled_tasks_projects_public_identity_and_preserves_owner_cas() {
         let db = fixture().await;
         let original = task(
-            manage(&db, 1, Request::CreateDraft { draft: draft() })
+            manage(&db, 1, Request::CreateTask { task: draft() })
                 .await
                 .unwrap(),
         );
@@ -1318,12 +975,12 @@ mod tests {
             original.target_device_id.as_deref(),
             Some("public-device-1")
         );
-        assert_eq!(original.status, ScheduledTaskStatus::Draft);
-        assert!(original.next_run_at.is_none());
+        assert_eq!(original.status, ScheduledTaskStatus::Active);
+        assert!(original.next_run_at.is_some());
         assert!(original.active_run_id.is_none());
         assert!(original.created_at.ends_with('Z'));
         let replay = task(
-            manage(&db, 1, Request::CreateDraft { draft: draft() })
+            manage(&db, 1, Request::CreateTask { task: draft() })
                 .await
                 .unwrap(),
         );
@@ -1466,29 +1123,6 @@ mod tests {
             0
         );
     }
-}
-
-pub(crate) mod rehearsal_permissions;
-
-/// Only the authenticated runtime handler supplies the current-policy verifier.
-async fn publish(
-    db: &DatabaseConnection,
-    owner: i32,
-    input: super::schedule_store::PublishTask,
-    verifier: &dyn super::schedule_store::TaskPublicationVerifier,
-) -> Result<Response, ScheduleStoreError> {
-    let store = ScheduleStore::new(db.clone());
-    let task = store.read(owner, &input.schedule_id).await?;
-    if public_target(db, owner, &task.target_device_id)
-        .await?
-        .is_none()
-    {
-        return Err(ScheduleStoreError::NotFound);
-    }
-    store.publish_task(owner, &input, verifier).await?;
-    Ok(Response::Task {
-        task: view(db, owner, store.read(owner, &input.schedule_id).await?).await?,
-    })
 }
 
 mod run_directory;

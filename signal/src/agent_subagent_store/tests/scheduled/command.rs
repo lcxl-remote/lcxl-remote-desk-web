@@ -69,7 +69,13 @@ async fn fixture() -> (
         serde_json::from_str(&canonical).unwrap(),
     )
     .await;
-    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
+    // The production edge supplies the device command policy to the registry.
+    let mut policy = desk_diagnose_core::command_confirmation::test_policy();
+    policy.actor_id = parent.actor_id.clone();
+    policy.target_device_id = parent.device_id.clone();
+    policy.policy_revision = parent.policy_revision;
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry()
+        .with_command_policy(policy);
     let capability = registry.capability_for_tool(&call.name).unwrap();
     let provider = registry
         .provider_for_capability(&capability.wire.capability_id)
@@ -93,23 +99,32 @@ async fn fixture() -> (
     let grant_id =
         crate::capability_grant_store::task_grant::identity(&parent.conversation_id, &call_id);
     let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
-    let resources = vec!["device:1".into()];
-    let operations = vec!["execute".into()];
+    // The Provider preflight scopes an exact command to its frozen plan.
+    let resources = registry
+        .command_policy()
+        .unwrap()
+        .prepare(&canonical, parent.input_revision)
+        .unwrap()
+        .resource_scope()
+        .unwrap();
+    let operations = vec![call.name.clone()];
     let command_store = SignalCapabilityGrantStore::new(db.clone());
+    // The call identity is fixed before the approval is recorded.
+    let frozen = parent.clone();
     let prepared = || PrepareCapabilityCall {
         grant_id: &grant_id,
         call_id: &call_id,
-        turn_id: parent.current_turn_id.as_deref().unwrap(),
-        input_revision: parent.input_revision,
-        input_watermark: parent.latest_input_seq,
+        turn_id: frozen.current_turn_id.as_deref().unwrap(),
+        input_revision: frozen.input_revision,
+        input_watermark: frozen.latest_input_seq,
         generation: 1,
         canonical_input_json: &canonical,
         call: CapabilityGrantCall {
-            actor_id: &parent.actor_id,
-            run_id: &parent.conversation_id,
-            input_revision: parent.input_revision,
+            actor_id: &frozen.actor_id,
+            run_id: &frozen.conversation_id,
+            input_revision: frozen.input_revision,
             surface: ProductSurface::OssPersonalOwner,
-            target_device_id: &parent.device_id,
+            target_device_id: &frozen.device_id,
             target_session_id: None,
             provider_id: &provider.wire.provider_id,
             capability_id: &capability.wire.capability_id,
@@ -124,11 +139,30 @@ async fn fixture() -> (
             canonical_input_digest_sha256: &digest,
             byte_count: canonical.len() as u64,
             item_count: 1,
-            policy_revision: parent.policy_revision,
+            policy_revision: frozen.policy_revision,
             readiness_revision: 1,
             now_unix_ms: now,
         },
     };
+    // A scheduled run asks for this exact call first; the owner approves it.
+    let crate::capability_grant_store::CapabilityPreparation::PermissionRequired(mut approval) =
+        command_store
+            .prepare_outcome(prepared(), &registry)
+            .await
+            .unwrap()
+    else {
+        panic!("a scheduled command needs its own approval");
+    };
+    approve_original_call(
+        &db,
+        &mut parent,
+        &mut approval,
+        &registry,
+        capability,
+        &provider.wire.provider_id,
+        now,
+    )
+    .await;
     command_store.prepare(prepared()).await.unwrap();
     let DispatchIntentResult::Recorded { dispatch_id, .. } = command_store
         .record_dispatch_intent(prepared())
@@ -151,6 +185,74 @@ async fn fixture() -> (
         .await
         .unwrap();
     (db, schedule, store, parent, task_id, dispatch_id)
+}
+
+/// Record the owner's approval of one exact call and issue its one-use grant,
+/// as the permission decision path does for a scheduled run.
+async fn approve_original_call(
+    db: &DatabaseConnection,
+    parent: &mut PersistedAgentSession,
+    request: &mut desk_diagnose_core::dynamic_run::PermissionRequest,
+    registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
+    capability: &desk_diagnose_core::provider_registry::CapabilityDescriptor,
+    provider_id: &str,
+    now: u64,
+) {
+    use desk_diagnose_core::dynamic_run::{PermissionDecisionItem, PermissionItemDecision};
+    let decisions = request
+        .items
+        .iter()
+        .map(|item| PermissionDecisionItem {
+            item_id: item.item_id.clone(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: item.resource_scope.clone(),
+                operation_scope: item.operation_scope.clone(),
+                export_destinations: item.export_destinations.clone(),
+                ttl_seconds: item.suggested_ttl_seconds,
+                max_uses: 1,
+            },
+        })
+        .collect::<Vec<_>>();
+    let inventory = vec![
+        desk_diagnose_core::capability_availability::CapabilityAvailability {
+            provider_id: provider_id.into(),
+            capability_id: capability.wire.capability_id.clone(),
+            tool_name: capability.wire.tool_name.clone(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        },
+    ];
+    let context = desk_diagnose_core::permission_grant::PermissionGrantIssuanceContext {
+        surface: ProductSurface::OssPersonalOwner,
+        registry,
+        inventory: &inventory,
+        readiness_revision: 1,
+        now_unix_ms: now,
+        implicit_fresh_object_refs: &[],
+    };
+    let mut grants = desk_diagnose_core::permission_grant::build_permission_grants(
+        parent, request, &decisions, &context, None,
+    )
+    .unwrap();
+    desk_diagnose_core::schedule::run_approval::constrain_approval(
+        parent,
+        request,
+        now + 60_000,
+        &mut grants,
+    )
+    .unwrap();
+    request.apply_user_decision(&decisions).unwrap();
+    parent.permission_requests.push(request.clone());
+    save_main_delegation_session(db, parent).await.unwrap();
+    for grant in &grants {
+        SignalCapabilityGrantStore::new(db.clone())
+            .issue(grant)
+            .await
+            .unwrap();
+    }
 }
 
 async fn original_run(db: &DatabaseConnection, root: &str) -> occurrence::Model {
@@ -478,18 +580,21 @@ async fn missing_native_or_dispatch_proof_keeps_original_unknown_fact_unresolved
                     .unwrap();
             }
             "wrong-publication" => {
+                // The run's task grant, not the owner's consumed approval.
                 let row = agent_capability_grant::Entity::find()
-                    .one(&db)
+                    .all(&db)
                     .await
                     .unwrap()
+                    .into_iter()
+                    .find(|row| row.issued_payload_json.contains("scheduled_run"))
                     .unwrap();
                 let mut grant: desk_agent_protocol::capability_grant::CapabilityGrant =
                     serde_json::from_str(&row.issued_payload_json).unwrap();
-                let desk_agent_protocol::capability_grant::CapabilityGrantIssuer::TaskAuthorization(
+                let desk_agent_protocol::capability_grant::CapabilityGrantIssuer::ScheduledRun(
                     source,
                 ) = &mut grant.issued_by
                 else {
-                    panic!("published grant required");
+                    panic!("scheduled-run grant required");
                 };
                 source.scheduled_run_id = "another-occurrence".into();
                 agent_capability_grant::Entity::update_many()

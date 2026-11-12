@@ -598,17 +598,26 @@ async fn scheduled_original_must_remain_exportable_before_any_save_or_model_call
 #[tokio::test]
 async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
     use crate::schedule::{
-        contract::parse_contract,
+        definition::ScheduledTaskDefinition,
         fresh_session::{FreshSessionInput, initial_session},
     };
     use crate::session::TriggerOrigin;
     let prompt = "Produce the scheduled report";
-    let contract = parse_contract(&serde_json::json!({
-        "schema_version":1,"schedule_id":"task","task_revision":1,"contract_revision":1,
-        "target_device_id":"device",
-        "permissions":[],"steps":[],"exception_mode":"deny",
-        "budget":{"max_runs_per_utc_day":1,"max_calls_per_run":1,"max_model_tokens_per_run":1000,"max_runtime_seconds":60}
-    }).to_string()).unwrap();
+    let contract = ScheduledTaskDefinition {
+        schedule_id: "task".into(),
+        task_revision: 1,
+        target_device_id: "device".into(),
+        prompt: prompt.into(),
+        locale: None,
+        model_id: None,
+        policy_revision: 0,
+        budget: desk_agent_protocol::schedule::policy::TaskBudget {
+            max_runs_per_utc_day: 1,
+            max_calls_per_run: 1,
+            max_model_tokens_per_run: 1000,
+            max_runtime_seconds: 60,
+        },
+    };
     let mut session = initial_session(
         &contract,
         FreshSessionInput {
@@ -646,17 +655,13 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
             schedule_id: "task".into(),
             scheduled_run_id: session.conversation_id.clone(),
             task_revision: 1,
-            contract_revision: 1,
-            contract_sha256: contract.digest().into(),
-            authorization_id: "authorization-first".into(),
-            authorization_revision: 1,
+            policy_revision: 0,
             recovery_epoch: 1,
         },
         &contract,
         chrono::DateTime::parse_from_rfc3339(&session.created_at)
             .unwrap()
             .timestamp_millis(),
-        None,
     )
     .unwrap();
     let creation = crate::subagent::creation::CreationEnvelope::capture_scheduled(
@@ -752,14 +757,6 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         &destination,
     )
     .unwrap();
-    assert!(
-        crate::schedule::rehearsal::fixed_input::fixed_task_input_source(
-            &saved,
-            "schedule-run-first:input",
-            &contract,
-        )
-        .is_ok()
-    );
     assert_eq!(
         saved
             .conversation

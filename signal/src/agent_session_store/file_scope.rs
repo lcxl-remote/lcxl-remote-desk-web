@@ -108,20 +108,7 @@ impl SignalAgentSessionStore {
         let receipt = self
             .update_file_scope_guarded(&update, now, Some((session.version, session.lease_token)))
             .await?;
-        let mut committed = update.clone();
-        if let FileScopeMutation::Select { proposal } = &receipt.update.mutation {
-            if proposal.source != DirectoryConsentSource::TaskContract {
-                return Err(failure());
-            }
-            let FileScopeMutation::Propose { proposal: original } = &update.mutation else {
-                return Err(failure());
-            };
-            let mut authorized = original.clone();
-            authorized.source = DirectoryConsentSource::TaskContract;
-            committed.mutation = FileScopeMutation::Select {
-                proposal: authorized,
-            };
-        }
+        let committed = update.clone();
         if receipt.update != committed {
             return Err(failure());
         }
@@ -145,15 +132,6 @@ impl SignalAgentSessionStore {
         held: Option<(i64, u64)>,
     ) -> Result<FileScopeReceipt, AgentError> {
         update.validate().map_err(|_| failure())?;
-        // Task consent is manufactured only below, after current authority checks.
-        // Neither owner API input nor a model proposal can assert this source.
-        if matches!(&update.mutation,
-            FileScopeMutation::Select { proposal } | FileScopeMutation::Propose { proposal }
-                if proposal.source == desk_diagnose_core::file_scope::DirectoryConsentSource::TaskContract)
-        {
-            return Err(failure());
-        }
-
         if self.surface != AgentSessionSurface::AiAssistant
             || (held.is_none()
                 && self.client_conversation_id.as_deref()
@@ -263,21 +241,6 @@ impl SignalAgentSessionStore {
             if held.is_some_and(|expected| expected != (session.version, session.lease_token)) {
                 return Err(failure());
             }
-            let mut admitted_update = update.clone();
-            if held.is_some()
-                && let FileScopeMutation::Propose { proposal } = &update.mutation
-                && crate::schedule_store::task_directory_resolution_matches_on(
-                    &txn, &session, proposal,
-                )
-                .await
-                .map_err(|_| failure())?
-            {
-                let mut approved = proposal.clone();
-                approved.source =
-                    desk_diagnose_core::file_scope::DirectoryConsentSource::TaskContract;
-                admitted_update.mutation = FileScopeMutation::Select { proposal: approved };
-            }
-            let update = &admitted_update;
             let existing = agent_run_event::Entity::find()
                 .filter(agent_run_event::Column::EventId.eq(update.event_id()))
                 .one(&txn)

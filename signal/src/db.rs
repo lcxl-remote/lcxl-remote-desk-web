@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 65;
+const SIGNAL_SCHEMA_VERSION: i32 = 66;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
@@ -797,9 +797,6 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(agent_permission_resume);
     check_entity!(agent_schedule);
     check_entity!(agent_schedule_run);
-    check_entity!(agent_task_contract);
-    check_entity!(agent_task_rehearsal);
-    check_entity!(agent_task_authorization);
     check_entity!(agent_task_budget_reservation);
     if !remaining.is_empty() {
         return Err(DbErr::Custom(format!(
@@ -812,15 +809,10 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
 async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
 ) -> Result<(), DbErr> {
-    use crate::entity::{
-        agent_schedule, agent_schedule_run, agent_task_authorization, agent_task_contract,
-    };
+    use crate::entity::{agent_schedule, agent_schedule_run};
     let schema = Schema::new(db.get_database_backend());
     create_entity(db, &schema, agent_schedule::Entity).await?;
     create_entity(db, &schema, agent_schedule_run::Entity).await?;
-    create_entity(db, &schema, agent_task_contract::Entity).await?;
-    create_entity(db, &schema, crate::entity::agent_task_rehearsal::Entity).await?;
-    create_entity(db, &schema, agent_task_authorization::Entity).await?;
     create_entity(
         db,
         &schema,
@@ -844,30 +836,6 @@ async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnec
         .col(budget::Column::UtcDay)
         .to_owned();
     db.execute(&budget_index).await?;
-    let contract_revision = Index::create()
-        .name("uq_agent_task_contract_revision")
-        .table(agent_task_contract::Entity)
-        .col(agent_task_contract::Column::ScheduleId)
-        .col(agent_task_contract::Column::ContractRevision)
-        .unique()
-        .to_owned();
-    db.execute(&contract_revision).await?;
-    let authorization_revision = Index::create()
-        .name("uq_agent_task_authorization_revision")
-        .table(agent_task_authorization::Entity)
-        .col(agent_task_authorization::Column::ScheduleId)
-        .col(agent_task_authorization::Column::AuthorizationRevision)
-        .unique()
-        .to_owned();
-    db.execute(&authorization_revision).await?;
-    let publish_key = Index::create()
-        .name("uq_agent_task_authorization_publish_key")
-        .table(agent_task_authorization::Entity)
-        .col(agent_task_authorization::Column::ScheduleId)
-        .col(agent_task_authorization::Column::ClientPublishKey)
-        .unique()
-        .to_owned();
-    db.execute(&publish_key).await?;
     Ok(())
 }
 
@@ -1046,7 +1014,6 @@ mod tests {
             "idx-agent-run-event-input",
             "idx_task_budget_schedule_day",
             "agent_task_budget_reservation",
-            "agent_task_rehearsal",
         ] {
             assert!(
                 objects.contains(required),
@@ -1195,8 +1162,7 @@ mod tests {
         for table in [
             "agent_schedule",
             "agent_schedule_run",
-            "agent_task_contract",
-            "agent_task_authorization",
+            "agent_task_budget_reservation",
         ] {
             assert!(tables.contains(table));
         }

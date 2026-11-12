@@ -20,7 +20,6 @@ import type {
     ContextNoticeDto,
     PermissionDecisionBody,
     PermissionRequestDto,
-    RehearsalView,
     AiAssistantMainRequestsDto,
 } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
@@ -110,11 +109,7 @@ export type ComputerActionDraftPreview = {
     }>;
 };
 
-export type RehearsalConversation = Pick<RehearsalView,
-    'client_conversation_id' | 'initial_message_id' | 'prompt' | 'locale' | 'status'>;
-
 type Props = {
-    rehearsal?: RehearsalConversation;
     deskId: string;
     targetRefs?: readonly string[];
     connected?: boolean;
@@ -428,7 +423,6 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
 }
 
 export function useAiAssistantChat({
-    rehearsal,
     deskId,
     targetRefs,
     connected,
@@ -442,7 +436,6 @@ export function useAiAssistantChat({
     // Changing language must not reset the conversation or its snapshot requests.
     const translate = useRef(t);
     translate.current = t;
-    const queueEnabled = !rehearsal;
     const targetSelectionEnabled = Boolean(deskId) && connected !== undefined;
     const temporaryConversationRef = useRef(false);
     const [temporaryConversation, setTemporaryConversation] = useState(false);
@@ -566,7 +559,6 @@ export function useAiAssistantChat({
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
     const conversationId = useRef<string | null>(null);
-    const rehearsalSent = useRef(false);
     const snapshotEpoch = useRef(0);
     const snapshotRequestOrder = useRef(0);
     /**
@@ -621,7 +613,6 @@ export function useAiAssistantChat({
     }, [acknowledgeDelivery, rememberQueueStream]);
 
     const loadRequestQueue = useCallback(async (expectedConversation: string) => {
-        if (!queueEnabled) return;
         const order = ++queueReadOrder.current;
         const epoch = snapshotEpoch.current;
         const saved = queuedSession.current;
@@ -641,7 +632,7 @@ export function useAiAssistantChat({
                 || typeof queue.sessionId !== 'string') return;
             observeQueue(expectedConversation, queue);
         } catch { /* Keep the last authoritative queue view on a failed read. */ }
-    }, [deskId, observeQueue, queueEnabled]);
+    }, [deskId, observeQueue]);
 
     const cancelQueuedRequest = useCallback(async (requestId: string) => {
         const saved = queuedSession.current;
@@ -751,7 +742,7 @@ export function useAiAssistantChat({
             const pending = pendingDelivery.current;
             if (pending?.conversation === expectedConversationId
                 && snapshot.messages.some(message => message.id === pending.id && message.role === 'user')) {
-                if (queueEnabled && !pending.payload.start_goal && snapshot.requestId !== pending.requestId
+                if (!pending.payload.start_goal && snapshot.requestId !== pending.requestId
                     && activeRequest.current === pending.requestId) {
                     activeRequest.current = null;
                     activeRequestAck.current = null;
@@ -814,7 +805,7 @@ export function useAiAssistantChat({
                 controlRevision: snapshot.controlRevision,
                 settledRequestIds,
             };
-            if (queueEnabled && expectedQueueOrder === queueReadOrder.current && Array.isArray(snapshot.mainRequests)) {
+            if (expectedQueueOrder === queueReadOrder.current && Array.isArray(snapshot.mainRequests)) {
                 queueReadOrder.current += 1;
                 observeQueue(expectedConversationId, { sessionId: snapshot.sessionId, items: snapshot.mainRequests });
             }
@@ -958,7 +949,7 @@ export function useAiAssistantChat({
                 setHydrating(false);
             }
         }
-    }, [acknowledgeDelivery, deskId, observeQueue, queueEnabled, queueOnly]);
+    }, [acknowledgeDelivery, deskId, observeQueue, queueOnly]);
 
     const timelineRead = useRef<{ conversation: string; epoch: number; invalidated: boolean } | null>(null);
     const refreshTimeline = useCallback((invalidated = false) => {
@@ -1054,7 +1045,7 @@ export function useAiAssistantChat({
     useEffect(() => {
         let stored: string | null = null;
         try {
-            stored = rehearsal?.client_conversation_id ?? initialConversationId
+            stored = initialConversationId
                 ?? localStorage.getItem(storageKey(conversationStorageScope));
         } catch {
             stored = null;
@@ -1074,7 +1065,6 @@ export function useAiAssistantChat({
         conversationId.current = stored;
         temporaryConversationRef.current = false;
         setTemporaryConversation(false);
-        rehearsalSent.current = false;
         setMessages([]);
         setTools([]);
         setDraft(null);
@@ -1124,7 +1114,7 @@ export function useAiAssistantChat({
         void loadSnapshot(stored, true).then(outcome => {
             if (outcome === 'missing') return loadRequestQueue(stored);
         });
-    }, [conversationStorageScope, initialConversationId, loadRequestQueue, loadSnapshot, rehearsal?.client_conversation_id]);
+    }, [conversationStorageScope, initialConversationId, loadRequestQueue, loadSnapshot]);
 
     useEffect(() => {
         const interval = window.setInterval(refreshTimeline, 2_000);
@@ -1136,7 +1126,6 @@ export function useAiAssistantChat({
 
     useEffect(() => {
         const onStorage = (event: StorageEvent) => {
-            if (rehearsal) return;
             if (
                 event.key !== storageKey(conversationStorageScope)
                 || event.newValue === conversationId.current
@@ -1208,7 +1197,7 @@ export function useAiAssistantChat({
         };
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);
-    }, [conversationStorageScope, loadRequestQueue, loadSnapshot, rehearsal]);
+    }, [conversationStorageScope, loadRequestQueue, loadSnapshot]);
 
     useEffect(() => () => {
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
@@ -1317,7 +1306,7 @@ export function useAiAssistantChat({
             void loadSnapshot(selected);
             return;
         }
-        if (currentSubmission && !pending.payload.start_goal && !rehearsal
+        if (currentSubmission && !pending.payload.start_goal
             && event.kind === 'error' && event.seq <= 1 && !stopPending.current) {
             const failure = agentErrorMessage(translate.current, event.error?.error_code,
                 event.error?.message, 'The AI Assistant turn could not complete.');
@@ -1428,7 +1417,7 @@ export function useAiAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
         }
-    }), [acknowledgeDelivery, loadRequestQueue, loadSnapshot, refreshTimeline, rehearsal, rememberQueueStream, subscribe]);
+    }), [acknowledgeDelivery, loadRequestQueue, loadSnapshot, refreshTimeline, rememberQueueStream, subscribe]);
 
     const ensureConversation = useCallback(() => {
         if (!conversationId.current) {
@@ -1453,7 +1442,6 @@ export function useAiAssistantChat({
     const updateContext = useCallback((selectedCapabilityIds: string[], sourceConnection?: string) => {
         const connection = deskId || sourceConnection;
         if (!connection) return false;
-        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
@@ -1481,10 +1469,10 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
 
     const initializeApprovalConversation = useCallback(async (retry = false) => {
-        if (rehearsal || connected === false || hydrating || approvalInitializing
+        if (connected === false || hydrating || approvalInitializing
             || activeRequest.current || remoteActive || contextRequest.current) return false;
         const selected = ensureConversation();
         if (snapshotWatermark.current?.conversationId === selected && approvalModelReadiness) return true;
@@ -1511,11 +1499,10 @@ export function useAiAssistantChat({
         } finally {
             if (conversationId.current === selected) setApprovalInitializing(false);
         }
-    }, [rehearsal, connected, hydrating, approvalInitializing, remoteActive,
+    }, [connected, hydrating, approvalInitializing, remoteActive,
         ensureConversation, approvalModelReadiness, loadSnapshot, updateContext]);
 
     const detachAttachment = useCallback((attachmentId: string) => {
-        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const attachmentDevice = deskId || attachments.find(item => item.id === attachmentId)?.deviceRef;
         if (!attachmentDevice) return false;
@@ -1544,11 +1531,10 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [attachments, deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
+    }, [attachments, deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
 
     const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string, deviceRef?: string,
         connectionFor?: (deviceId: string) => string | undefined) => {
-        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (contextRequest.current || !connected || hydrating) return false;
         const device = deskId || (operation.kind === 'select_directory' ? deviceRef
             : fileScope.directories.find(item => item.requestId === operation.directory_request_id)?.deviceRef);
@@ -1573,10 +1559,9 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 35_000);
         return true;
-    }, [connected, deskId, ensureConversation, fileScope.directories, hydrating, loadSnapshot, sendMessage, rehearsal]);
+    }, [connected, deskId, ensureConversation, fileScope.directories, hydrating, loadSnapshot, sendMessage]);
 
     const attachWindow = useCallback((objectRef: AiAssistantWindowRef, displaySummary: string) => {
-        if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
         setContextUpdating(true);
@@ -1603,7 +1588,7 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
+    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage]);
 
     const start = useCallback((
         question: string,
@@ -1614,15 +1599,14 @@ export function useAiAssistantChat({
         selectedIssues: IssueSelection[] = [],
         requestTargetRefs = targetRefs,
     ) => {
-        if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
-        const trimmed = rehearsal ? rehearsal.prompt : question.trim();
+        const trimmed = question.trim();
         if (!trimmed || hydrating || historyRestoreFailed || approvalInitializing || contextRequest.current
             || !sessionTargetReady || pendingDelivery.current || stopPending.current) return false;
         if (startGoal && !deskId && requestTargetRefs?.length !== 1) {
             setError('pages.aiAssistant.goalSelectDevice');
             return false;
         }
-        const nativeTurn = Boolean(rehearsal || startGoal);
+        const nativeTurn = Boolean(startGoal);
         if (nativeTurn && (activeRequest.current || remoteActive)) return false;
         const selectedObjects = attachments.filter(attachment =>
             attachment.state === 'active'
@@ -1639,8 +1623,7 @@ export function useAiAssistantChat({
         snapshotEpoch.current += 1;
         clearStopping(true);
         ensureConversation();
-        const clientMessageId = rehearsal?.initial_message_id ?? assistantMessageId();
-        if (rehearsal) rehearsalSent.current = true;
+        const clientMessageId = assistantMessageId();
         setMessages((current) => [...current, {
             id: clientMessageId,
             role: 'user',
@@ -1658,18 +1641,18 @@ export function useAiAssistantChat({
         const requestId = v4();
         const payload = {
                 question: trimmed,
-                temporary_conversation: rehearsal ? undefined : temporaryConversationRef.current,
+                temporary_conversation: temporaryConversationRef.current,
                 client_message_id: clientMessageId,
                 client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 conversation_id: conversationId.current,
-                locale: rehearsal ? rehearsal.locale ?? undefined : locale,
+                locale,
                 ...(!deskId && requestTargetRefs?.length ? { target_refs: [...requestTargetRefs] } : {}),
                 selected_capability_ids: deskId ? [...selectedCapabilityIds] : [],
-                start_goal: !rehearsal && startGoal,
-                previous_completed_goal_id: !rehearsal && startGoal ? previousCompletedGoalId : null,
-                selected_attachment_ids: rehearsal ? [] : selectedObjects
+                start_goal: startGoal,
+                previous_completed_goal_id: startGoal ? previousCompletedGoalId : null,
+                selected_attachment_ids: selectedObjects
                     .map((attachment) => attachment.id),
-                ...(!rehearsal && selectedIssues.length ? { selected_issues: selectedIssues.map(issue => ({ ...issue })) } : {}),
+                ...(selectedIssues.length ? { selected_issues: selectedIssues.map(issue => ({ ...issue })) } : {}),
             } satisfies AiAssistantAsk;
         pendingDelivery.current = { id: clientMessageId, question: trimmed,
             conversation: conversationId.current!, requestId, payload, sentAt: Date.now() };
@@ -1684,7 +1667,7 @@ export function useAiAssistantChat({
             setDeliveryState('unconfirmed');
         }
         return true;
-    }, [attachments, deskId, targetRefs, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal, remoteActive]);
+    }, [attachments, deskId, targetRefs, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, remoteActive]);
 
     const retryDelivery = useCallback(async () => {
         const pending = pendingDelivery.current;
@@ -1694,7 +1677,7 @@ export function useAiAssistantChat({
         if (queueOnly) await loadRequestQueue(pending.conversation);
         else await loadSnapshot(pending.conversation);
         if (pendingDelivery.current !== pending || conversationId.current !== pending.conversation) return;
-        if (rehearsal || pending.payload.start_goal) {
+        if (pending.payload.start_goal) {
             activeRequest.current = pending.requestId;
             lastSeq.current = -1;
         }
@@ -1702,7 +1685,7 @@ export function useAiAssistantChat({
         try {
             sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, pending.payload, deskId || undefined, pending.requestId);
         } catch { setDeliveryState('unconfirmed'); }
-    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, loadRequestQueue, queueOnly, sendMessage, deskId, rehearsal]);
+    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, loadRequestQueue, queueOnly, sendMessage, deskId]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -2056,7 +2039,6 @@ export function useAiAssistantChat({
         : Promise.resolve(false), [stopConfirmation, submitStop]);
 
     const reset = useCallback((temporary = false) => {
-        if (rehearsal) return;
         temporaryConversationRef.current = temporary;
         setTemporaryConversation(temporary);
         pendingDelivery.current = null;
@@ -2123,7 +2105,7 @@ export function useAiAssistantChat({
         } catch {
             // Nothing else to clear.
         }
-    }, [conversationStorageScope, deskId, sendMessage, rehearsal]);
+    }, [conversationStorageScope, deskId, sendMessage]);
 
     const forgetConversation = useCallback((id: string | null) => {
         if (!id || conversationId.current !== id) return false;
@@ -2132,7 +2114,6 @@ export function useAiAssistantChat({
     }, [reset]);
 
     const selectConversation = useCallback((id: string) => {
-        if (rehearsal) return false;
         // Navigation must never cancel a turn or race an in-flight decision.
         if (!id || contextUpdating || permissionUpdating
             || grantRevoking || hydrating) return false;
@@ -2145,7 +2126,7 @@ export function useAiAssistantChat({
         void loadRequestQueue(id);
         return true;
     }, [remoteActive, contextUpdating, permissionUpdating, grantRevoking,
-        hydrating, reset, conversationStorageScope, loadRequestQueue, loadSnapshot, rehearsal]);
+        hydrating, reset, conversationStorageScope, loadRequestQueue, loadSnapshot]);
 
     const refreshSnapshot = useCallback(() => {
         if (conversationId.current) void loadSnapshot(conversationId.current);

@@ -300,8 +300,6 @@ impl ScheduleStore {
             || !settlement_lease.accepts(work.lease_deadline, now)
             || task.kind != "conversation_resume"
             || task.calc_version != desk_diagnose_core::schedule::SCHEDULE_CALC_VERSION
-            || task.contract_revision.is_some()
-            || task.authorization_revision.is_some()
             || task.active_run_id.as_deref() != Some(lease.run_id)
             || task.source_conversation_id.as_deref() != Some(work.conversation_id.as_str())
             || task.requirement_revision != i64::try_from(session.input_revision).ok()

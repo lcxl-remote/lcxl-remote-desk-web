@@ -313,6 +313,7 @@ impl ReviewCallAuthority {
                     self.source,
                     crate::approval_review::ApprovalSource::ConcreteCall { .. }
                         | crate::approval_review::ApprovalSource::DirectoryProposal { .. }
+                        | crate::approval_review::ApprovalSource::ScheduleProposal { .. }
                 )
             || self
                 .source_planning_lease_token

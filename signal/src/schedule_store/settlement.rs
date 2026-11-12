@@ -176,7 +176,7 @@ pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStore
     let paused = !failures.pause_reasons.is_empty();
     let task_status = if matches!(
         task.status.as_str(),
-        "deleted" | "expired" | "draft" | "rehearsing" | "awaiting_authorization"
+        "deleted" | "expired" | "pending_review"
     ) {
         &task.status
     } else if paused {

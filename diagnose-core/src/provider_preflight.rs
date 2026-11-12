@@ -45,7 +45,8 @@ pub mod text_file;
 pub mod word_read_binding;
 pub use artifact::{
     ArtifactCallPreflight, DOCX_ARTIFACT_MEDIA_TYPE, TEXT_ARTIFACT_MEDIA_TYPE,
-    XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call, without_directory_selector,
+    XLSX_ARTIFACT_MEDIA_TYPE, artifact_action_from_call, verify_text_artifact_output,
+    without_directory_selector,
 };
 mod communication;
 pub use communication::OutlookCallPreflight;

@@ -156,7 +156,7 @@ impl ScheduleStore {
             .await
     }
 
-    /// A changed requirement always needs a new rehearsal/authorization publication.
+    /// A changed requirement takes effect from the next run.
     pub async fn change_prompt(
         &self,
         owner: i32,
@@ -287,35 +287,6 @@ impl ScheduleStore {
                     consent.encode().map_err(|_| ScheduleStoreError::Invalid)?,
                 ));
             }
-            let failures: desk_diagnose_core::schedule::lifecycle::FailureState =
-                serde_json::from_str(&row.failure_state_json)
-                    .map_err(|_| ScheduleStoreError::Invalid)?;
-            patch.status = Set(
-                if row.kind == "conversation_resume" && !failures.pause_reasons.is_empty() {
-                    "paused".into()
-                } else if row.kind == "conversation_resume" {
-                    "active".into()
-                } else {
-                    "draft".into()
-                },
-            );
-            patch.next_run_at = Set(
-                if row.kind == "conversation_resume" && failures.pause_reasons.is_empty() {
-                    Some(
-                        desk_diagnose_core::schedule::next_after(
-                            &desk_diagnose_core::schedule::parse_json(&row.spec_json)
-                                .map_err(|_| ScheduleStoreError::Invalid)?,
-                            now,
-                        )
-                        .map_err(|_| ScheduleStoreError::Invalid)?
-                        .ok_or(ScheduleStoreError::Invalid)?,
-                    )
-                } else {
-                    None
-                },
-            );
-            patch.contract_revision = Set(None);
-            patch.authorization_revision = Set(None);
         }
         if let Some(spec) = new_spec {
             let normalized = normalize(spec).map_err(|_| ScheduleStoreError::Invalid)?;
@@ -370,8 +341,13 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        if delete && row.status == "pending_review" && result.source_conversation_id.is_some() {
-            super::resume_activation::record_decision_on(&txn, &result, now).await?;
+        if delete && row.status == "pending_review" && result.proposal_conversation_id.is_some() {
+            super::resume_activation::record_decision_on(
+                &txn,
+                &result,
+                Some(&super::ProposalDecider::Owner),
+            )
+            .await?;
         }
         txn.commit().await?;
         Ok(result)

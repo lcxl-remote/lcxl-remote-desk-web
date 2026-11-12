@@ -13,7 +13,6 @@ pub fn public_issue(status: &str, error: Option<&str>) -> Option<ScheduledRunIss
         "misfire" => Misfire,
         "device_offline_timeout" => DeviceOfflineTimeout,
         "queue_timeout" => QueueTimeout,
-        "budget_policy_exceeded" => BudgetPolicyExceeded,
         "executor_interrupted" => ExecutorInterrupted,
         "outcome_unknown" => OutcomeUnknown,
         value => {

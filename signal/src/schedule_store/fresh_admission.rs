@@ -139,7 +139,7 @@ impl ScheduleStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::publication::tests::{Verifier, fixture_on};
+    use super::super::tests::enabled_fresh_task_on;
     use super::*;
     use crate::entity::{agent_session, agent_task_budget_reservation};
     use desk_agent_protocol::{ExecutionMode, ai_assistant::AiAssistantSettings};
@@ -218,17 +218,13 @@ mod tests {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
-        let (store, task, _, publication) = fixture_on(db).await;
+        let (store, task) = enabled_fresh_task_on(db, None, 1, None).await;
         store
             .db
             .execute(
                 &Schema::new(store.db.get_database_backend())
                     .create_table_from_entity(agent_session::Entity),
             )
-            .await
-            .unwrap();
-        store
-            .publish_task(1, &publication, &Verifier(true))
             .await
             .unwrap();
         let queued = store

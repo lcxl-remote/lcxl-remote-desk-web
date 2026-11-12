@@ -72,7 +72,7 @@ pub(super) async fn match_current_on(
         let fresh = session
             .as_ref()
             .is_some_and(|session| session.trigger_origin == TriggerOrigin::ScheduledTask);
-        let task_grant = matches!(grant.issued_by, CapabilityGrantIssuer::TaskAuthorization(_));
+        let task_grant = matches!(grant.issued_by, CapabilityGrantIssuer::ScheduledRun(_));
         if fresh || task_grant {
             if !fresh || !task_grant {
                 return Err(invalid());

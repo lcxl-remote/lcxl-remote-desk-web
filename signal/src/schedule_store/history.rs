@@ -99,23 +99,22 @@ impl ScheduleStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::publication::tests::{Verifier, fixture_on};
+    use super::super::tests::enabled_fresh_task_on;
     use super::*;
     use sea_orm::{ActiveValue::NotSet, IntoActiveModel, Set};
 
     #[tokio::test]
     async fn public_run_selector_requires_started_original_subject() {
         use sea_orm::ActiveModelTrait;
-        let (store, task, _, publication) = fixture_on(
+        let (store, task) = enabled_fresh_task_on(
             crate::config::test_support::Database::connect("sqlite::memory:")
                 .await
                 .unwrap(),
+            None,
+            1,
+            None,
         )
         .await;
-        store
-            .publish_task(1, &publication, &Verifier(true))
-            .await
-            .unwrap();
         let row = store
             .enqueue_manual(1, &task.schedule_id, "result-selector")
             .await
@@ -182,16 +181,15 @@ mod tests {
 
     #[tokio::test]
     async fn history_is_task_scoped_and_new_inserts_do_not_shift_the_cursor() {
-        let (store, task, _, publication) = fixture_on(
+        let (store, task) = enabled_fresh_task_on(
             crate::config::test_support::Database::connect("sqlite::memory:")
                 .await
                 .unwrap(),
+            None,
+            1,
+            None,
         )
         .await;
-        store
-            .publish_task(1, &publication, &Verifier(true))
-            .await
-            .unwrap();
         let first = store
             .enqueue_manual(1, &task.schedule_id, "history-first")
             .await

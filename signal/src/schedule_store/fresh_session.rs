@@ -158,24 +158,34 @@ impl ScheduleStore {
         proof
             .validate(actor, device)
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let (_, contract) = super::publication::load_contract(
-            db,
-            task.owner_user_id,
-            &task.schedule_id,
-            task.contract_revision.ok_or(ScheduleStoreError::Conflict)?,
-        )
-        .await?;
-        if i64::try_from(contract.contract().task_revision).ok() != Some(task.task_revision)
-            || contract.contract().target_device_id != device
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
+        let policy: desk_agent_protocol::schedule::policy::ScheduleBudgetPolicy =
+            serde_json::from_str(
+                work.budget_policy_json
+                    .as_deref()
+                    .ok_or(ScheduleStoreError::Conflict)?,
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let definition = desk_diagnose_core::schedule::definition::ScheduledTaskDefinition {
+            schedule_id: task.schedule_id.clone(),
+            task_revision: u64::try_from(task.task_revision)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+            target_device_id: device.into(),
+            prompt: task.prompt.clone(),
+            locale: task.locale.clone(),
+            model_id: task.model_id,
+            policy_revision: policy.revision,
+            budget: policy.maximum,
+        };
         let Some(destination) = source.allowed_destinations.first() else {
             return Ok(None);
         };
-        let expected =
-            model_bound_published_input(&work.run_id, &task.prompt, &contract, destination.clone())
-                .map_err(|_| ScheduleStoreError::Invalid)?;
+        let expected = model_bound_published_input(
+            &work.run_id,
+            &task.prompt,
+            &definition,
+            destination.clone(),
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)?;
         if expected.data_envelope.as_ref() != Some(source) {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -217,7 +227,7 @@ impl ScheduleStore {
                 Self::lock_run_authority(
                     txn,
                     work.owner_user_id,
-                    &authority.contract().contract().target_device_id,
+                    &authority.definition().target_device_id,
                     &work.run_id,
                     node,
                     work.lease_epoch,
@@ -253,7 +263,7 @@ impl ScheduleStore {
         .ok_or(ScheduleStoreError::Invalid)?;
         let mut session = Box::new(
             initial_session(
-                current.contract(),
+                current.definition(),
                 FreshSessionInput {
                     run_id: &work.run_id,
                     actor_id: &work.owner_user_id.to_string(),
@@ -380,9 +390,9 @@ impl ScheduleStore {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::publication::tests::{Verifier, fixture_on};
+    use super::super::tests::enabled_fresh_task_on;
     use super::*;
-    use crate::entity::{agent_task_authorization, agent_task_budget_reservation as budget_row};
+    use crate::entity::agent_task_budget_reservation as budget_row;
     use desk_agent_protocol::ExecutionMode;
     use sea_orm::{ConnectionTrait, Schema, TransactionTrait};
 
@@ -526,18 +536,9 @@ pub(crate) mod tests {
         row.state_json = Set(source.encode_json_for_storage().unwrap());
         row.update(&store.db).await.unwrap();
 
-        let (store, task, _, publication) =
-            super::super::publication::tests::fixture_for_requirement(
-                db,
-                Some("device-1"),
-                1,
-                Some(&source),
-            )
-            .await;
-        store
-            .publish_task(1, &publication, &Verifier(true))
-            .await
-            .unwrap();
+        let (store, task) =
+            super::super::tests::enabled_fresh_task_on(db, Some("device-1"), 1, Some(&source))
+                .await;
         let queued = store
             .enqueue_manual(1, &task.schedule_id, "source-seeded-fresh")
             .await
@@ -549,14 +550,27 @@ pub(crate) mod tests {
     async fn published_input_uses_original_snapshot_and_fits_small_stacks() {
         for stack_bytes in [1024 * 1024, 2 * 1024 * 1024] {
             let (store, task, source, queued) = source_fixture().await;
-            let contract = desk_diagnose_core::schedule::contract::parse_contract(
-                &store
-                    .read_contract(1, &task.schedule_id, task.contract_revision.unwrap())
-                    .await
-                    .unwrap()
-                    .canonical_json,
-            )
-            .unwrap();
+            // The occurrence pins its budget policy when it is claimed.
+            let policy = desk_diagnose_core::schedule::policy::initial();
+            agent_schedule_run::Entity::update_many()
+                .set(agent_schedule_run::ActiveModel {
+                    budget_policy_json: Set(Some(serde_json::to_string(&policy).unwrap())),
+                    ..Default::default()
+                })
+                .filter(agent_schedule_run::Column::Id.eq(queued.id))
+                .exec(&store.db)
+                .await
+                .unwrap();
+            let contract = desk_diagnose_core::schedule::definition::ScheduledTaskDefinition {
+                schedule_id: task.schedule_id.clone(),
+                task_revision: task.task_revision as u64,
+                target_device_id: task.target_device_id.clone(),
+                prompt: task.prompt.clone(),
+                locale: task.locale.clone(),
+                model_id: task.model_id,
+                policy_revision: policy.revision,
+                budget: policy.maximum,
+            };
             let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
                 connection_id: "published-prompt".into(),
                 connection_revision: 1,
@@ -786,17 +800,13 @@ pub(crate) mod tests {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
-        let (store, task, _, publication) = fixture_on(db).await;
+        let (store, task) = enabled_fresh_task_on(db, None, 1, None).await;
         store
             .db
             .execute(
                 &Schema::new(store.db.get_database_backend())
                     .create_table_from_entity(agent_session::Entity),
             )
-            .await
-            .unwrap();
-        store
-            .publish_task(1, &publication, &Verifier(true))
             .await
             .unwrap();
         let queued = store
@@ -810,7 +820,7 @@ pub(crate) mod tests {
             expires_at: None,
             policy_name: None,
         };
-        for revoked in [true, false] {
+        for cancelled in [true, false] {
             let txn = store.db.begin().await.unwrap();
             let work = ScheduleStore::claim_queued_on(&txn, &queued.run_id, "fresh-node", 90)
                 .await
@@ -828,24 +838,18 @@ pub(crate) mod tests {
             let delegation = authority.delegation_source().unwrap();
             assert_eq!(&delegation.provenance, authority.provenance());
             assert_eq!(delegation.started_at_ms, work.started_at.unwrap());
-            assert_eq!(
-                delegation.validate().unwrap().digest(),
-                authority.contract().digest()
-            );
+            assert_eq!(delegation.validate().unwrap(), authority.definition());
             let original_deadline = work.started_at.unwrap()
-                + i64::from(authority.contract().contract().budget.max_runtime_seconds) * 1_000;
-            assert_eq!(
-                delegation.deadline_ms().unwrap(),
-                original_deadline.min(delegation.authorization_expires_at_ms.unwrap_or(i64::MAX))
-            );
+                + i64::from(authority.definition().budget.max_runtime_seconds) * 1_000;
+            assert_eq!(delegation.deadline_ms().unwrap(), original_deadline);
             assert!(delegation.deadline_ms().unwrap() >= authority.valid_until());
-            if revoked {
-                agent_task_authorization::Entity::update_many()
-                    .set(agent_task_authorization::ActiveModel {
-                        revoked_at: Set(Some(authority.verified_at())),
+            if cancelled {
+                agent_schedule_run::Entity::update_many()
+                    .set(agent_schedule_run::ActiveModel {
+                        cancel_requested_at: Set(Some(authority.verified_at())),
                         ..Default::default()
                     })
-                    .filter(agent_task_authorization::Column::ScheduleId.eq(&task.schedule_id))
+                    .filter(agent_schedule_run::Column::RunId.eq(&work.run_id))
                     .exec(&txn)
                     .await
                     .unwrap();
@@ -969,7 +973,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
         );
-        for case in ["session_expired", "run_expired", "cancelled", "revoked"] {
+        for case in ["session_expired", "run_expired", "cancelled"] {
             match case {
                 "session_expired" => {
                     agent_session::Entity::update_many()
@@ -997,16 +1001,6 @@ pub(crate) mod tests {
                     agent_schedule_run::Entity::update_many()
                         .set(agent_schedule_run::ActiveModel {
                             cancel_requested_at: Set(Some(1)),
-                            ..Default::default()
-                        })
-                        .exec(&store.db)
-                        .await
-                        .unwrap();
-                }
-                "revoked" => {
-                    agent_task_authorization::Entity::update_many()
-                        .set(agent_task_authorization::ActiveModel {
-                            revoked_at: Set(Some(1)),
                             ..Default::default()
                         })
                         .exec(&store.db)
@@ -1061,14 +1055,6 @@ pub(crate) mod tests {
                 .set(agent_schedule_run::ActiveModel {
                     lease_deadline: Set(renewed_run.lease_deadline),
                     cancel_requested_at: Set(None),
-                    ..Default::default()
-                })
-                .exec(&store.db)
-                .await
-                .unwrap();
-            agent_task_authorization::Entity::update_many()
-                .set(agent_task_authorization::ActiveModel {
-                    revoked_at: Set(None),
                     ..Default::default()
                 })
                 .exec(&store.db)
@@ -1151,7 +1137,6 @@ pub(crate) mod tests {
             node: "fresh-node",
             lease_epoch: work.lease_epoch,
             kind: super::super::TaskBudgetKind::ModelTokens,
-            rule_id: None,
             logical_key: "model-step-1",
             input_sha256: &"a".repeat(64),
             units: 10,
@@ -1366,9 +1351,10 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        agent_task_authorization::Entity::update_many()
-            .set(agent_task_authorization::ActiveModel {
-                revoked_at: Set(Some(1)),
+        // A late receipt still settles after the run is cancelled.
+        agent_schedule_run::Entity::update_many()
+            .set(agent_schedule_run::ActiveModel {
+                cancel_requested_at: Set(Some(1)),
                 ..Default::default()
             })
             .exec(&store.db)
@@ -1392,13 +1378,5 @@ pub(crate) mod tests {
         );
         txn.commit().await.unwrap();
         assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), expected);
-        assert!(
-            agent_task_authorization::Entity::find()
-                .all(&store.db)
-                .await
-                .unwrap()
-                .iter()
-                .all(|authorization| authorization.revoked_at == Some(1))
-        );
     }
 }

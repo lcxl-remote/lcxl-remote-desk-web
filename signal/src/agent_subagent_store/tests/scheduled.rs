@@ -1,12 +1,10 @@
-//! Publication fixtures exercise real source capture, child claims and accounting.
+//! Scheduled-run fixtures exercise real source capture, child claims and accounting.
 use super::*;
 use crate::entity::{
     agent_delegation_reservation as cost, agent_schedule_run as occurrence,
-    agent_task_authorization as authorization, agent_task_budget_reservation as quota,
+    agent_task_budget_reservation as quota,
 };
-use crate::schedule_store::{
-    ScheduleStore, TestPublicationVerifier, publication_device_test_fixture,
-};
+use crate::schedule_store::ScheduleStore;
 use desk_diagnose_core::{
     goal::GoalUsage,
     session::TriggerOrigin,
@@ -48,64 +46,10 @@ async fn published_parent_on(
     PersistedAgentSession,
     CreationEnvelope,
 ) {
-    let (schedule, mut task, contract, mut publication) =
-        publication_device_test_fixture(db.clone(), Some("1")).await;
-    if command {
-        use desk_agent_protocol::schedule::contract::{
-            TaskContract, TaskFixedStep, TaskInputConstraint, TaskPermissionRule,
-            TaskPermissionScope, TaskStepBinding,
-        };
-        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
-        let capability = registry
-            .capability_for_tool(desk_diagnose_core::command_confirmation::COMMAND_TOOL)
-            .unwrap();
-        let provider = registry
-            .provider_for_capability(&capability.wire.capability_id)
-            .unwrap();
-        let mut definition: TaskContract = serde_json::from_str(&contract.canonical_json).unwrap();
-        let scope = TaskPermissionScope {
-            resources: vec!["device:1".into()],
-            operations: vec!["execute".into()],
-            export_destinations: vec![],
-            limits: desk_agent_protocol::capability_grant::CapabilityGrantLimits {
-                max_bytes_per_call: 4096,
-                max_items_per_call: 1,
-                max_calls: 1,
-            },
-        };
-        definition.permissions.push(TaskPermissionRule {
-            rule_id: "original-command".into(),
-            provider_id: provider.wire.provider_id.clone(),
-            capability_id: capability.wire.capability_id.clone(),
-            tool_name: capability.wire.tool_name.clone(),
-            tool_schema_version: capability.wire.input_schema_version,
-            effect: capability.wire.effect,
-            risk_tier: desk_agent_protocol::capability_grant::CapabilityRiskTier::R3,
-            input: TaskInputConstraint::Exact {
-                canonical_json: command_fixture_input(),
-            },
-            automatic: scope.clone(),
-            approval_ceiling: scope,
-        });
-        definition.steps.push(TaskFixedStep {
-            step_id: "original-command".into(),
-            rule_id: "original-command".into(),
-            depends_on: vec![],
-            binding: TaskStepBinding::Exact,
-        });
-        let saved = schedule
-            .save_contract(1, task.revision, &definition)
-            .await
-            .unwrap();
-        task = schedule.read(1, &task.schedule_id).await.unwrap();
-        publication.expected_revision = task.revision;
-        publication.contract_revision = saved.contract_revision;
-        publication.contract_sha256 = saved.digest_sha256;
-    }
-    schedule
-        .publish_task(1, &publication, &TestPublicationVerifier(true))
-        .await
-        .unwrap();
+    // Commands are approved per call; the flag only names the fixture use.
+    let _ = command;
+    let (schedule, task) =
+        crate::schedule_store::tests::enabled_fresh_task_on(db.clone(), Some("1"), 1, None).await;
     let queued = schedule
         .enqueue_manual(1, &task.schedule_id, "delegation-source")
         .await
@@ -163,7 +107,7 @@ async fn published_parent_on(
 pub(super) fn command_fixture_input() -> String {
     desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
         desk_diagnose_core::command_confirmation::COMMAND_TOOL,
-        serde_json::json!({"schema_version":1,"shell":"bash","command":"pwd","timeout_ms":60000}),
+        serde_json::json!({"schema_version":1,"shell":"bash","command":"pwd","timeout_ms":10000}),
     )
     .unwrap()
 }
@@ -534,9 +478,10 @@ async fn source_initialization_is_fenced_and_keeps_one_original_group() {
             .await
             .is_err()
     );
-    authorization::Entity::update_many()
-        .set(authorization::ActiveModel {
-            revoked_at: Set(Some(chrono::Utc::now().timestamp_millis())),
+    // A cancelled occurrence cannot start another source.
+    occurrence::Entity::update_many()
+        .set(occurrence::ActiveModel {
+            cancel_requested_at: Set(Some(chrono::Utc::now().timestamp_millis())),
             ..Default::default()
         })
         .exec(&db)

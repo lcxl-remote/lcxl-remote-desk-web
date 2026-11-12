@@ -1,14 +1,14 @@
 //! Pure validation of the server-owned, revisioned budget ceiling.
 use desk_agent_protocol::{
     capability_grant::MAX_GRANT_USES,
-    schedule::{contract::TaskBudget, policy::ScheduleBudgetPolicy},
+    schedule::policy::{ScheduleBudgetPolicy, TaskBudget},
 };
 
 pub fn initial() -> ScheduleBudgetPolicy {
     ScheduleBudgetPolicy {
         schema_version: 1,
         revision: 0,
-        maximum: super::TASK_PUBLICATION_BUDGET,
+        maximum: super::DEFAULT_TASK_BUDGET,
     }
 }
 

@@ -74,61 +74,20 @@ pub enum ScheduleManagementRequest {
     CancelTaskRun {
         run_id: String,
     },
-    RevokeTaskAuthorization {
-        schedule_id: String,
-        expected_revision: i64,
-    },
-    GetTaskContract {
-        schedule_id: String,
-    },
-    GenerateTaskContract {
-        schedule_id: String,
-        expected_revision: i64,
-    },
-    SaveTaskContract {
-        expected_revision: i64,
-        contract: Box<contract::TaskContract>,
-    },
-    /// Explicit owner confirmation of the stored contract and successful guided run.
-    PublishTask {
-        schedule_id: String,
-        expected_revision: i64,
-        contract_revision: i64,
-        contract_sha256: String,
-        rehearsal_run_id: String,
-        /// Exclusive authorization expiry as UTC Unix milliseconds.
-        expires_at: Option<i64>,
-        client_publish_key: String,
-    },
     ListRuns {
         schedule_id: String,
         before: Option<String>,
         limit: u32,
     },
-    CreateDraft {
-        draft: ScheduleDraft,
+    /// Owner creation. The task is enabled immediately; there is no draft state.
+    CreateTask {
+        task: ScheduleDraft,
     },
-    ActivateConversationResume {
+    /// Decide a pending AI proposal. Approval enables the task as proposed.
+    DecideScheduleProposal {
         schedule_id: String,
         expected_revision: i64,
-    },
-    ReserveRehearsal {
-        schedule_id: String,
-        expected_revision: i64,
-        client_request_key: String,
-    },
-    GetRehearsal {
-        rehearsal_id: String,
-    },
-    GetTaskRehearsal {
-        schedule_id: String,
-    },
-    GetRehearsalPermissions {
-        rehearsal_id: String,
-    },
-    CancelPendingRehearsal {
-        rehearsal_id: String,
-        expected_revision: i64,
+        approve: bool,
     },
     Rename {
         schedule_id: String,
@@ -185,70 +144,19 @@ pub struct ScheduleView {
     pub updated_at: String,
 }
 
-/// Only public conversation intent and frozen task text are exposed to the owner.
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RehearsalView {
-    pub rehearsal_id: String,
-    pub schedule_id: String,
-    pub task_revision: i64,
-    pub target_device_id: Option<String>,
-    pub client_conversation_id: String,
-    pub initial_message_id: String,
-    pub prompt: String,
-    pub locale: Option<String>,
-    pub model_id: Option<i32>,
-    pub status: RehearsalStatus,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum RehearsalStatus {
-    Failed,
-    Pending,
-    Running,
-    Completed,
-    Cancelled,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+// One wire response per request; boxing the task view would only add indirection.
+#[allow(clippy::large_enum_variant)]
 pub enum ScheduleManagementResponse {
     ResumeSources {
         sources: Vec<ResumeConversationSource>,
         next_offset: Option<u32>,
     },
-    TaskContract {
-        authorization: Option<TaskAuthorizationView>,
-        previous_contract: Option<Box<contract::TaskContract>>,
-        task: Box<ScheduleView>,
-        task_revision: u64,
-        /// Public device reference; the opaque digest binds the server's stored contract.
-        contract: Option<Box<contract::TaskContract>>,
-        contract_sha256: Option<String>,
-    },
     Runs {
         schedule_id: String,
         runs: Vec<ScheduledRunView>,
         next_cursor: Option<String>,
-    },
-    TaskRehearsal {
-        task: Box<ScheduleView>,
-        rehearsal: Option<RehearsalView>,
-    },
-    RehearsalPermissions {
-        rehearsal_id: String,
-        observations: Vec<RehearsalPermissionObservation>,
-        unconfirmed_tool_call_ids: Vec<String>,
-        unclassified_tool_call_ids: Vec<String>,
-    },
-    Rehearsal {
-        task: Box<ScheduleView>,
-        rehearsal: RehearsalView,
     },
     ConvertedTime {
         conversion: ScheduleTimeConverted,
@@ -306,35 +214,9 @@ pub enum ScheduledRunIssue {
     Misfire,
     DeviceOfflineTimeout,
     QueueTimeout,
-    BudgetPolicyExceeded,
     ExecutorInterrupted,
     OutcomeUnknown,
     Unavailable,
-}
-
-/// Historical successful scope, not a grant or a statement of future necessity.
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RehearsalPermissionObservation {
-    pub tool_call_id: String,
-    pub provider_id: String,
-    pub capability_id: String,
-    pub tool_name: String,
-    pub tool_schema_version: u16,
-    pub effect: crate::capability_provider::CapabilityEffect,
-    pub risk_tier: crate::capability_grant::CapabilityRiskTier,
-    pub resources: Vec<String>,
-    pub operations: Vec<String>,
-    pub export_destinations: Vec<crate::data_lineage::DestinationIdentity>,
-    pub approval_source: RehearsalApprovalSource,
-    pub completed_at: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RehearsalApprovalSource {
-    PolicyAuto,
-    UserDecision,
 }
 
 #[cfg(test)]
@@ -365,47 +247,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn publication_confirmation_round_trips_and_rejects_client_authority() {
+    fn proposal_decision_round_trips_and_rejects_extra_authority() {
         let value = serde_json::json!({
-            "operation": "publish_task", "schedule_id": "task", "expected_revision": 3,
-            "contract_revision": 1, "contract_sha256": "a".repeat(64),
-            "rehearsal_run_id": "guided-run", "expires_at": null,
-            "client_publish_key": "confirmation"
+            "operation": "decide_schedule_proposal", "schedule_id": "task",
+            "expected_revision": 3, "approve": true
         });
         let request: ScheduleManagementRequest = serde_json::from_value(value.clone()).unwrap();
         let wire = wincode::serialize(&request).unwrap();
         let decoded: ScheduleManagementRequest = wincode::deserialize(&wire).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), value);
         let mut forged = value;
-        forged["authorization_revision"] = serde_json::json!(1);
+        forged["decided_by"] = serde_json::json!("ai");
         assert!(serde_json::from_value::<ScheduleManagementRequest>(forged).is_err());
-    }
-
-    #[test]
-    fn rehearsal_response_round_trips_without_an_extra_task_wrapper() {
-        let value = serde_json::json!({
-            "result": "rehearsal",
-            "task": {
-                "schedule_id": "schedule", "target_device_id": "public-device",
-                "kind": "fresh_task", "title": "Task", "prompt": "Review status",
-                "status": "rehearsing", "revision": 2,
-                "spec": {"schema_version": 1, "rule": {"kind": "once", "at": "2026-10-01T12:00:00Z"}},
-                "upcoming_runs": [], "next_run_at": null, "active_run_id": null, "pause_reasons": [], "consecutive_failures": 0, "failure_threshold": 3,
-                "created_at": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T00:00:00Z"
-            },
-            "rehearsal": {
-                "rehearsal_id": "rehearsal", "schedule_id": "schedule", "task_revision": 1,
-                "target_device_id": "public-device", "client_conversation_id": "rehearsal_client",
-                "initial_message_id": "rehearsal:rehearsal:input", "prompt": "Review status",
-                "locale": null, "model_id": 3, "status": "pending",
-                "started_at": null, "finished_at": null
-            }
-        });
-        let response: ScheduleManagementResponse = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&response).unwrap(), value);
-        let wire = wincode::serialize(&response).unwrap();
-        let decoded: ScheduleManagementResponse = wincode::deserialize(&wire).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
     }
 }
 
@@ -417,16 +270,4 @@ pub struct ResumeConversationSource {
     pub target_device_id: String,
     pub title: String,
     pub requirement_revision: u64,
-}
-
-/// Historical owner approval metadata; current dispatch policy is always rechecked.
-#[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TaskAuthorizationView {
-    pub authorization_revision: u64,
-    pub task_revision: u64,
-    pub contract_revision: u64,
-    pub approved_at: String,
-    pub expires_at: Option<String>,
-    pub revoked_at: Option<String>,
 }

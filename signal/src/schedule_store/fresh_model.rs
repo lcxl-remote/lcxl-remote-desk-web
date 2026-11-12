@@ -17,7 +17,6 @@ impl ScheduleStore {
         request: &TaskBudgetRequest<'_>,
     ) -> Result<agent_task_budget_reservation::Model, ScheduleStoreError> {
         if request.kind != TaskBudgetKind::ModelTokens
-            || request.rule_id.is_some()
             || held.actor_id != request.owner.to_string()
             || held.device_id != request.device
             || held.conversation_id != request.run_id
@@ -134,7 +133,7 @@ impl ScheduleStore {
         compression: Option<&str>,
         input_snapshot: &desk_diagnose_core::model_egress::NativeModelInputSnapshot,
     ) -> Result<FreshModelDispatch, ScheduleStoreError> {
-        super::publication::key(export_authorization_id)?;
+        super::key(export_authorization_id)?;
         let audit = input_snapshot
             .audit()
             .map_err(|_| ScheduleStoreError::Invalid)?;

@@ -46,7 +46,7 @@ it('keeps standalone back navigation beside the conversation heading without the
     expect(standalone).not.toContain("t('pages.aiAssistant.subtitle')");
     expect(page).not.toContain('max-w-4xl');
     expect(standalone).toContain('absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden');
-    expect(standalone.match(/backTo=\{/g)).toHaveLength(2);
+    expect(standalone.match(/backTo=\{/g)).toHaveLength(1);
     const header = page.slice(page.indexOf('data-testid="assistant-title-row"'), page.indexOf('</CardHeader>', page.indexOf('data-testid="assistant-title-row"')));
     expect(header).toContain('{backTo && (');
     expect(header).toContain("aria-label={t(hasDevice ? 'pages.aiAssistant.backToDevice' : 'pages.aiAssistant.backToOverview')}");

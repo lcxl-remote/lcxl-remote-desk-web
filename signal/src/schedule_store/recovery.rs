@@ -54,9 +54,6 @@ impl ScheduleStore {
         let spec = validate_publication(&spec, now, row.kind == "conversation_resume")
             .map_err(|_| ScheduleStoreError::Invalid)?;
         authorizer.authorize(&txn, &row).await?;
-        failures
-            .pause_reasons
-            .remove(&SchedulePauseReason::AuthorizationInvalid);
         failures.resume().map_err(|_| ScheduleStoreError::Invalid)?;
         let changed = entity::Entity::update_many()
             .set(entity::ActiveModel {

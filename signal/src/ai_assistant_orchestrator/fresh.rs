@@ -1,11 +1,11 @@
 //! Isolated task entry using the original atomically claimed session.
 use super::*;
 use desk_diagnose_core::{
-    schedule::contract::ValidatedTaskContract, session::PersistedAgentSession,
+    schedule::definition::ScheduledTaskDefinition, session::PersistedAgentSession,
 };
 
 pub(super) struct FreshContext {
-    pub contract: ValidatedTaskContract,
+    pub definition: ScheduledTaskDefinition,
     pub initial_assistant_data:
         Option<Box<desk_diagnose_core::ai_assistant::data_control::AssistantDataSession>>,
     pub resume_reference: Option<String>,
@@ -13,28 +13,6 @@ pub(super) struct FreshContext {
     pub children_notification_id: Option<String>,
     pub creation: Option<desk_diagnose_core::subagent::creation::CreationEnvelope>,
     pub gate: std::sync::Arc<crate::ai_assistant_gate::AiAssistantGate>,
-}
-
-pub(crate) fn contains_tool(
-    contract: &ValidatedTaskContract,
-    providers: &desk_diagnose_core::provider_registry::ProviderRegistry,
-    name: &str,
-) -> bool {
-    providers
-        .capability_for_tool(name)
-        .is_some_and(|capability| {
-            providers
-                .provider_for_capability(&capability.wire.capability_id)
-                .is_some_and(|provider| {
-                    contract.contract().permissions.iter().any(|rule| {
-                        rule.tool_name == name
-                            && rule.provider_id == provider.wire.provider_id
-                            && rule.capability_id == capability.wire.capability_id
-                            && rule.tool_schema_version == capability.wire.input_schema_version
-                            && rule.effect == capability.wire.effect
-                    })
-                })
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,7 +103,7 @@ pub async fn resume_fresh_task(
         lease_seconds,
         permission_request_id: None,
         fresh: Some(FreshContext {
-            contract: authority.contract().clone(),
+            definition: authority.definition().clone(),
             initial_assistant_data,
             resume_reference,
             children_wait_id,

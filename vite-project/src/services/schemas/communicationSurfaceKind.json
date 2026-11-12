@@ -1,1 +1,0 @@
-{"type":"string","enum":["classic_outlook_desktop","outlook_new_desktop","chrome_extension","assistive_ui"],"x-readme-ref-name":"CommunicationSurfaceKind"}

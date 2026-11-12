@@ -304,10 +304,7 @@ pub fn unfinished_pause(session: &PersistedAgentSession) -> Option<String> {
                     || (request.items.len() == 1 && request.items[0].suggested_max_uses == 1);
                 if !task_shape
                     || !crate::permission_tools::synthesized_request_matches(request, &original)
-                    || !super::contract::exception::unique_original_call(
-                        &session.conversation,
-                        &original,
-                    )
+                    || !super::run_approval::unique_original_call(&session.conversation, &original)
                 {
                     continue;
                 }

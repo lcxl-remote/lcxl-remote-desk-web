@@ -9,9 +9,9 @@ use desk_agent_protocol::schedule::{
 pub const MAX_SCHEDULE_PROMPT_CHARS: usize = 16 * 1024;
 
 pub const SCHEDULE_CALC_VERSION: &str = "utc-v1";
-/// Initial server policy and draft budget; deployed policy is read from storage.
-pub const TASK_PUBLICATION_BUDGET: desk_agent_protocol::schedule::contract::TaskBudget =
-    desk_agent_protocol::schedule::contract::TaskBudget {
+/// Initial server limits for every scheduled run; deployed policy is read from storage.
+pub const DEFAULT_TASK_BUDGET: desk_agent_protocol::schedule::policy::TaskBudget =
+    desk_agent_protocol::schedule::policy::TaskBudget {
         max_runs_per_utc_day: 24,
         max_calls_per_run: 64,
         max_model_tokens_per_run: 100_000,
@@ -21,7 +21,7 @@ pub const TASK_PUBLICATION_BUDGET: desk_agent_protocol::schedule::contract::Task
 pub const MIN_INTERVAL_SECONDS: u32 = 60;
 pub const MAX_INTERVAL_SECONDS: u32 = 31_536_000;
 
-pub mod contract;
+pub mod definition;
 pub mod due;
 pub mod fresh_session;
 pub mod history;
@@ -31,9 +31,9 @@ pub mod model_usage;
 pub mod permission_wait;
 pub mod policy;
 pub mod published_input;
-pub mod rehearsal;
 pub mod retention;
-pub mod source_graph;
+pub mod review;
+pub mod run_approval;
 pub mod task_prompt;
 pub mod timezone;
 
@@ -299,8 +299,6 @@ mod tests;
 
 pub mod management_tools;
 pub mod proposal;
-
-pub mod directory_recovery;
 
 #[cfg(test)]
 mod confirmation_delay_tests {

@@ -164,11 +164,10 @@ async fn edits_preserve_running_snapshot_and_do_not_reactivate_a_changed_require
     assert_eq!(current.task_revision, 1);
     assert!(current.revision > current.task_revision);
     assert_eq!(revised.task_revision, 2);
-    assert_eq!(revised.status, "draft");
+    // Editing the prompt keeps the task enabled; later runs use the new text.
+    assert_eq!(revised.status, current.status);
     let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json).unwrap();
     assert_eq!(snapshot.task_revision, 1);
-    assert!(revised.contract_revision.is_none());
-    assert!(revised.authorization_revision.is_none());
     let old = run::Entity::find()
         .filter(run::Column::RunId.eq(&work.run_id))
         .one(&store.db)
@@ -189,12 +188,12 @@ async fn edits_preserve_running_snapshot_and_do_not_reactivate_a_changed_require
         .unwrap();
     assert_eq!(
         store.read(1, &task.schedule_id).await.unwrap().status,
-        "draft"
+        "active"
     );
 }
 
 #[tokio::test]
-async fn no_op_time_save_and_rename_keep_utc_and_authorization_unchanged() {
+async fn no_op_time_save_and_rename_keep_utc_and_task_revision_unchanged() {
     let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
         .unwrap();
@@ -220,10 +219,6 @@ async fn no_op_time_save_and_rename_keep_utc_and_authorization_unchanged() {
     assert_eq!(renamed.task_revision, before.task_revision);
     assert_eq!(renamed.spec_json, before.spec_json);
     assert_eq!(renamed.next_run_at, before.next_run_at);
-    assert_eq!(
-        renamed.authorization_revision,
-        before.authorization_revision
-    );
     assert!(matches!(
         store
             .change_time(1, &task.schedule_id, before.revision, &spec)
@@ -353,20 +348,6 @@ async fn manual_run_has_separate_identity_and_leaves_calendar_unchanged() {
         future,
     )
     .await;
-    assert!(matches!(
-        store.enqueue_manual(1, &task.schedule_id, "manual-1").await,
-        Err(ScheduleStoreError::Conflict)
-    ));
-    entity::Entity::update_many()
-        .set(entity::ActiveModel {
-            contract_revision: Set(Some(1)),
-            authorization_revision: Set(Some(1)),
-            ..Default::default()
-        })
-        .filter(entity::Column::Id.eq(task.id))
-        .exec(&store.db)
-        .await
-        .unwrap();
     let first = store
         .enqueue_manual(1, &task.schedule_id, "manual-1")
         .await
@@ -957,7 +938,7 @@ async fn fresh_claim_rejects_reused_context_terminal_markers_and_changed_snapsho
             "deadline" => change.lease_deadline = Set(Some(now + 30_000)),
             "error" => change.error_kind = Set(Some("old-error".into())),
             "result" => change.result_ref = Set(Some("old-result".into())),
-            "conversation" => change.conversation_id = Set("rehearsal-context".into()),
+            "conversation" => change.conversation_id = Set("other-context".into()),
             "turn" => change.turn_id = Set("old-turn".into()),
             "owner" => change.owner_user_id = Set(2),
             "snapshot" => {

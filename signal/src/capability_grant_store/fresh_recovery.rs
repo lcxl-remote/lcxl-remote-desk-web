@@ -105,7 +105,7 @@ pub(crate) async fn restore_completed_calls(
             .ok_or_else(invalid)?;
         let grant = decode_grant(&grant_row)?;
         if !matches!(&grant.issued_by,
-            desk_agent_protocol::capability_grant::CapabilityGrantIssuer::TaskAuthorization(parent)
+            desk_agent_protocol::capability_grant::CapabilityGrantIssuer::ScheduledRun(parent)
                 if parent == context.provenance())
         {
             return Err(invalid());

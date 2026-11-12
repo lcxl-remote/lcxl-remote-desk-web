@@ -7,7 +7,7 @@ use crate::entity::{
     agent_goal_run as goal_row, agent_run_event, agent_session,
 };
 mod defaults;
-pub(crate) use defaults::discover_default_review_roots;
+pub(crate) use defaults::{discover_default_review_roots, open_for_schedule_proposal_on};
 mod preference;
 pub(crate) use preference::review_mode_current_on;
 pub(crate) use preference::{current_no_review_parent_on, preference_for_session_on};
@@ -227,6 +227,41 @@ pub async fn pending_permission_reviews(
                     });
                 }
             }
+            if let Some(schedule_id) = session.pending_schedule_review.as_deref()
+                && let Some(proposal) =
+                    crate::schedule_store::review_proposal_on(db, &session, schedule_id)
+                        .await
+                        .map_err(schedule_error)?
+                && desk_diagnose_core::schedule::review::pending(&session, &proposal, now_unix_ms)
+                    .is_ok()
+            {
+                let delegation = decode(&row)?;
+                let tracking = desk_diagnose_core::approval_observation::ReviewTracking::queued(
+                    &owner_id,
+                    &row.device_id,
+                    &session.conversation_id,
+                    &row.conversation_id,
+                    &delegation.delegation_id,
+                    delegation.revision,
+                    "schedule_proposal",
+                    schedule_id,
+                    now_unix_ms as i64,
+                );
+                crate::approval_metrics::submit(
+                    &tracking,
+                    desk_diagnose_core::model_observability::ObservationPhase::Started,
+                    0,
+                    now_unix_ms as i64,
+                );
+                pending.push(PendingPermissionReview {
+                    conversation_id: session.conversation_id.clone(),
+                    owner_id: row.actor_id.clone(),
+                    device_id: row.device_id.clone(),
+                    target_device_id: row.device_id.clone(),
+                    request_id: schedule_id.to_owned(),
+                    kind: PendingRequestKind::Schedule,
+                });
+            }
             if session.turn_state.is_active() {
                 continue;
             }
@@ -436,6 +471,7 @@ pub async fn claim_permission_review(
             && !matches!(
                 candidate.source,
                 desk_diagnose_core::approval_review::ApprovalSource::GoalProposal { .. }
+                    | desk_diagnose_core::approval_review::ApprovalSource::ScheduleProposal { .. }
             ))
         || now_unix_ms >= candidate.expires_at_unix_ms
     {
@@ -531,6 +567,27 @@ pub async fn claim_permission_review(
                 &request,
                 &policy,
                 goal.as_ref(),
+                &delegation,
+                &destination,
+                now_unix_ms,
+            )
+            .map_err(|_| {
+                ReviewStartError::Unavailable(
+                    desk_diagnose_core::approval_observation::ReviewReason::Policy,
+                )
+            })?
+        } else if let desk_diagnose_core::approval_review::ApprovalSource::ScheduleProposal {
+            schedule_id,
+        } = &candidate.source
+        {
+            let proposal = crate::schedule_store::review_proposal_on(&txn, &session, schedule_id)
+                .await
+                .map_err(schedule_error)?
+                .ok_or_else(invalid)?;
+            desk_diagnose_core::schedule::review::authorize(
+                candidate,
+                &session,
+                &proposal,
                 &delegation,
                 &destination,
                 now_unix_ms,
@@ -676,6 +733,9 @@ pub async fn claim_permission_review(
         }
         desk_diagnose_core::approval_review::ApprovalSource::DirectoryProposal { request_id } => {
             ("directory_proposal", request_id.clone())
+        }
+        desk_diagnose_core::approval_review::ApprovalSource::ScheduleProposal { schedule_id } => {
+            ("schedule_proposal", schedule_id.clone())
         }
         _ => return Err(invalid().into()),
     };
@@ -824,6 +884,7 @@ pub async fn settle_permission_review(
         }),
         _ => false,
     };
+    let mut reviewed_proposal = None;
     let authorized = if let ApprovalSource::GoalProposal { request_id } = &candidate.source {
         match goal_review_input_on(&txn, &session, request_id).await {
             Ok((request, policy)) => {
@@ -844,6 +905,28 @@ pub async fn settle_permission_review(
             }
             Err(_) => false,
         }
+    } else if let ApprovalSource::ScheduleProposal { schedule_id } = &candidate.source {
+        let lease_current = u64::try_from(session_row.lease_token).ok()
+            == Some(session.lease_token)
+            && session_row
+                .lease_deadline
+                .is_some_and(|deadline| deadline.timestamp_millis() > now_unix_ms as i64);
+        let proposal = crate::schedule_store::review_proposal_on(&txn, &session, schedule_id)
+            .await
+            .map_err(schedule_error)?;
+        reviewed_proposal = proposal.clone();
+        lease_current
+            && model_revision_matches
+            && proposal.is_some_and(|proposal| {
+                desk_diagnose_core::schedule::review::validate_current(
+                    candidate,
+                    &session,
+                    &proposal,
+                    &delegation,
+                    now_unix_ms,
+                )
+                .is_ok()
+            })
     } else if matches!(candidate.source, ApprovalSource::DirectoryProposal { .. }) {
         let lease_current = u64::try_from(session_row.lease_token).ok()
             == Some(session.lease_token)
@@ -1028,6 +1111,24 @@ pub async fn settle_permission_review(
     }
     commit_directory_on(&txn, &row, status, decision, directory_failure, now_unix_ms).await?;
     commit_goal_on(&txn, &row, status, decision, directory_failure, now_unix_ms).await?;
+    // Only a final AI verdict decides a proposal; otherwise the owner decides it.
+    if let Some(proposal) = reviewed_proposal
+        && let Some(review) = decision
+        && matches!(
+            status,
+            APPROVAL_REVIEW_STATUS_APPROVED | APPROVAL_REVIEW_STATUS_DENIED
+        )
+    {
+        crate::schedule_store::decide_by_ai_on(
+            &txn,
+            &candidate.owner_id,
+            &proposal,
+            status == APPROVAL_REVIEW_STATUS_APPROVED,
+            &review.reason,
+        )
+        .await
+        .map_err(schedule_error)?;
+    }
     txn.commit().await?;
     crate::approval_metrics::committed(db, &candidate.candidate_id);
     Ok(status.to_owned())
@@ -1589,6 +1690,13 @@ pub(crate) async fn current_grant_parent_on(
     })
 }
 
+fn schedule_error(error: crate::schedule_store::ScheduleStoreError) -> DbErr {
+    match error {
+        crate::schedule_store::ScheduleStoreError::Backend(error) => error,
+        _ => invalid(),
+    }
+}
+
 /// The text stays generic for callers; the log names the rejecting check.
 #[track_caller]
 fn invalid() -> DbErr {
@@ -1760,12 +1868,20 @@ pub async fn prepare_permission_review_batch(
         PermissionReviewInput, permission_review_candidate, permission_review_input_kind,
         trusted_permission_descriptor,
     };
-    if (kind != PendingRequestKind::Goal && readiness_revision == 0) || now_unix_ms == 0 {
+    let central = matches!(
+        kind,
+        PendingRequestKind::Goal | PendingRequestKind::Schedule
+    );
+    if (!central && readiness_revision == 0) || now_unix_ms == 0 {
         return Err(invalid());
     }
     let txn = db.begin().await?;
     let (session_row, session) = session_on(&txn, conversation_id, owner_id, device_id).await?;
-    if (kind != PendingRequestKind::Directory && session.turn_state.is_active())
+    let in_turn = matches!(
+        kind,
+        PendingRequestKind::Directory | PendingRequestKind::Schedule
+    );
+    if (!in_turn && session.turn_state.is_active())
         || !crate::agent_subagent_store::shared_approval_current_on(
             &txn,
             &session,
@@ -1821,6 +1937,29 @@ pub async fn prepare_permission_review_batch(
             &policy,
             &delegation,
             goal.as_ref(),
+            now_unix_ms,
+        )
+        .map_err(|_| invalid())?;
+        if !restore_review_context_on(&txn, &mut candidate, &session).await? {
+            desk_diagnose_core::approval_review::fit_review_context(
+                &mut candidate,
+                &session,
+                budget,
+            )
+            .map_err(|_| invalid())?;
+        }
+        txn.commit().await?;
+        return Ok(vec![candidate]);
+    }
+    if kind == PendingRequestKind::Schedule {
+        let proposal = crate::schedule_store::review_proposal_on(&txn, &session, request_id)
+            .await
+            .map_err(schedule_error)?
+            .ok_or_else(invalid)?;
+        let mut candidate = desk_diagnose_core::schedule::review::candidate(
+            &session,
+            &proposal,
+            &delegation,
             now_unix_ms,
         )
         .map_err(|_| invalid())?;

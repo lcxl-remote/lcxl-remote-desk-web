@@ -39,7 +39,8 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             .await
             .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
-        let (store, task, _, publication) = fixture_on(db.clone()).await;
+        let (store, task) =
+            crate::schedule_store::tests::enabled_fresh_task_on(db.clone(), None, 1, None).await;
         let config = crate::model_provider::ModelProviderConfig {
             wire_protocol: Some(
                 desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
@@ -54,10 +55,6 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
         };
         crate::model_provider::save(&db, config).await.unwrap();
         let config = crate::model_provider::load(&db).await.unwrap();
-        store
-            .publish_task(1, &publication, &Verifier(true))
-            .await
-            .unwrap();
         let run = store
             .enqueue_manual(1, &task.schedule_id, "task-model-gateway")
             .await
@@ -93,14 +90,29 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             .await
             .unwrap();
         let held = &claimed.session;
-        let published_contract = desk_diagnose_core::schedule::contract::parse_contract(
-            &store
-                .read_contract(1, &task.schedule_id, task.contract_revision.unwrap())
-                .await
-                .unwrap()
-                .canonical_json,
-        )
-        .unwrap();
+        let pinned: desk_agent_protocol::schedule::policy::ScheduleBudgetPolicy =
+            serde_json::from_str(
+                &crate::entity::agent_schedule_run::Entity::find()
+                    .filter(crate::entity::agent_schedule_run::Column::RunId.eq(&run.run_id))
+                    .one(&db)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .budget_policy_json
+                    .unwrap(),
+            )
+            .unwrap();
+        let published_contract =
+            desk_diagnose_core::schedule::definition::ScheduledTaskDefinition {
+                schedule_id: task.schedule_id.clone(),
+                task_revision: task.task_revision as u64,
+                target_device_id: task.target_device_id.clone(),
+                prompt: task.prompt.clone(),
+                locale: task.locale.clone(),
+                model_id: task.model_id,
+                policy_revision: pinned.revision,
+                budget: pinned.maximum,
+            };
         let destination = config.destination_identity().unwrap();
         let mut model = MeteredModel {
             inner: crate::model_dial::SignalModelSeam::from_config(&config)
@@ -214,15 +226,8 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             "target".into(),
             peer("target", &task.target_device_id).await,
         );
-        let authorization = crate::entity::agent_task_authorization::Entity::find()
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        store
-            .revoke_task_authorization(1, &authorization.authorization_id, "owner revoked")
-            .await
-            .unwrap();
+        // A cancelled occurrence cannot call the model again.
+        store.cancel_run(1, &run.run_id).await.unwrap();
         assert!(
             model
                 .call(request(&task.prompt), &mut NullTurnSink)

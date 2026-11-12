@@ -693,7 +693,7 @@ fn owner_selection_transaction_is_atomic_and_does_not_grant_tool_execution() {
 }
 
 #[test]
-fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_run() {
+fn only_an_owner_selection_can_select_a_directory_directly() {
     use super::transaction::*;
     let mut session = PersistedAgentSession::new(
         "conversation",
@@ -709,8 +709,11 @@ fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_ru
         "2026-09-05T00:00:00Z",
     );
     session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
+    // A scheduled run proposes a directory like any model; it cannot select one.
+    session.trigger_origin = crate::session::TriggerOrigin::ScheduledTask;
+    session.turn_state = crate::session::TurnState::Running;
     let mut directory = proposal();
-    directory.source = DirectoryConsentSource::TaskContract;
+    directory.source = DirectoryConsentSource::ModelProposal;
     let mut update = FileScopeUpdate {
         subject: subject(),
         client_conversation_id: "browser-intent".into(),
@@ -720,25 +723,12 @@ fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_ru
             proposal: directory.clone(),
         },
     };
+    assert!(update.validate().is_err());
     assert!(prepare(&session, &update, 1).is_err());
-    session.trigger_origin = crate::session::TriggerOrigin::ScheduledTask;
-    session.turn_state = crate::session::TurnState::Running;
-    let (stored, receipt) = prepare(&session, &update, 1).unwrap();
-    assert_eq!(
-        stored.file_scope.records()[0].proposal.source,
-        DirectoryConsentSource::TaskContract
-    );
-    assert_eq!(
-        stored.file_scope.records()[0].state,
-        DirectoryConsentState::Approved
-    );
-    assert!(stored.scope_snapshot.granted.is_empty());
-    assert_eq!(receipt.update, update);
-    assert_eq!(session.file_scope.revision(), 0);
     update.mutation = FileScopeMutation::Propose {
         proposal: directory,
     };
-    assert!(update.validate().is_err());
+    assert!(update.validate().is_ok());
 }
 
 #[test]

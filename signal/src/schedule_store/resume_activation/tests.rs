@@ -19,6 +19,14 @@ async fn fixture() -> (
         .await
         .unwrap();
     crate::db::ensure_lifecycle_tables(&store.db).await;
+    // A proposal may open the default AI review when a reviewer is configured.
+    for mut table in [
+        schema.create_table_from_entity(crate::entity::agent_approval_delegation::Entity),
+        schema.create_table_from_entity(crate::entity::approval_model_probe_observation::Entity),
+        schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
+    ] {
+        store.db.execute(table.if_not_exists()).await.unwrap();
+    }
     let mut session = PersistedAgentSession::new(
         "source",
         "1",
@@ -64,6 +72,37 @@ async fn fixture() -> (
     (store, task, row, session)
 }
 
+/// Enable a pending continuation as owner creation does, with its receipt.
+async fn activate(
+    store: &ScheduleStore,
+    owner: i32,
+    schedule_id: &str,
+    expected_revision: i64,
+) -> Result<entity::Model, ScheduleStoreError> {
+    let txn = crate::db::begin_write(&store.db, entity::Entity).await?;
+    let task = find_task(&txn, owner, schedule_id, expected_revision).await?;
+    let result = ScheduleStore::activate_on(&txn, owner, &task, false).await?;
+    record_decision_on(&txn, &result, None).await?;
+    txn.commit().await?;
+    Ok(result)
+}
+
+/// A pending AI fresh-task proposal from the fixture's source conversation.
+async fn fresh_proposal(store: &ScheduleStore, session: &PersistedAgentSession) -> entity::Model {
+    let mut draft = super::super::tests::draft();
+    draft.client_create_key = "fresh-proposal".into();
+    draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::AiProposal;
+    let txn = crate::db::begin_write(&store.db, entity::Entity)
+        .await
+        .unwrap();
+    let now = super::super::authority::authority_now(&txn).await.unwrap();
+    let task = ScheduleStore::create_draft_on(&txn, 1, &draft, now, Some(session))
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    task
+}
+
 /// Midnight UTC two days out: inside the default 30-day session retention.
 fn fixture_run_at() -> chrono::DateTime<chrono::Utc> {
     (chrono::Utc::now() + chrono::Duration::days(2))
@@ -76,8 +115,7 @@ fn fixture_run_at() -> chrono::DateTime<chrono::Utc> {
 #[tokio::test]
 async fn confirmation_enables_once_with_receipt_without_granting_authority() {
     let (store, task, row, _) = fixture().await;
-    let active = store
-        .activate_conversation_resume(1, &task.schedule_id, task.revision)
+    let active = activate(&store, 1, &task.schedule_id, task.revision)
         .await
         .unwrap();
     assert_eq!(active.status, "active");
@@ -88,11 +126,7 @@ async fn confirmation_enables_once_with_receipt_without_granting_authority() {
         active.next_run_at,
         Some(fixture_run_at().timestamp_millis())
     );
-    assert!(
-        active.contract_revision.is_none()
-            && active.authorization_revision.is_none()
-            && active.active_run_id.is_none()
-    );
+    assert!(active.active_run_id.is_none());
     let updated = session_row::Entity::find_by_id(row.id)
         .one(&store.db)
         .await
@@ -113,15 +147,11 @@ async fn confirmation_enables_once_with_receipt_without_granting_authority() {
             .contains("scheduled_task_activated")
     );
     assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
+        activate(&store, 1, &task.schedule_id, task.revision).await,
         Err(ScheduleStoreError::Conflict)
     ));
     assert!(matches!(
-        store
-            .activate_conversation_resume(2, &task.schedule_id, active.revision)
-            .await,
+        activate(&store, 2, &task.schedule_id, active.revision).await,
         Err(ScheduleStoreError::NotFound)
     ));
 }
@@ -136,9 +166,7 @@ async fn a_new_user_input_after_draft_creation_prevents_activation() {
     changed.version = Set(1);
     changed.update(&store.db).await.unwrap();
     assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
+        activate(&store, 1, &task.schedule_id, task.revision).await,
         Err(ScheduleStoreError::Conflict)
     ));
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), task);
@@ -152,10 +180,8 @@ async fn elapsed_time_rolls_back_the_confirmation_cas() {
         Set(r#"{"schema_version":1,"rule":{"kind":"once","at":"2000-01-01T00:00:00Z"}}"#.into());
     let expired = changed.update(&store.db).await.unwrap();
     assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
-        Err(ScheduleStoreError::Invalid)
+        activate(&store, 1, &task.schedule_id, task.revision).await,
+        Err(ScheduleStoreError::ToolInput(_))
     ));
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), expired);
     assert_eq!(
@@ -169,29 +195,14 @@ async fn elapsed_time_rolls_back_the_confirmation_cas() {
 }
 
 #[tokio::test]
-async fn activation_does_not_bypass_task_kind_or_source_surface() {
+async fn activation_does_not_bypass_the_source_surface() {
     let (store, task, row, mut session) = fixture().await;
-    let mut changed: entity::ActiveModel = task.clone().into();
-    changed.kind = Set("fresh_task".into());
-    let fresh = changed.update(&store.db).await.unwrap();
-    assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
-        Err(ScheduleStoreError::Conflict)
-    ));
-    assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), fresh);
-    let mut changed: entity::ActiveModel = fresh.into();
-    changed.kind = Set("conversation_resume".into());
-    changed.update(&store.db).await.unwrap();
     session.surface = AgentSessionSurface::TerminalAiAssistant;
     let mut changed: session_row::ActiveModel = row.into();
     changed.state_json = Set(session.encode_json_for_storage().unwrap());
     changed.update(&store.db).await.unwrap();
     assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
+        activate(&store, 1, &task.schedule_id, task.revision).await,
         Err(ScheduleStoreError::NotFound)
     ));
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), task);
@@ -205,8 +216,7 @@ async fn relative_activation_uses_confirmation_clock_and_preserves_requirement()
         ..Default::default()
     }).filter(entity::Column::Id.eq(task.id)).exec(&store.db).await.unwrap();
     let start = store.database_time().await.unwrap();
-    let active = store
-        .activate_conversation_resume(1, &task.schedule_id, task.revision)
+    let active = activate(&store, 1, &task.schedule_id, task.revision)
         .await
         .unwrap();
     let end = store.database_time().await.unwrap();
@@ -232,8 +242,7 @@ async fn relative_activation_uses_confirmation_clock_and_preserves_requirement()
             .contains("scheduled_task_activated")
     );
     assert!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
+        activate(&store, 1, &task.schedule_id, task.revision)
             .await
             .is_err()
     );
@@ -271,7 +280,9 @@ async fn fresh_task_edit_rejects_confirmation_delay_without_changing_the_task() 
 
 #[tokio::test]
 async fn rejection_records_a_durable_decision_and_cannot_activate() {
-    let (store, task, row, before) = fixture().await;
+    let (store, _, row, before) = fixture().await;
+    let task = fresh_proposal(&store, &before).await;
+    assert_eq!(task.proposal_conversation_id.as_deref(), Some("source"));
     let rejected = store
         .delete(1, &task.schedule_id, task.revision)
         .await
@@ -289,18 +300,25 @@ async fn rejection_records_a_durable_decision_and_cannot_activate() {
     let event: serde_json::Value =
         serde_json::from_str(&after.conversation.last().unwrap().text).unwrap();
     assert_eq!(event["event"], "scheduled_task_rejected");
-    assert_eq!(event["owner_decision"], "rejected");
+    assert_eq!(event["decided_by"], "owner");
     assert!(
         store
-            .activate_conversation_resume(1, &task.schedule_id, rejected.revision)
+            .decide_proposal(
+                1,
+                &task.schedule_id,
+                rejected.revision,
+                true,
+                ProposalDecider::Owner
+            )
             .await
             .is_err()
     );
 }
 
 #[tokio::test]
-async fn orphan_draft_can_still_be_rejected() {
-    let (store, task, row, _) = fixture().await;
+async fn orphan_proposal_can_still_be_rejected() {
+    let (store, _, row, session) = fixture().await;
+    let task = fresh_proposal(&store, &session).await;
     session_row::Entity::delete_by_id(row.id)
         .exec(&store.db)
         .await
@@ -344,56 +362,13 @@ async fn exercise_live_review(selectable: bool) {
                 ])
                 .unwrap();
         }
-        session
-            .begin_turn(
-                "review-turn",
-                None,
-                None,
-                1,
-                session.scope_snapshot.clone(),
-                "2026-09-09T00:00:00Z",
-            )
-            .unwrap();
-        let call = desk_diagnose_core::chat::ToolCall {
-            id: "review-call".into(),
-            name: desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE.into(),
-            arguments_json: serde_json::json!({"kind":"conversation_resume","title":"Later","prompt":"Say hello","rule":{"kind":"after_confirmation","delay_seconds":60}}).to_string(),
-        };
-        let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
-            "assistant".into(),
-            "Schedule hello".into(),
-            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
-                connection_id: "gateway".into(),
-                connection_revision: 1,
-                model_id: "model".into(),
-                profile_revision: 1,
-            },
+        let call = begin_proposal_turn(
+            &store,
+            row,
+            &mut session,
+            serde_json::json!({"kind":"fresh_task","title":"Daily","prompt":"Say hello","rule":{"kind":"daily","utc_time":"06:00:00"}}),
         )
-        .unwrap();
-        parent.role = desk_diagnose_core::chat::ChatRole::Assistant;
-        parent.replay_disposition =
-            Some(desk_diagnose_core::replay::ReplayDisposition::NotRequired {
-                source_context_key: desk_diagnose_core::replay::SourceContextKey::derive(
-                    desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
-                    "test",
-                    "test",
-                    "test",
-                ),
-            });
-        parent
-            .tool_calls
-            .push(desk_diagnose_core::chat::ToolCallRef {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments_json: call.arguments_json.clone(),
-            });
-        session.conversation.push(parent);
-        let mut changed: session_row::ActiveModel = row.into();
-        changed.device_id = Set(session.device_id.clone());
-        changed.state_json = Set(session.encode_json_for_storage().unwrap());
-        changed.lease_token = Set(session.lease_token as i64);
-        changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));
-        changed.update(&store.db).await.unwrap();
+        .await;
         store
             .manage_from_session(
                 &mut session,
@@ -404,7 +379,7 @@ async fn exercise_live_review(selectable: bool) {
             .unwrap();
         let proposal: serde_json::Value =
             serde_json::from_str(&session.conversation.last().unwrap().text).unwrap();
-        assert_eq!(proposal["awaiting_confirmation"], true);
+        assert_eq!(proposal["awaiting_decision"], true);
         let id = session.pending_schedule_review.clone().unwrap();
         assert_eq!(proposal["schedule_id"], id);
         let task = store.read(1, &id).await.unwrap();
@@ -421,17 +396,18 @@ async fn exercise_live_review(selectable: bool) {
                 .unwrap()
         );
         let before = session.clone();
-        if approve {
-            store
-                .activate_conversation_resume(1, &task.schedule_id, task.revision)
-                .await
-                .unwrap();
+        let decider = if approve {
+            ProposalDecider::Owner
         } else {
-            store
-                .delete(1, &task.schedule_id, task.revision)
-                .await
-                .unwrap();
-        }
+            ProposalDecider::Ai {
+                reason: "Not what the owner asked for".into(),
+            }
+        };
+        let decided = store
+            .decide_proposal(1, &task.schedule_id, task.revision, approve, decider)
+            .await
+            .unwrap();
+        assert_eq!(decided.status, if approve { "active" } else { "deleted" });
         assert!(
             store
                 .poll_review_decision(
@@ -449,10 +425,132 @@ async fn exercise_live_review(selectable: bool) {
         let receipt: serde_json::Value =
             serde_json::from_str(&session.conversation.last().unwrap().text).unwrap();
         assert_eq!(
-            receipt["owner_decision"],
-            if approve { "approved" } else { "rejected" }
+            receipt["event"],
+            if approve {
+                "scheduled_task_activated"
+            } else {
+                "scheduled_task_rejected"
+            }
+        );
+        assert_eq!(
+            receipt["decided_by"],
+            if approve { "owner" } else { "approval_ai" }
         );
     }
+}
+
+/// Put the session in a running turn whose assistant message calls
+/// `request_scheduled_task` with `arguments`.
+async fn begin_proposal_turn(
+    store: &ScheduleStore,
+    row: session_row::Model,
+    session: &mut PersistedAgentSession,
+    arguments: serde_json::Value,
+) -> desk_diagnose_core::chat::ToolCall {
+    session
+        .begin_turn(
+            "review-turn",
+            None,
+            None,
+            1,
+            session.scope_snapshot.clone(),
+            "2026-09-09T00:00:00Z",
+        )
+        .unwrap();
+    let call = desk_diagnose_core::chat::ToolCall {
+        id: "review-call".into(),
+        name: desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE.into(),
+        arguments_json: arguments.to_string(),
+    };
+    let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        "assistant".into(),
+        "Schedule hello".into(),
+        desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    parent.role = desk_diagnose_core::chat::ChatRole::Assistant;
+    parent.replay_disposition = Some(desk_diagnose_core::replay::ReplayDisposition::NotRequired {
+        source_context_key: desk_diagnose_core::replay::SourceContextKey::derive(
+            desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            "test",
+            "test",
+            "test",
+        ),
+    });
+    parent
+        .tool_calls
+        .push(desk_diagnose_core::chat::ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        });
+    session.conversation.push(parent);
+    let mut changed: session_row::ActiveModel = row.into();
+    changed.device_id = Set(session.device_id.clone());
+    changed.state_json = Set(session.encode_json_for_storage().unwrap());
+    changed.lease_token = Set(session.lease_token as i64);
+    changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));
+    changed.update(&store.db).await.unwrap();
+    call
+}
+
+#[tokio::test]
+async fn an_ai_conversation_timer_is_enabled_without_waiting() {
+    let (store, _, row, mut session) = fixture().await;
+    let call = begin_proposal_turn(
+        &store,
+        row,
+        &mut session,
+        serde_json::json!({"kind":"conversation_resume","title":"Later","prompt":"Say hello",
+            "rule":{"kind":"after_confirmation","delay_seconds":60}}),
+    )
+    .await;
+    let before = session.conversation.len();
+    store
+        .manage_from_session(
+            &mut session,
+            &call,
+            &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
+        )
+        .await
+        .unwrap();
+    // The tool result is the receipt; the turn keeps running and is not paused.
+    assert!(session.pending_schedule_review.is_none());
+    assert_eq!(session.conversation.len(), before + 1);
+    let receipt: serde_json::Value =
+        serde_json::from_str(&session.conversation.last().unwrap().text).unwrap();
+    assert_eq!(receipt["awaiting_decision"], false);
+    assert_eq!(receipt["state"], "active");
+    let task = store
+        .read(1, receipt["schedule_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(task.status, "active");
+    assert!(task.next_run_at.is_some());
+    assert!(task.proposal_conversation_id.is_none());
+}
+
+#[tokio::test]
+async fn owner_created_fresh_tasks_are_enabled_at_once() {
+    let store = super::super::tests::store().await;
+    let task = store
+        .create_task(1, &super::super::tests::draft())
+        .await
+        .unwrap();
+    assert_eq!(task.status, "active");
+    assert!(task.next_run_at.is_some());
+    assert!(task.proposal_conversation_id.is_none());
+    let mut ai = super::super::tests::draft();
+    ai.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::AiProposal;
+    assert!(matches!(
+        store.create_task(1, &ai).await,
+        Err(ScheduleStoreError::Invalid)
+    ));
 }
 
 #[tokio::test]
@@ -498,16 +596,17 @@ async fn live_review_cannot_adopt_new_input_or_a_changed_lease() {
 }
 
 #[tokio::test]
-async fn pending_requests_are_not_tasks_and_manual_creation_is_atomic() {
+async fn pending_proposals_are_listed_and_manual_creation_is_atomic() {
     let (store, pending, _, _) = fixture().await;
-    assert!(store.list(1, 0, 100).await.unwrap().is_empty());
+    // A pending proposal is visible so the owner can decide it from the list.
+    assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 1);
     assert_eq!(
         store
             .search(1, 0, 100, None, None, None, None, None, false)
             .await
             .unwrap()
             .1,
-        0
+        1
     );
     let mut draft = super::super::tests::draft();
     draft.kind = ScheduledTaskKind::ConversationResume;
@@ -516,17 +615,14 @@ async fn pending_requests_are_not_tasks_and_manual_creation_is_atomic() {
     draft.client_create_key = "manual-live".into();
     draft.spec.rule = ScheduleRule::AfterConfirmation { delay_seconds: 60 };
     draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
-    let active = store.create_conversation_task(1, &draft).await.unwrap();
+    let active = store.create_task(1, &draft).await.unwrap();
     assert_eq!(active.status, "active");
     assert!(active.next_run_at.is_some());
-    assert_eq!(
-        store.create_conversation_task(1, &draft).await.unwrap(),
-        active
-    );
-    assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 1);
+    assert_eq!(store.create_task(1, &draft).await.unwrap(), active);
+    assert_eq!(store.list(1, 0, 100).await.unwrap().len(), 2);
     draft.client_create_key = "invalid-source".into();
     draft.requirement_revision = Some(2);
-    assert!(store.create_conversation_task(1, &draft).await.is_err());
+    assert!(store.create_task(1, &draft).await.is_err());
     use sea_orm::PaginatorTrait;
     assert_eq!(entity::Entity::find().count(&store.db).await.unwrap(), 2);
     store
@@ -637,9 +733,7 @@ async fn activation_rejects_a_continuation_past_the_session_retention_window() {
     // The fixture runs two days out; a one-day window accepts at most one day
     // minus the reclaim safety margin.
     assert!(matches!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
-            .await,
+        activate(&store, 1, &task.schedule_id, task.revision).await,
         Err(ScheduleStoreError::ExceedsSessionRetention {
             max_delay_seconds: 79_200
         })
@@ -652,8 +746,7 @@ async fn activation_rejects_a_continuation_past_the_session_retention_window() {
         .await
         .unwrap();
     assert_eq!(
-        store
-            .activate_conversation_resume(1, &task.schedule_id, task.revision)
+        activate(&store, 1, &task.schedule_id, task.revision)
             .await
             .unwrap()
             .status,

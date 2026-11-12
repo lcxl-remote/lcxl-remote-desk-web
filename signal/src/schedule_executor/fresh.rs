@@ -3,7 +3,6 @@ use super::*;
 use desk_agent_protocol::{AgentScope, ExecutionMode};
 use desk_diagnose_core::{
     capability_availability::callable_tools, model_capability::ModelCapabilities,
-    schedule::contract::parse_contract,
 };
 
 impl SignalScheduleExecutor {
@@ -19,12 +18,6 @@ impl SignalScheduleExecutor {
         candidate: &run::Model,
     ) -> Result<DispatchResult, ScheduleStoreError> {
         let store = ScheduleStore::new(self.db.clone());
-        if store
-            .reject_unstarted_budget_policy(candidate.owner_user_id, &candidate.run_id)
-            .await?
-        {
-            return Ok(DispatchResult::Settled);
-        }
         let task = store
             .read(candidate.owner_user_id, &candidate.schedule_id)
             .await?;
@@ -67,26 +60,12 @@ impl SignalScheduleExecutor {
         if readiness.is_none() || !self.gate.is_enabled() {
             return Err(ScheduleStoreError::Conflict);
         }
-        let stored = store
-            .read_contract(
-                candidate.owner_user_id,
-                &candidate.schedule_id,
-                task.contract_revision.ok_or(ScheduleStoreError::Conflict)?,
-            )
-            .await?;
-        let contract =
-            parse_contract(&stored.canonical_json).map_err(|_| ScheduleStoreError::Invalid)?;
+        // A scheduled run offers the same non-interactive tools as a session;
+        // every device action is approved on its own.
         let mut tools =
             callable_tools(&providers, &inventory).map_err(|_| ScheduleStoreError::Invalid)?;
         tools.retain(|tool| {
             !desk_diagnose_core::ai_assistant::is_interactive_only_tool(tool.name())
-        });
-        tools.retain(|tool| {
-            crate::ai_assistant_orchestrator::fresh::contains_tool(
-                &contract,
-                &providers,
-                tool.name(),
-            )
         });
         let mut granted = Vec::new();
         for capability in tools

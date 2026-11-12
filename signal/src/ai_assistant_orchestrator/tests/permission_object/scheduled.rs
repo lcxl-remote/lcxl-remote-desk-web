@@ -58,7 +58,7 @@ pub(super) async fn wait_for_permission(
         .await
         .unwrap();
     let task = store
-        .activate_conversation_resume(1, &task.schedule_id, task.revision)
+        .activate_pending_for_test(1, &task.schedule_id, task.revision)
         .await
         .unwrap();
     let wait = task.next_run_at.unwrap() - store.database_time().await.unwrap() + 20;

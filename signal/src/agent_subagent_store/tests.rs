@@ -24,6 +24,7 @@ mod recovery;
 mod response_restart;
 mod retention;
 mod role_recovery;
+mod schedule_approval;
 pub(super) mod scheduled;
 mod shared_approval;
 mod ui_read;

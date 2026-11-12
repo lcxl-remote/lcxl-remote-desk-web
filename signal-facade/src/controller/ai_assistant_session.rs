@@ -1193,7 +1193,6 @@ impl FileScopeDto {
                     source: match record.proposal.source {
                         DirectoryConsentSource::ModelProposal => "model_proposal",
                         DirectoryConsentSource::OwnerSelection => "owner_selection",
-                        DirectoryConsentSource::TaskContract => "task_contract",
                     }
                     .into(),
                     reference_expires_at: record.proposal.directory.expires_at.clone(),

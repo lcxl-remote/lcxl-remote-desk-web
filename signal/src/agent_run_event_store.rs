@@ -157,18 +157,6 @@ impl SignalAgentRunEventStore {
                     return Ok(OwnerAdmissionResult::Waiting);
                 }
             }
-            if !targetless {
-                crate::schedule_store::validate_rehearsal_input_on(
-                    &txn,
-                    &params.actor_id,
-                    &params.device_id,
-                    &params.run_id,
-                    params.client_conversation_id.as_deref(),
-                    &params.message,
-                )
-                .await
-                .map_err(|_| internal("rehearsal input changed or not admitted"))?;
-            }
             if let OwnerAdmission::Enqueue { ask, .. } = admission {
                 check_queue_intent(params, ask)?;
                 if let Some(queued) = main_request::replay(
@@ -781,12 +769,7 @@ async fn prepare_input_goals_on(
         .await
         .map_err(|error| internal(format!("load active goal: {error}")))?;
     goals.opened_goal = if let Some(start) = &goal_start {
-        if params
-            .client_conversation_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with("rehearsal_"))
-            || active_goal_row.is_some()
-        {
+        if active_goal_row.is_some() {
             return Err(internal("this conversation already has an active goal"));
         }
         let opened_at = u64::try_from(now.timestamp_millis())

@@ -16,10 +16,10 @@ function renderGuide(returnTo?: string) {
 }
 
 describe('browser setup guide navigation', () => {
-    it('returns to the original rehearsal and targets the same device for remote control', () => {
-        renderGuide('/desk/device/device-a/assistant?rehearsal=run-1');
+    it('returns to the original conversation and targets the same device for remote control', () => {
+        renderGuide('/desk/device/device-a/assistant?conversation=run-1');
         expect(screen.getAllByRole('link', { name: /browserSetup.back/ })[0])
-            .toHaveAttribute('href', '/desk/device/device-a/assistant?rehearsal=run-1');
+            .toHaveAttribute('href', '/desk/device/device-a/assistant?conversation=run-1');
         expect(screen.getByRole('link', { name: /browserTakeoverAction/ }))
             .toHaveAttribute('href', '/desk/device/device-a/control');
         expect(screen.getAllByRole('listitem')).toHaveLength(4);

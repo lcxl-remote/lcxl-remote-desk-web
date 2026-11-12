@@ -2704,7 +2704,7 @@ impl SessionSeam for SignalAgentSessionStore {
         crate::schedule_store::ScheduleStore::new(self.db.clone()).validate_task_permission_request(session, request).await
             .map_err(|_| AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
-                message: "Permission request exceeds the current task contract or its authority has expired".into(),
+                message: "Permission request is outside the current scheduled run or its authority has expired".into(),
                 retryable: false, safe_for_model: true, error_code: None,
             })?;
         crate::agent_approval_store::validate_permission_capacity(

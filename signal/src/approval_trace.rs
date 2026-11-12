@@ -59,6 +59,9 @@ impl Store {
         let settings = settings.unwrap_or_else(|| ApprovalTraceSettings::defaults(false));
         let (source_kind, source_id) = match &candidate.source {
             ApprovalSource::GoalProposal { request_id } => ("goal_proposal", request_id.clone()),
+            ApprovalSource::ScheduleProposal { schedule_id } => {
+                ("schedule_proposal", schedule_id.clone())
+            }
             ApprovalSource::PermissionItem {
                 request_id,
                 item_id,

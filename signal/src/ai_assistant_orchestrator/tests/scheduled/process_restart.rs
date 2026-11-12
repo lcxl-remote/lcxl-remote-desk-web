@@ -176,7 +176,7 @@ async fn exercise_process(reconnect: bool) {
         ScheduleManagementRequest as Request, ScheduleManagementResponse as Response,
     };
     let Response::Task { task: active } =
-        crate::schedule_management::manage(&db, 1, Request::CreateDraft { draft })
+        crate::schedule_management::manage(&db, 1, Request::CreateTask { task: draft })
             .await
             .unwrap()
     else {

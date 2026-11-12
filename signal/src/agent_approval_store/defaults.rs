@@ -173,3 +173,47 @@ async fn has_active_delegation(
         .await?
         .is_some())
 }
+
+/// Open the default AI review for a fresh-task proposal that waits in the
+/// owner's own turn. The caller holds the session's version/lease fence in
+/// `txn`; the audit event is saved into `session` before the proposal receipt.
+/// Returns whether the session row changed.
+pub(crate) async fn open_for_schedule_proposal_on(
+    txn: &DatabaseTransaction,
+    row: &agent_session::Model,
+    session: &mut PersistedAgentSession,
+    now: u64,
+) -> Result<bool, DbErr> {
+    let root = session.approval_delegation_conversation_id().to_owned();
+    if root != session.conversation_id
+        || !session.owner_direct_planning()
+        || has_active_delegation(txn, &root, &session.actor_id).await?
+        || crate::approval_model_provider::load(txn)
+            .await?
+            .destination_identity()
+            .is_err()
+    {
+        return Ok(false);
+    }
+    let delegation = ApprovalDelegation::new_default(
+        format!("approval-delegation-{}", uuid::Uuid::new_v4()),
+        root,
+        session.actor_id.clone(),
+        session.device_id.clone(),
+        now,
+        true,
+    )
+    .map_err(|_| invalid())?;
+    project(&delegation)?.insert(txn).await?;
+    append_audit_on(
+        txn,
+        row,
+        session,
+        &delegation,
+        AgentRunEventKind::ApprovalDelegationOpened,
+        delegation.issued_by.clone(),
+        DateTime::<Utc>::from_timestamp_millis(as_i64(now)?).ok_or_else(invalid)?,
+    )
+    .await?;
+    Ok(true)
+}

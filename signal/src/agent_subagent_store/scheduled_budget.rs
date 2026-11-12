@@ -112,7 +112,6 @@ async fn linked_on(
         || allocation.run_id != reservation.root_conversation_id
         || allocation.owner_user_id.to_string() != group.actor_id
         || allocation.kind != "model_tokens"
-        || allocation.rule_id.is_some()
         || allocation.exception_grant_id.is_some()
         || allocation.logical_key != key(reservation)
         || allocation.input_sha256.as_deref() != Some(reservation.arguments_sha256.as_str())

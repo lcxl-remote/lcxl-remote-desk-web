@@ -33,7 +33,7 @@ impl ScheduleStore {
         }
         let mut query = entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]));
+            .filter(entity::Column::Status.ne("deleted"));
         if let Some(kind) = kind {
             query = query.filter(entity::Column::Kind.eq(kind));
         }
@@ -50,7 +50,7 @@ impl ScheduleStore {
             query = query.filter(entity::Column::Title.contains(title.trim()));
         }
         let pending = Condition::any()
-            .add(entity::Column::Status.is_in(["draft", "awaiting_authorization", "paused"]))
+            .add(entity::Column::Status.is_in(["pending_review", "paused"]))
             .add(
                 entity::Column::ActiveRunId.in_subquery(
                     Query::select()

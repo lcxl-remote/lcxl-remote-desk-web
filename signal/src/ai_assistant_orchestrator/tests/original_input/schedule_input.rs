@@ -1,7 +1,7 @@
 use super::*;
 use crate::entity::{agent_schedule, agent_schedule_run};
 use desk_diagnose_core::session::PersistedAgentSession;
-use sea_orm::PaginatorTrait;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use serde_json::{Value, json};
 
 async fn scenario() {
@@ -55,6 +55,33 @@ async fn scenario() {
         tokio::time::timeout(MODEL_IO_TIMEOUT,capture_one_openai_request_with_reply(&listener, |_| memory_sse(json!({"tool_calls":[{
             "index":0,"id":call_id,"type":"function","function":{"name":name,"arguments":original}
         }]}),"tool_calls"))).await.expect("tool request timed out");
+        // A fresh-task proposal waits for a decision; the owner approves it.
+        let approver = (step == 2).then(|| {
+            let db = db.clone();
+            actix_web::rt::spawn(async move {
+                loop {
+                    if let Some(task) = agent_schedule::Entity::find()
+                        .filter(agent_schedule::Column::Status.eq("pending_review"))
+                        .one(&db)
+                        .await
+                        .unwrap()
+                    {
+                        crate::schedule_store::ScheduleStore::new(db.clone())
+                            .decide_proposal(
+                                1,
+                                &task.schedule_id,
+                                task.revision,
+                                true,
+                                crate::schedule_store::ProposalDecider::Owner,
+                            )
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+        });
         tokio::time::timeout(
             MODEL_IO_TIMEOUT,
             capture_one_openai_request_with_reply(&listener, |body| {
@@ -71,6 +98,9 @@ async fn scenario() {
         )
         .await
         .expect("feedback request timed out");
+        if let Some(approver) = approver {
+            approver.await.unwrap();
+        }
         if step == 0 {
             tokio::time::timeout(
                 MODEL_IO_TIMEOUT,
@@ -115,7 +145,7 @@ async fn scenario() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(draft.status, "draft");
+    assert_eq!(draft.status, "active");
     assert_eq!(draft.kind, "fresh_task");
     assert!(draft.active_run_id.is_none());
     let mut session = PersistedAgentSession::decode_json(
@@ -184,7 +214,8 @@ fn assert_feedback(step: usize, content: &str) {
         let value: Value = serde_json::from_str(content).unwrap();
         if step == 2 {
             assert_eq!(value["kind"], "fresh_task");
-            assert_eq!(value["state"], "draft");
+            assert_eq!(value["state"], "pending_review");
+            assert_eq!(value["awaiting_decision"], true);
         } else {
             assert_eq!(value["ok"], true);
             assert_eq!(

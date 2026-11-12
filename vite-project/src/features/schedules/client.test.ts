@@ -5,18 +5,6 @@ import { deskErrorCodeEnum, type ScheduleManagementRequest } from '@/services/ty
 
 describe('schedule request transport', () => {
     afterEach(() => vi.useRealTimers());
-    it('requires a contract review response instead of treating a task response as authorization', async () => {
-        vi.useFakeTimers();
-        let sent!: SendTrackedOptions;
-        const client = new ScheduleClient(options => { sent = options; return { requestId: options.requestId!, disposition: 'sent' }; }, vi.fn());
-        const pending = client.request({ operation: 'get_task_contract', schedule_id: 'task-1' });
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task_contract', task: {}, task_revision: 1, contract: null, contract_sha256: null }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
-        await expect(pending).resolves.toMatchObject({ result: 'task_contract', contract: null });
-        const wrong = client.request({ operation: 'get_task_contract', schedule_id: 'task-1' });
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task' }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
-        await expect(wrong).rejects.toMatchObject({ reason: 'invalid' });
-        expect(vi.getTimerCount()).toBe(0);
-    });
     it('matches the central response by id and type, ignoring peer forgeries', async () => {
         vi.useFakeTimers();
         let sent!: SendTrackedOptions;
@@ -35,37 +23,20 @@ describe('schedule request transport', () => {
         client.receive(response);
         await expect(request).resolves.toMatchObject({ result: 'list', tasks: [] });
     });
-    it('expects a rehearsal response for reserve, query, and cancellation', async () => {
+    it('expects a task response for creation and proposal decisions', async () => {
         vi.useFakeTimers();
         const requests: ScheduleManagementRequest[] = [
-            { operation: 'reserve_rehearsal', schedule_id: 'task-1', expected_revision: 1, client_request_key: 'reserve-1' },
-            { operation: 'get_rehearsal', rehearsal_id: 'rehearsal-1' },
-            { operation: 'cancel_pending_rehearsal', rehearsal_id: 'rehearsal-1', expected_revision: 2 },
+            { operation: 'decide_schedule_proposal', schedule_id: 'task-1', expected_revision: 1, approve: true },
         ];
         let sent!: SendTrackedOptions;
         const client = new ScheduleClient(options => { sent = options; return { requestId: options.requestId!, disposition: 'sent' }; }, vi.fn());
         for (const payload of requests) {
             const pending = client.request(payload);
-            client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'rehearsal', task: {}, rehearsal: { rehearsal_id: 'rehearsal-1' } }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
-            await expect(pending).resolves.toMatchObject({ result: 'rehearsal', rehearsal: { rehearsal_id: 'rehearsal-1' } });
+            client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task', task: { schedule_id: 'task-1' } }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
+            await expect(pending).resolves.toMatchObject({ result: 'task', task: { schedule_id: 'task-1' } });
         }
         const wrongType = client.request(requests[0]);
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'task', task: {} }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
-        await expect(wrongType).rejects.toMatchObject({ reason: 'invalid' });
-        expect(vi.getTimerCount()).toBe(0);
-    });
-    it('receives the permission review separately from rehearsal status', async () => {
-        vi.useFakeTimers();
-        let sent!: SendTrackedOptions;
-        const client = new ScheduleClient(options => { sent = options; return { requestId: options.requestId!, disposition: 'sent' }; }, vi.fn());
-        const payload: ScheduleManagementRequest = { operation: 'get_rehearsal_permissions', rehearsal_id: 'rehearsal-1' };
-        const request = client.request(payload);
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: {
-            result: 'rehearsal_permissions', rehearsal_id: 'rehearsal-1', observations: [], unconfirmed_tool_call_ids: ['failed-read'], unclassified_tool_call_ids: ['other-tool'],
-        }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
-        await expect(request).resolves.toMatchObject({ result: 'rehearsal_permissions', unconfirmed_tool_call_ids: ['failed-read'], unclassified_tool_call_ids: ['other-tool'] });
-        const wrongType = client.request(payload);
-        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'rehearsal' }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
+        client.receive({ signaling_type: SCHEDULES_MANAGED, request_id: sent.requestId, signaling_data: { result: 'list', tasks: [] }, response_state: { error_code: deskErrorCodeEnum.SUCCESS } });
         await expect(wrongType).rejects.toMatchObject({ reason: 'invalid' });
         expect(vi.getTimerCount()).toBe(0);
     });

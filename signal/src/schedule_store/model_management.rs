@@ -24,7 +24,6 @@ fn scope(owner: i32, session: &PersistedAgentSession) -> Condition {
         );
     }
     let mut subject = Condition::all()
-        .add(entity::Column::Status.ne("pending_review"))
         .add(entity::Column::OwnerUserId.eq(owner))
         .add(origin);
     if !session.device_id.is_empty() {

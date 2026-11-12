@@ -839,23 +839,3 @@ pub(crate) async fn verify_fresh_wait_request_on(
     }
     Ok(())
 }
-
-/// Authenticate the immutable proposal only; this never attests to a decision or grant.
-pub(crate) async fn verify_control_request_on(
-    txn: &DatabaseTransaction,
-    session: &PersistedAgentSession,
-    request_id: &str,
-) -> Result<(), AgentError> {
-    let requested = permission_receipt::requested_on(txn, session, request_id).await?;
-    let mut current = session
-        .permission_requests
-        .iter()
-        .find(|request| request.request_id == request_id)
-        .cloned()
-        .ok_or_else(invalid)?;
-    current.state = desk_diagnose_core::dynamic_run::PermissionRequestState::Pending;
-    if current != requested.request {
-        return Err(invalid());
-    }
-    Ok(())
-}

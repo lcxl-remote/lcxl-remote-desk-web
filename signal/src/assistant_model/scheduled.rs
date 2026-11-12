@@ -232,7 +232,6 @@ impl MeteredModel {
                         node: &task.node_id,
                         lease_epoch: task.run_epoch,
                         kind: TaskBudgetKind::ModelTokens,
-                        rule_id: None,
                         logical_key: &ScheduleStore::model_dispatch_budget_key(
                             ordinal,
                             authorized.request.compression_identity.as_deref(),

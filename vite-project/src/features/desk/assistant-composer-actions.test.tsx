@@ -5,7 +5,7 @@ import { AssistantComposerActions } from './assistant-composer-actions';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 
 const defaults = { turnRunning: false, canStop: false, stopping: false, sendDisabled: false,
-    rehearsal: false, onStop: vi.fn() };
+    onStop: vi.fn() };
 const stop = 'pages.aiAssistant.stop';
 const send = 'pages.aiAssistant.send';
 
@@ -53,10 +53,8 @@ describe('assistant composer actions', () => {
         expect(view.getByRole('button', { name: stop })).toBeEnabled();
     });
 
-    it('retains input and rehearsal eligibility controls', () => {
+    it('retains input eligibility controls', () => {
         const view = render(<AssistantComposerActions {...defaults} sendDisabled />);
         expect(view.getByRole('button', { name: send })).toBeDisabled();
-        view.rerender(<AssistantComposerActions {...defaults} rehearsal sendDisabled />);
-        expect(view.getByRole('button', { name: 'schedules.rehearsal.begin' })).toBeDisabled();
     });
 });

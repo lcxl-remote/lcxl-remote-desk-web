@@ -68,7 +68,7 @@ pub(super) async fn accepted_inputs_on(
             response,
         )
         .await?;
-        matched = Some(evidence.inputs);
+        matched = Some(evidence);
     }
     matched.ok_or_else(|| invalid())
 }

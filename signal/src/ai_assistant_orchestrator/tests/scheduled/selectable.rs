@@ -125,8 +125,8 @@ async fn selectable_timer_runs_on_original_device_after_owner_clears_selection()
             let result = crate::schedule_management::manage(
                 &db,
                 1,
-                desk_agent_protocol::schedule::management::ScheduleManagementRequest::CreateDraft {
-                    draft: ScheduleDraft {
+                desk_agent_protocol::schedule::management::ScheduleManagementRequest::CreateTask {
+                    task: ScheduleDraft {
                         time_confirmation: None,
                         client_create_key: "timer-create".into(),
                         kind: ScheduledTaskKind::ConversationResume,

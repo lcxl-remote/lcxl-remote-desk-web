@@ -6,7 +6,7 @@ use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
 use sea_orm::{
-    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     sea_query::OnConflict,
 };
 use sha2::{Digest, Sha256};
@@ -15,6 +15,8 @@ mod authority;
 mod history;
 mod model_management;
 mod proposal;
+mod proposal_review;
+pub(crate) use proposal_review::{decide_by_ai_on, review_proposal_on};
 mod review_wait;
 mod search;
 pub use history::RunHistoryPage;
@@ -36,9 +38,7 @@ mod continuation_wait;
 mod directory_receipt;
 mod fresh_permission_recovery;
 pub(crate) use approval_admission::lock_fresh_approval_on;
-pub(crate) use approval_request::{
-    task_directory_resolution_matches_on, validate_task_directory_on, validate_task_permission_on,
-};
+pub(crate) use approval_request::{validate_task_directory_on, validate_task_permission_on};
 pub use fresh_admission::{ClaimedFreshTask, FreshTaskClaim};
 pub use fresh_model::FreshModelDispatch;
 mod materializer;
@@ -50,19 +50,9 @@ pub use budget::{TaskBudgetKind, TaskBudgetRequest};
 mod cancel;
 mod device_wait;
 mod edit;
-mod publication;
-mod publication_runtime;
-#[cfg(test)]
-pub(crate) use publication::tests::{
-    Verifier as TestPublicationVerifier, fixture_on as publication_test_fixture,
-    fixture_on_for_device as publication_device_test_fixture,
-};
-pub use publication_runtime::SignalTaskPublicationVerifier;
-mod rehearsal;
-pub(crate) use rehearsal::validate_rehearsal_input_on;
-pub use rehearsal::{
-    ObservedRehearsalRead, RehearsalReadReport, RehearsalRecoveryReport, RehearsalToolSource,
-};
+mod subject;
+pub use resume_activation::ProposalDecider;
+pub use subject::{SignalTaskSubjectVerifier, TaskSubjectVerifier};
 mod queue;
 mod recovery;
 mod resume_admission;
@@ -73,12 +63,9 @@ mod resume_activation;
 mod resume_claim;
 mod resume_lease;
 pub use continuation_heartbeat::ScheduleHeartbeat;
+pub use recovery::ScheduleAuthorizer;
 pub use resume_claim::{ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim};
 pub use resume_lease::{ContinuationLease, FreshTaskLease};
-mod revocation;
-pub use publication::{PublishTask, TaskPublicationVerifier, TaskRehearsalEvidence};
-pub use recovery::ScheduleAuthorizer;
-mod policy_admission;
 mod resume_result;
 mod settlement;
 
@@ -116,6 +103,25 @@ pub(super) async fn check_resume_retention(
     .map_err(|exceeded| ScheduleStoreError::ExceedsSessionRetention {
         max_delay_seconds: exceeded.max_delay_seconds,
     })
+}
+
+/// A bounded, trimmed identifier without control characters.
+fn key(value: &str) -> Result<(), ScheduleStoreError> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(ScheduleStoreError::Invalid);
+    }
+    Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Result<String, ScheduleStoreError> {
@@ -223,18 +229,17 @@ impl ScheduleStore {
         self.read(owner, schedule_id).await
     }
 
-    /// Owner is derived from the authenticated control subject, never a model field.
+    /// Test helper: insert a pending task row without enabling it.
+    #[cfg(test)]
     pub async fn create_draft(
         &self,
         owner: i32,
         request: &ScheduleDraft,
         now_ms: i64,
     ) -> Result<entity::Model, ScheduleStoreError> {
+        use sea_orm::TransactionTrait;
         let txn = self.db.begin().await?;
-        let task = desk_diagnose_core::future::send_phase(|| {
-            Self::create_draft_on(&txn, owner, request, now_ms, None)
-        })
-        .await?;
+        let task = Self::create_draft_on(&txn, owner, request, now_ms, None).await?;
         txn.commit().await?;
         Ok(task)
     }
@@ -250,6 +255,14 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let request = normalize_draft(request).map_err(|_| ScheduleStoreError::Invalid)?;
+        // An AI fresh-task proposal waits in the turn that proposed it.
+        let proposal_conversation_id = original
+            .filter(|_| {
+                request.kind == desk_agent_protocol::schedule::ScheduledTaskKind::FreshTask
+                    && request.creation_source
+                        == desk_agent_protocol::schedule::ScheduleCreationSource::AiProposal
+            })
+            .map(|session| session.conversation_id.clone());
         let creation_identity = digest(&json(&(owner, &request.client_create_key))?);
         let payload_hash = digest(&json(&request)?);
         // An idempotent retry returns the original consent, even after a later
@@ -294,14 +307,9 @@ impl ScheduleStore {
             owner_user_id: Set(owner),
             target_device_id: Set(request.target_device_id),
             kind: Set(json(&request.kind)?.trim_matches('"').to_string()),
-            status: Set(if request.kind
-                == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume
-            {
-                "pending_review"
-            } else {
-                "draft"
-            }
-            .into()),
+            // Every task starts pending; creation enables it in the same
+            // transaction unless an AI fresh-task proposal awaits a decision.
+            status: Set("pending_review".into()),
             title: Set(request.title),
             prompt: Set(request.prompt),
             locale: Set(request.locale),
@@ -322,8 +330,7 @@ impl ScheduleStore {
             requirement_revision: Set(request.requirement_revision.map(|r| r as i64)),
             retrieval_consent_json: Set(retrieval_consent),
             prompt_retention_json: Set(prompt_retention),
-            contract_revision: Set(None),
-            authorization_revision: Set(None),
+            proposal_conversation_id: Set(proposal_conversation_id),
             failure_state_json: Set(json(&FailureState::default())?),
             active_run_id: Set(None),
             created_at: Set(now_ms),
@@ -634,7 +641,7 @@ impl ScheduleStore {
         Ok(entity::Entity::find()
             .filter(entity::Column::OwnerUserId.eq(owner))
             .filter(entity::Column::Id.gt(after_id))
-            .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]))
+            .filter(entity::Column::Status.ne("deleted"))
             .order_by_asc(entity::Column::Id)
             .limit(limit)
             .all(&self.db)
@@ -645,6 +652,7 @@ impl ScheduleStore {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use sea_orm::TransactionTrait;
 
     #[tokio::test]
     async fn pause_preserves_active_work_and_blockers_and_rejects_stale_revision() {
@@ -711,6 +719,99 @@ pub(crate) mod tests {
             creation_source: ScheduleCreationSource::Manual,
         }
     }
+    /// Storage-only fixtures do not represent current device readiness.
+    pub(crate) struct AcceptSubject;
+    #[async_trait::async_trait]
+    impl TaskSubjectVerifier for AcceptSubject {
+        async fn lock_subject(
+            &self,
+            _: &crate::config::connection::DatabaseTransaction,
+            _: &entity::Model,
+        ) -> Result<(), ScheduleStoreError> {
+            Ok(())
+        }
+    }
+
+    /// An enabled fresh task on `device`, created as `owner` would create it.
+    /// With `source`, the task carries that session's retrieval consent.
+    pub(crate) async fn enabled_fresh_task_on(
+        db: crate::config::connection::DatabaseConnection,
+        device: Option<&str>,
+        owner: i32,
+        source: Option<&desk_diagnose_core::session::PersistedAgentSession>,
+    ) -> (ScheduleStore, entity::Model) {
+        let schema = Schema::new(db.get_database_backend());
+        db.execute(
+            schema
+                .create_table_from_entity(crate::entity::agent_assistant_runtime::Entity)
+                .if_not_exists(),
+        )
+        .await
+        .unwrap();
+        for mut table in [
+            schema.create_table_from_entity(entity::Entity),
+            schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity),
+            schema.create_table_from_entity(crate::entity::agent_task_budget_reservation::Entity),
+        ] {
+            db.execute(table.if_not_exists()).await.unwrap();
+        }
+        for mut index in schema
+            .create_index_from_entity(entity::Entity)
+            .into_iter()
+            .chain(schema.create_index_from_entity(crate::entity::agent_schedule_run::Entity))
+            .chain(
+                schema
+                    .create_index_from_entity(crate::entity::agent_task_budget_reservation::Entity),
+            )
+        {
+            db.execute(index.if_not_exists()).await.unwrap();
+        }
+        let store = ScheduleStore::new(db);
+        let mut draft = draft();
+        if let Some(device) = device {
+            draft.target_device_id = device.into();
+        }
+        // Tests keep the earlier fixture's limits unless they pinned their own.
+        let current = crate::schedule_budget_policy::read(&store.db)
+            .await
+            .unwrap();
+        if current.revision == 0 {
+            crate::schedule_budget_policy::update(
+                &store.db,
+                &desk_agent_protocol::schedule::policy::UpdateScheduleBudgetPolicy {
+                    expected_revision: 0,
+                    maximum: desk_agent_protocol::schedule::policy::TaskBudget {
+                        max_runs_per_utc_day: 24,
+                        max_calls_per_run: 10,
+                        max_model_tokens_per_run: 10_000,
+                        max_runtime_seconds: 300,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let task = match source {
+            Some(source) => {
+                let txn = crate::db::begin_write(&store.db, entity::Entity)
+                    .await
+                    .unwrap();
+                let now = authority::authority_now(&txn).await.unwrap();
+                let pending =
+                    ScheduleStore::create_draft_on(&txn, owner, &draft, now, Some(source))
+                        .await
+                        .unwrap();
+                let task = ScheduleStore::activate_on(&txn, owner, &pending, false)
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+                task
+            }
+            None => store.create_task(owner, &draft).await.unwrap(),
+        };
+        (store, task)
+    }
+
     pub(super) async fn store() -> ScheduleStore {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
@@ -954,6 +1055,11 @@ pub(crate) mod tests {
         .unwrap();
         txn.commit().await.unwrap();
         assert_eq!(retry, task);
+        // Only an enabled task can be edited.
+        let task = store
+            .activate_pending_for_test(1, &task.schedule_id, task.revision)
+            .await
+            .unwrap();
         let edited = store
             .change_prompt(1, &task.schedule_id, task.revision, "A revised report")
             .await
@@ -1066,9 +1172,8 @@ pub(crate) mod tests {
         let first = store.create_draft(1, &input, 1000).await.unwrap();
         let second = store.create_draft(1, &input, 2000).await.unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.status, "draft");
+        assert_eq!(first.status, "pending_review");
         assert!(first.next_run_at.is_none());
-        assert!(first.authorization_revision.is_none());
         let mut changed = input.clone();
         changed.prompt = "Different requirement".into();
         assert!(matches!(
@@ -1102,7 +1207,5 @@ mod late_receipts;
 
 mod outcome_review;
 pub(crate) use outcome_review::reviewed_at as outcome_reviewed_at;
-
-mod resume_published;
 
 mod cancel_actions;

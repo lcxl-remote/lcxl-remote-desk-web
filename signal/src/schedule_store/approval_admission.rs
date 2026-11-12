@@ -9,8 +9,6 @@ use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect};
 
 /// Review-only context; no task execution authority can be obtained from it.
 pub(crate) struct TaskApprovalReview {
-    contract: desk_diagnose_core::schedule::contract::ValidatedTaskContract,
-    provider_device_id: String,
     pub(super) valid_until: u64,
 }
 impl TaskApprovalReview {
@@ -20,11 +18,9 @@ impl TaskApprovalReview {
         request: &desk_diagnose_core::dynamic_run::PermissionRequest,
         grants: &mut [desk_agent_protocol::capability_grant::CapabilityGrant],
     ) -> Result<(), DbErr> {
-        desk_diagnose_core::schedule::contract::exception::constrain_approval(
-            &self.contract,
+        desk_diagnose_core::schedule::run_approval::constrain_approval(
             session,
             request,
-            &self.provider_device_id,
             self.valid_until,
             grants,
         )
@@ -74,11 +70,6 @@ pub(crate) async fn lock_fresh_approval_on(
     )
     .await
     .map_err(storage)?;
-    if authority.contract.contract().exception_mode
-        != desk_agent_protocol::schedule::contract::TaskExceptionMode::RequestApproval
-    {
-        return Err(invalid());
-    }
     let row = agent_session::Entity::find_by_id(peek.id)
         .lock_exclusive()
         .one(txn)
@@ -120,10 +111,7 @@ pub(crate) async fn lock_fresh_approval_on(
     if current.verified_at < authority.verified_at {
         return Err(invalid());
     }
-    let provider_device_id = session.device_id.clone();
     Ok(Some(TaskApprovalReview {
-        contract: current.contract,
-        provider_device_id,
         valid_until: u64::try_from(current.valid_until).map_err(|_| invalid())?,
     }))
 }

@@ -178,12 +178,6 @@ pub fn unavailable() -> AgentError {
     }
 }
 
-/// Only the runtime may emit this after durable task-contract consent.
-pub fn task_approved_result(request_id: &str) -> serde_json::Value {
-    json!({"directory_request_id":request_id, "state":"approved", "authority":"task_contract",
-        "file_operation_authorized":false})
-}
-
 /// Accept only directory-scope updates on this exact executing turn. In particular,
 /// never overwrite a stop, new user input, another lease, or changed tool authority.
 pub fn adopt_review_snapshot(

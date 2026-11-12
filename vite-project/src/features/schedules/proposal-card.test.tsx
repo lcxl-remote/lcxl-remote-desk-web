@@ -1,44 +1,31 @@
-import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup } from '@testing-library/react';
 import { useEffect } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ScheduleProposalCards } from './proposal-card';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 const transport = vi.hoisted(() => ({ isConnected: true, subscribe: vi.fn(() => () => {}), sendTracked: vi.fn(), cancelQueued: vi.fn() }));
 vi.mock('@/features/desk/use-desk-signaling', () => ({ useDeskSignaling: () => transport }));
-vi.mock('./proposal-review', () => ({ ProposalReview: ({ scheduleId, activationDisabled, onLoaded }: { scheduleId: string; activationDisabled: boolean; onLoaded?: (task: { schedule_id: string; status: string }) => void }) => {
-    useEffect(() => { onLoaded?.({ schedule_id: scheduleId, status: 'pending_review' }); }, [scheduleId]);
-    return <div data-testid="review">{scheduleId}<button disabled={activationDisabled}>enable</button></div>;
+const status = vi.hoisted(() => ({ value: 'pending_review' }));
+vi.mock('./proposal-review', () => ({ ProposalReview: ({ scheduleId, onLoaded }: { scheduleId: string; onLoaded?: (task: { schedule_id: string; status: string }) => void }) => {
+    useEffect(() => { onLoaded?.({ schedule_id: scheduleId, status: status.value }); }, [scheduleId]);
+    return <div data-testid="review">{scheduleId}</div>;
 } }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
-const tool = { callId: 'call', name: 'request_scheduled_task', status: 'ok' as const, argumentsJson: '{}', output: JSON.stringify({ state: 'pending_review', kind: 'conversation_resume', schedule_id: '12345678-1234-1234-1234-123456789abc' }) };
+afterEach(() => { cleanup(); vi.clearAllMocks(); status.value = 'pending_review'; });
+const id = '12345678-1234-1234-1234-123456789abc';
+const tool = { callId: 'call', name: 'request_scheduled_task', status: 'ok' as const, argumentsJson: '{}',
+    output: JSON.stringify({ state: 'pending_review', kind: 'fresh_task', awaiting_decision: true, schedule_id: id }) };
 const base = { deviceId: 'device', connectionId: 'connection' };
-it('keeps fresh task review in a card until the user opens it', async () => {
-    const { rerender } = render(<ScheduleProposalCards {...base} tools={[{ ...tool, output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: JSON.parse(tool.output).schedule_id }) }]} running />);
+
+it('renders a waiting fresh-task proposal inline for a decision', async () => {
+    render(<ScheduleProposalCards {...base} tools={[tool]} running />);
+    expect(await screen.findByTestId('review')).toHaveTextContent(id);
     expect(screen.queryByRole('dialog')).toBeNull();
-    rerender(<ScheduleProposalCards {...base} tools={[{ ...tool, output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: JSON.parse(tool.output).schedule_id }) }]} running={false} />);
-    expect(screen.queryByRole('dialog')).toBeNull();
-    rerender(<ScheduleProposalCards {...base} tools={[]} />);
-    expect(screen.getByText('schedules.proposal.created')).toBeTruthy();
-    expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'schedules.proposal.open' }));
-    expect(screen.getByRole('dialog')).toBeTruthy();
-    expect(transport.sendTracked).toHaveBeenCalledTimes(1);
-    expect(transport.sendTracked).toHaveBeenCalledWith(expect.objectContaining({
-        data: { operation: 'get', schedule_id: JSON.parse(tool.output).schedule_id },
-    }));
-});
-it('ignores malformed and unsuccessful tool results', () => {
-    render(<ScheduleProposalCards {...base} tools={[{ ...tool, status: 'failed' }, { ...tool, output: '{}' }]} />);
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.queryByText('schedules.proposal.created')).toBeNull();
 });
 
-it('renders conversation approval inline while the active turn waits', async () => {
-    const pending = { ...tool, output: JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true }) };
-    render(<ScheduleProposalCards {...base} tools={[pending]} running />);
-    await screen.findByTestId('review');
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect((screen.getByRole('button', { name: 'enable' }) as HTMLButtonElement).disabled).toBe(false);
+it('ignores enabled conversation timers, malformed and unsuccessful tool results', () => {
+    const timer = { ...tool, output: JSON.stringify({ state: 'active', kind: 'conversation_resume', awaiting_decision: false, schedule_id: id }) };
+    render(<ScheduleProposalCards {...base} tools={[timer, { ...tool, status: 'failed' }, { ...tool, output: '{}' }]} />);
+    expect(screen.queryByTestId('review')).toBeNull();
 });
 
 it('reports only proposals whose current state still needs a decision', async () => {
@@ -48,29 +35,16 @@ it('reports only proposals whose current state still needs a decision', async ()
     expect(document.querySelectorAll('[data-assistant-pending]')).toHaveLength(1);
 });
 
-it('does not let an earlier automation draft block a synchronous conversation review', async () => {
-    const freshId = 'aaaaaaaa-1234-1234-1234-123456789abc';
-    const fresh = { ...tool, callId: 'fresh', output: JSON.stringify({ state: 'draft', kind: 'fresh_task', schedule_id: freshId }) };
-    const pending = { ...tool, output: JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true }) };
-    render(<ScheduleProposalCards {...base} tools={[fresh, pending]} running />);
-    await screen.findByTestId('review');
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.getByTestId('review').textContent).toContain(JSON.parse(tool.output).schedule_id);
-    expect(screen.getByTestId('review').textContent).not.toContain(freshId);
+it('shows the decision once the proposal was approved elsewhere', async () => {
+    status.value = 'active';
+    render(<ScheduleProposalCards {...base} tools={[tool]} />);
+    expect(await screen.findByText('schedules.proposal.approved')).toBeTruthy();
 });
 
-it('keeps multiple conversation approvals visible across follow-up renders', async () => {
+it('keeps multiple proposals visible across follow-up renders', async () => {
     const second = { ...tool, callId: 'second', output: JSON.stringify({ ...JSON.parse(tool.output), schedule_id: 'bbbbbbbb-1234-1234-1234-123456789abc' }) };
     const { rerender } = render(<ScheduleProposalCards {...base} tools={[tool, second]} running />);
     await waitFor(() => expect(screen.getAllByTestId('review')).toHaveLength(2));
-    fireEvent.keyDown(document.body, { key: 'Escape' });
     rerender(<ScheduleProposalCards {...base} tools={[]} running={false} />);
     expect(screen.getAllByTestId('review')).toHaveLength(2);
-    expect(screen.queryByRole('dialog')).toBeNull();
-});
-
-it('renders a valid large proposal result and still validates its selector', async () => {
-    const output = JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true, detail: '中'.repeat(12000) });
-    render(<ScheduleProposalCards {...base} tools={[{ ...tool, output }]} running />);
-    expect(await screen.findByTestId('review')).toHaveTextContent(JSON.parse(tool.output).schedule_id);
 });
