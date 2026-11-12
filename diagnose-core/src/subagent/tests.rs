@@ -1873,14 +1873,50 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
         .push(crate::chat::ChatMessage::assistant_tool_calls(
             "first-call",
             String::new(),
-            vec![crate::chat::ToolCallRef {
-                id: "left-open".into(),
-                name: "exec_command".into(),
-                arguments_json: "{}".into(),
-            }],
+            vec![
+                crate::chat::ToolCallRef {
+                    id: "left-open".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+                crate::chat::ToolCallRef {
+                    id: "awaiting".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+            ],
         ));
+    // A request can also end while one call still waits for approval.
+    session.pause_for_permission("awaiting", "rq-awaiting");
+    session
+        .permission_requests
+        .push(crate::dynamic_run::PermissionRequest {
+            schema_version: crate::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION,
+            request_id: "rq-awaiting".into(),
+            input_revision: session.input_revision,
+            state: crate::dynamic_run::PermissionRequestState::Pending,
+            items: vec![crate::dynamic_run::GrantRequestItem {
+                command_confirmation: None,
+                selected_device_target: None,
+                launch_confirmation: None,
+                item_id: "item".into(),
+                provider_id: "file.artifact".into(),
+                tool_name: "create_text_artifact".into(),
+                expected_effect:
+                    desk_agent_protocol::capability_provider::CapabilityEffect::WriteArtifact,
+                resource_scope: Vec::new(),
+                operation_scope: Vec::new(),
+                export_destinations: Vec::new(),
+                canonical_input_json: None,
+                canonical_input_digest_sha256: None,
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "test request".into(),
+            }],
+            created_at: "2026-09-30T00:00:02Z".into(),
+        });
     assert_eq!(session.unclosed_tool_call_ids(), ["left-open"]);
-    let history = session.conversation.len() + 1;
+    let history = session.conversation.len() + 2;
     let (input, control, seq) = (
         session.input_revision,
         session.control_revision,
@@ -1931,10 +1967,22 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
     assert_eq!(session.chain_id, "next-task");
     assert_eq!(session.turn_state, crate::session::TurnState::Idle);
     assert_eq!(session.conversation.len(), history + 2);
-    assert_eq!(session.conversation[history - 3].message_id, "first-answer");
-    let closed = &session.conversation[history - 1];
-    assert_eq!(closed.tool_call_id.as_deref(), Some("left-open"));
-    assert!(closed.text.starts_with("not executed"));
+    assert_eq!(session.conversation[history - 4].message_id, "first-answer");
+    let mut closed = session.conversation[history - 2..history]
+        .iter()
+        .map(|message| {
+            assert!(message.text.starts_with("not executed"), "{}", message.text);
+            message.tool_call_id.clone().unwrap()
+        })
+        .collect::<Vec<_>>();
+    closed.sort();
+    assert_eq!(closed, ["awaiting", "left-open"]);
+    assert!(session.awaiting_permission.is_none());
+    // The earlier approval can no longer be granted as it was asked.
+    assert_eq!(
+        session.permission_requests[0].state,
+        crate::dynamic_run::PermissionRequestState::NeedsRevalidation
+    );
     assert!(session.unclosed_tool_call_ids().is_empty());
     assert_eq!(session.conversation[history].message_id, "next-task-source");
 

@@ -254,6 +254,9 @@ pub fn admit_request(
     let mut updated = session.clone();
     // The previous request's open calls never dispatched (the host found no
     // unresolved work); close them like a main turn superseded by new input.
+    updated
+        .close_awaiting_permission("not executed: the previous request ended before approval")
+        .map_err(|_| "paused permission call is missing")?;
     close_unclosed_calls(
         &mut updated,
         "not executed: the previous request ended before this call ran",
@@ -305,16 +308,12 @@ pub fn admit_request(
     Ok(())
 }
 
-/// The previous request left nothing the next one could inherit: no active
-/// turn, background action, pending result, approval or question. Calls it
-/// left open without durable work never ran; admission closes them.
+/// The previous request left nothing running the next one could inherit: no
+/// active turn, background action or pending result. As with a new owner input,
+/// its unanswered approvals and open calls do not block: admission closes the
+/// calls and marks the approvals for revalidation.
 pub fn admission_ready(session: &PersistedAgentSession) -> bool {
     !session.turn_state.is_active()
-        && session.awaiting_permission.is_none()
         && session.execution_state == crate::session::ExecutionState::None
         && session.pending_auto_triggers.is_empty()
-        && session
-            .permission_requests
-            .iter()
-            .all(|request| request.state.is_terminal())
 }
