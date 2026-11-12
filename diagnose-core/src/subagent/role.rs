@@ -60,6 +60,11 @@ impl DelegationSource {
     /// Delegated work of an owner conversation or work uses that owner's
     /// current devices. Published, scheduled and goal sources keep their
     /// frozen execution targets.
+    /// The owner delegated this work directly, from a conversation or the workbench.
+    pub fn is_owner_direct(&self) -> bool {
+        matches!(self, Self::UserInput { .. } | Self::WorkbenchOwner { .. })
+    }
+
     pub fn follows_owner_devices(&self) -> bool {
         matches!(
             self,
@@ -235,8 +240,7 @@ impl AgentRole {
         self.is_main()
             || !matches!(
                 effect,
-                ToolEffect::SchedulePlanning
-                    | ToolEffect::GoalOpenPlanning
+                ToolEffect::GoalOpenPlanning
                     | ToolEffect::GoalControl
                     | ToolEffect::SubAgentPlanning
                     | ToolEffect::SubAgentControl

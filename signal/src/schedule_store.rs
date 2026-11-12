@@ -423,10 +423,35 @@ impl ScheduleStore {
             })
             .cloned()
             .ok_or(ScheduleStoreError::Invalid)?;
+        // A child proposes with what its main conversation delegated: the frozen
+        // read selection and owner data, never inputs of its own.
+        let delegated = match session.agent_role.binding() {
+            Some(binding) => {
+                let run = crate::entity::agent_subagent_run::Entity::find()
+                    .filter(crate::entity::agent_subagent_run::Column::TaskId.eq(&binding.task_id))
+                    .filter(
+                        crate::entity::agent_subagent_run::Column::ChildConversationId
+                            .eq(&session.conversation_id),
+                    )
+                    .one(db)
+                    .await?
+                    .ok_or(ScheduleStoreError::NotFound)?;
+                Some(
+                    serde_json::from_str::<
+                        desk_diagnose_core::subagent::creation::TaskCreationEnvelope,
+                    >(&run.creation_envelope_json)
+                    .map_err(|_| ScheduleStoreError::Invalid)?
+                    .source,
+                )
+            }
+            None => None,
+        };
         let mut owner_input = session.clone();
         owner_input.scheduled_request = None;
         // No accepted input means no inherited read selection; it grants no resources.
-        let mut original_context = if session.latest_input_seq == 0 {
+        let mut original_context = if let Some(creation) = &delegated {
+            creation.child_read_context()
+        } else if session.latest_input_seq == 0 {
             None
         } else {
             crate::agent_run_event_store::input_context::original_on(db, &owner_input)
@@ -449,16 +474,28 @@ impl ScheduleStore {
             }
         }
         let captured_at = authority::authority_now(db).await?;
-        let consent = TaskRetrievalConsent::capture(
-            schedule_id,
-            1,
-            &session,
-            target,
-            original_context,
-            captured_at
-                .try_into()
-                .map_err(|_| ScheduleStoreError::Invalid)?,
-        )
+        let captured_at = captured_at
+            .try_into()
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let consent = match &delegated {
+            Some(creation) => TaskRetrievalConsent::capture_delegated(
+                schedule_id,
+                1,
+                &session,
+                creation,
+                target,
+                original_context,
+                captured_at,
+            ),
+            None => TaskRetrievalConsent::capture(
+                schedule_id,
+                1,
+                &session,
+                target,
+                original_context,
+                captured_at,
+            ),
+        }
         .map_err(|_| ScheduleStoreError::Invalid)?
         .encode()
         .map_err(|_| ScheduleStoreError::Invalid)?;

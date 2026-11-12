@@ -257,7 +257,8 @@ pub fn exposure_block_reason(
         .then_some("trigger_origin_has_no_assistant_data_scope");
     }
     if tool.effect == ToolEffect::SchedulePlanning {
-        return (origin != TriggerOrigin::User).then_some("trigger_origin_disallows_planning");
+        return (!matches!(origin, TriggerOrigin::User | TriggerOrigin::DelegatedTask))
+            .then_some("trigger_origin_disallows_planning");
     }
     if tool.effect == ToolEffect::ScheduleQuery {
         return (!matches!(
@@ -378,6 +379,7 @@ fn available_to_session(
                     | ToolEffect::RunProjection
                     | ToolEffect::ConversationHistory
             ))
+        && (tool.effect != ToolEffect::SchedulePlanning || session.owner_direct_planning())
         && (tool.effect != ToolEffect::ScheduleQuery
             || !session.agent_role.is_main()
             || matches!(

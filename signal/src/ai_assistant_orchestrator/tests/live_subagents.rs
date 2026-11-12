@@ -1110,6 +1110,60 @@ async fn personal_worker_web_request_scenario() {
     };
     let mut child = claimed.session;
     assert!(child.device_id.is_empty());
+    // The worker proposes a fresh scheduled task like its main conversation;
+    // the owner reviews it in the task list.
+    let target = child.admitted_assistant_request_targets().unwrap()[0].clone();
+    let call = desk_diagnose_core::chat::ToolCall {
+        id: "worker-schedule".into(),
+        name: desk_diagnose_core::schedule::proposal::REQUEST_SCHEDULE.into(),
+        arguments_json: json!({"kind":"fresh_task","target_ref":target.reference,
+            "title":"Release check","prompt":"Read the release notes again",
+            "rule":{"kind":"once","at":"2099-01-01T00:00:00Z"}})
+        .to_string(),
+    };
+    let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        "worker-plan".into(),
+        "Schedule a release check".into(),
+        destination.clone(),
+    )
+    .unwrap();
+    parent.role = desk_diagnose_core::chat::ChatRole::Assistant;
+    parent.turn_id = child.current_turn_id.clone();
+    parent.replay_disposition = Some(desk_diagnose_core::replay::ReplayDisposition::NotRequired {
+        source_context_key: desk_diagnose_core::replay::SourceContextKey::derive(
+            desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            "test",
+            "test",
+            "test",
+        ),
+    });
+    parent
+        .tool_calls
+        .push(desk_diagnose_core::chat::ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        });
+    child.conversation.push(parent);
+    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .save(&mut child)
+        .await
+        .unwrap();
+    crate::schedule_store::ScheduleStore::new(db.clone())
+        .manage_from_session(
+            &mut child,
+            &call,
+            &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
+        )
+        .await
+        .unwrap();
+    let proposal: Value = serde_json::from_str(&child.conversation.last().unwrap().text).unwrap();
+    let task = crate::schedule_store::ScheduleStore::new(db.clone())
+        .read(1, proposal["schedule_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(task.kind, "fresh_task");
+    assert_eq!(task.status, "draft");
     let request = desk_diagnose_core::permission_tools::build_permission_request(
         &desk_diagnose_core::chat::ToolCall {
             id: "worker-web-plan".into(),

@@ -1,7 +1,7 @@
 //! Model proposals create reviewable drafts, never schedules or execution grants.
 use crate::{
     chat::{ToolCall, ToolSpec},
-    session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
+    session::{AgentSessionSurface, PersistedAgentSession},
 };
 use desk_agent_protocol::schedule::{
     ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduleTimeConfirmation,
@@ -15,10 +15,7 @@ pub const REQUEST_SCHEDULE: &str = "request_scheduled_task";
 
 /// Trusted clock context only. Locale and device location are never timezones.
 pub fn clock_prompt(session: &PersistedAgentSession, now_unix_ms: u64) -> String {
-    if !session.agent_role.is_main()
-        || session.surface != AgentSessionSurface::AiAssistant
-        || session.trigger_origin != TriggerOrigin::User
-    {
+    if !session.owner_direct_planning() || session.surface != AgentSessionSurface::AiAssistant {
         return String::new();
     }
     let Some(now) = i64::try_from(now_unix_ms)
@@ -107,9 +104,8 @@ pub fn draft(
     if call.name != REQUEST_SCHEDULE
         || call.id.is_empty()
         || call.id.len() > 256
-        || !session.agent_role.is_main()
+        || !session.owner_direct_planning()
         || session.surface != AgentSessionSurface::AiAssistant
-        || session.trigger_origin != TriggerOrigin::User
         || !session.turn_state.is_active()
         || session.input_revision == 0
         || session.actor_id.is_empty()
@@ -119,9 +115,8 @@ pub fn draft(
             observation.reject(Stage::Exposure, InputIssue::UnknownTool);
         } else if call.id.is_empty() || call.id.len() > 256 {
             observation.reject(Stage::Protocol, InputIssue::InvalidProtocol);
-        } else if !session.agent_role.is_main()
+        } else if !session.owner_direct_planning()
             || session.surface != AgentSessionSurface::AiAssistant
-            || session.trigger_origin != TriggerOrigin::User
             || !session.turn_state.is_active()
             || session.input_revision == 0
             || session.actor_id.is_empty()
@@ -165,6 +160,14 @@ pub fn draft(
             observation.reject(Stage::Preflight, InputIssue::Combination);
         })?;
     let continuation = input.kind == ScheduledTaskKind::ConversationResume;
+    // A timer resumes the conversation the owner sees; a child's would resume
+    // only the child.
+    if continuation && session.agent_role.binding().is_some() {
+        observation.reject(Stage::Preflight, InputIssue::Combination);
+        return Err(
+            "a delegated request cannot propose conversation_resume; propose fresh_task, or report back so the main conversation proposes the timer",
+        );
+    }
     if continuation
         && !matches!(
             spec.rule,
@@ -402,5 +405,159 @@ mod tests {
             call.arguments_json = ambiguous.to_string();
             assert!(draft(&session, &call, &Default::default()).is_err());
         }
+    }
+
+    fn delegated(source: crate::subagent::DelegationSource) -> PersistedAgentSession {
+        let target = crate::dynamic_run::AssistantInputTarget {
+            reference: "ref-b".into(),
+            device_id: "b".into(),
+            member_generation: None,
+        };
+        let mut child = PersistedAgentSession::new_subagent(
+            "sa_child",
+            "owner",
+            "",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: Vec::new(),
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            crate::subagent::DelegatedTaskBinding {
+                targets: vec![target.clone()],
+                root_conversation_id: "chat".into(),
+                group_id: "group".into(),
+                task_id: "task".into(),
+                source,
+                objective: "Check".into(),
+                acceptance_criteria: vec!["Report".into()],
+                input_revision: 1,
+                control_revision: 1,
+                source_epoch: 1,
+                deadline_ms: 1_799_999_999_999,
+            },
+            "2026-10-20T00:00:00Z",
+        )
+        .unwrap();
+        child.surface = AgentSessionSurface::AiAssistant;
+        child.trigger_origin = crate::session::TriggerOrigin::DelegatedTask;
+        child.turn_state = crate::session::TurnState::Running;
+        child.bind_assistant_input_targets(&[target]).unwrap();
+        child
+    }
+
+    #[test]
+    fn a_directly_delegated_request_proposes_fresh_tasks_but_not_conversation_timers() {
+        let call = |kind: &str| {
+            ToolCall {
+            id: "proposal".into(),
+            name: REQUEST_SCHEDULE.into(),
+            arguments_json: json!({"kind":kind,"target_ref":"ref-b","title":"Later","prompt":"Check B","rule":{"kind":"once","at":"2099-01-01T00:00:00Z"}}).to_string(),
+        }
+        };
+        let child = delegated(crate::subagent::DelegationSource::UserInput { input_revision: 1 });
+        assert!(child.owner_direct_planning());
+        assert!(!clock_prompt(&child, 1).is_empty());
+        let fresh = draft(&child, &call("fresh_task"), &Default::default()).unwrap();
+        assert_eq!(fresh.target_device_id, "b");
+        let resume = draft(&child, &call("conversation_resume"), &Default::default()).unwrap_err();
+        assert!(resume.contains("delegated request"), "{resume}");
+        // Only a request the owner delegated directly, in its delegated turn.
+        let mut resumed = child.clone();
+        resumed.trigger_origin = crate::session::TriggerOrigin::PermissionDecision;
+        assert!(draft(&resumed, &call("fresh_task"), &Default::default()).is_err());
+        let issue = delegated(crate::subagent::DelegationSource::Goal {
+            goal_id: "goal".into(),
+        });
+        assert!(!issue.owner_direct_planning());
+        assert!(draft(&issue, &call("fresh_task"), &Default::default()).is_err());
+        assert!(clock_prompt(&issue, 1).is_empty());
+        let tools = registry();
+        let names = |session: &PersistedAgentSession| {
+            crate::registry::exposed_for_session(&tools, session)
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(names(&child).iter().any(|name| name == REQUEST_SCHEDULE));
+        assert!(!names(&issue).iter().any(|name| name == REQUEST_SCHEDULE));
+        // Cancelling AI-created tasks follows the same rule as proposing them.
+        let cancel = ToolCall {
+            id: "cancel".into(),
+            name: super::super::management_tools::CANCEL.into(),
+            arguments_json: json!({"schedule_id":"sc1"}).to_string(),
+        };
+        let unavailable = "schedule management is unavailable";
+        let direct = super::super::management_tools::parse(&child, &cancel, &Default::default());
+        assert_ne!(direct.err(), Some(unavailable));
+        let other = super::super::management_tools::parse(&issue, &cancel, &Default::default());
+        assert_eq!(other.err(), Some(unavailable));
+
+        // The proposal keeps the owner data frozen at delegation, not the
+        // child's request-bounded scope.
+        let mut main = crate::ai_assistant::test_support::personal_session("owner", "chat", "");
+        main.input_revision = 1;
+        main.trigger_origin = crate::session::TriggerOrigin::User;
+        main.bind_assistant_input_targets(&[]).unwrap();
+        let seed = crate::ai_assistant::delegated_retrieval::DelegatedAssistantSeed::capture(&main)
+            .unwrap();
+        let owner = crate::model_message_labels::model_bound_user_message(
+            "owner-input".into(),
+            "Check B later".into(),
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "connection".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap();
+        let creation = crate::subagent::creation::CreationEnvelope {
+            root_conversation_id: "chat".into(),
+            actor_id: "owner".into(),
+            device_id: String::new(),
+            targets: child.agent_role.binding().unwrap().targets.clone(),
+            main_request_id: None,
+            source: crate::subagent::DelegationSource::UserInput { input_revision: 1 },
+            parent_input_revision: 1,
+            parent_control_revision: 1,
+            model_destination: owner.data_envelope.as_ref().unwrap().allowed_destinations[0]
+                .clone(),
+            owner_requirement: owner,
+            scheduled_source: None,
+            original_read_context: None,
+            assistant_seed: Some(seed.clone()),
+        };
+        let target = child.admitted_assistant_request_targets().unwrap()[0].clone();
+        let consent =
+            crate::ai_assistant::scheduled_retrieval::TaskRetrievalConsent::capture_delegated(
+                "schedule-1",
+                1,
+                &child,
+                &creation,
+                target.clone(),
+                None,
+                200,
+            )
+            .unwrap();
+        assert_eq!(consent.history_scope, seed.history_scope);
+        assert_eq!(consent.memory_scope, seed.memory_scope);
+        assert_eq!(consent.assistant_seed.as_deref(), Some(&seed.owner));
+        // The data came from the main conversation's delegating input.
+        assert_eq!(consent.source_conversation_id.as_deref(), Some("chat"));
+        assert_eq!(consent.source_input_revision, Some(1));
+        assert!(
+            crate::ai_assistant::scheduled_retrieval::TaskRetrievalConsent::capture_delegated(
+                "schedule-1",
+                1,
+                &issue,
+                &creation,
+                target,
+                None,
+                200,
+            )
+            .is_err()
+        );
     }
 }

@@ -1942,6 +1942,18 @@ impl PersistedAgentSession {
     }
 
     /// A personal input retains the account subject even when it selects devices.
+    /// A turn that acts for an owner's direct request: the owner's own turn in a
+    /// main conversation, or a child request the owner delegated directly.
+    pub fn owner_direct_planning(&self) -> bool {
+        match self.agent_role.binding() {
+            None => self.trigger_origin == TriggerOrigin::User,
+            Some(binding) => {
+                self.trigger_origin == TriggerOrigin::DelegatedTask
+                    && binding.source.is_owner_direct()
+            }
+        }
+    }
+
     /// The main conversation, or a child carrying its request's frozen owner data.
     pub fn uses_owner_assistant_data(&self) -> bool {
         self.agent_role.is_main() || self.assistant_data.is_some()

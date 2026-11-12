@@ -275,6 +275,61 @@ impl TaskRetrievalConsent {
         Ok(value)
     }
 
+    /// A child request proposes a task with the owner data its main
+    /// conversation had when it delegated, never the child's request-bounded
+    /// scope. The source is that main conversation and input.
+    pub fn capture_delegated(
+        schedule_id: &str,
+        task_revision: u64,
+        child: &PersistedAgentSession,
+        creation: &crate::subagent::creation::CreationEnvelope,
+        execution_target: crate::dynamic_run::AssistantInputTarget,
+        original_read_context: Option<crate::input_read_context::ReadContextSelection>,
+        now: u64,
+    ) -> Result<Self, &'static str> {
+        let seed = creation.assistant_seed.as_deref();
+        if child.surface != AgentSessionSurface::AiAssistant
+            || !child.owner_direct_planning()
+            || child
+                .agent_role
+                .binding()
+                .map(|binding| &binding.root_conversation_id)
+                != Some(&creation.root_conversation_id)
+        {
+            return Err("task retrieval consent requires a request the owner delegated directly");
+        }
+        if !child
+            .admitted_assistant_request_targets()
+            .is_some_and(|targets| targets.contains(&execution_target))
+        {
+            return Err("scheduled target was not admitted with the delegated request");
+        }
+        if seed.is_some_and(|seed| seed.owner.input_recorded_at_unix_ms > now) {
+            return Err("task consent predates its original owner input");
+        }
+        let value = Self {
+            schema_version: 2,
+            schedule_id: schedule_id.into(),
+            task_revision,
+            actor_id: child.actor_id.clone(),
+            device_id: execution_target.device_id.clone(),
+            source_session_device_id: creation.device_id.clone(),
+            execution_target,
+            original_read_context,
+            source_conversation_id: Some(creation.root_conversation_id.clone()),
+            source_input_revision: Some(creation.parent_input_revision),
+            captured_at_unix_ms: now,
+            temporary: false,
+            source_device_ref: seed.map(|seed| seed.source_device_ref.clone()),
+            source_instance_id: seed.and_then(|seed| seed.source_instance_id.clone()),
+            history_scope: seed.and_then(|seed| seed.history_scope.clone()),
+            memory_scope: seed.and_then(|seed| seed.memory_scope.clone()),
+            assistant_seed: seed.map(|seed| Box::new(seed.owner.clone())),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         for id in [&self.schedule_id, &self.actor_id, &self.device_id] {
             validate_source_id(id)?;

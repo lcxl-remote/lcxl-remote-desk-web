@@ -593,11 +593,12 @@ async fn child_recovery_notices_keep_delegated_model_authority_without_user_mess
 }
 
 #[tokio::test]
-async fn child_cannot_reach_delegation_goal_or_schedule_creation_even_when_model_returns_them() {
+async fn child_cannot_reach_delegation_or_goal_creation_even_when_model_returns_them() {
+    // A directly delegated child may propose schedules like its main
+    // conversation; delegation and goal proposals stay with the main agent.
     for name in [
         crate::subagent::tools::SPAWN,
         crate::goal_tools::REQUEST_GOAL_TOOL_NAME,
-        crate::schedule::proposal::REQUEST_SCHEDULE,
     ] {
         let (sessions, child) = ChildSessions::prepared();
         let script = ScriptModel {

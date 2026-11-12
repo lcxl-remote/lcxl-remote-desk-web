@@ -321,13 +321,13 @@ fn child_retains_business_effects_and_rejects_all_orchestration_effects() {
         ToolEffect::WaitTask,
         ToolEffect::RunProjection,
         ToolEffect::ScheduleQuery,
+        ToolEffect::SchedulePlanning,
     ] {
         assert!(child.agent_role.allows_effect(effect), "{effect:?}");
     }
     for effect in [
         ToolEffect::GoalOpenPlanning,
         ToolEffect::GoalControl,
-        ToolEffect::SchedulePlanning,
         ToolEffect::SubAgentPlanning,
         ToolEffect::SubAgentControl,
         ToolEffect::SubAgentQuery,

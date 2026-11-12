@@ -60,8 +60,15 @@ async fn reject_writes(db: &DatabaseConnection, id: &str) {
                 .await;
             if spoof {
                 assert!(matches!(result, Err(ScheduleStoreError::Conflict)));
-            } else {
+            } else if !held.owner_direct_planning() {
                 assert!(matches!(result, Err(ScheduleStoreError::Invalid)));
+            } else if kind == "fresh_task" {
+                // A directly delegated child may propose a fresh task, but only
+                // from its own persisted model call; a raw write still conflicts.
+                assert!(matches!(result, Err(ScheduleStoreError::Conflict)));
+            } else {
+                // A conversation timer would resume only the child.
+                assert!(matches!(result, Err(ScheduleStoreError::ToolInput(_))));
             }
         }
         let event = super::goal_role_guard::proposal(&mut held);
