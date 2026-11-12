@@ -1524,12 +1524,16 @@ export function useAiAssistantChat({
         return true;
     }, [attachments, deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
-    const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string, deviceRef?: string) => {
+    const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string, deviceRef?: string,
+        connectionFor?: (deviceId: string) => string | undefined) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (contextRequest.current || !connected || hydrating) return false;
         const device = deskId || (operation.kind === 'select_directory' ? deviceRef
             : fileScope.directories.find(item => item.requestId === operation.directory_request_id)?.deviceRef);
         if (!device) return false;
+        // A personal conversation names devices; signaling targets their live connection.
+        const target = deskId || connectionFor?.(device);
+        if (!target) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
         directorySelectors.current = { conversationId: currentConversationId, clientRequestId };
@@ -1537,7 +1541,7 @@ export function useAiAssistantChat({
         setError(null);
         contextRequest.current = sendMessage(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT, {
             conversation_id: currentConversationId, conversation_target: deskId ? 'fixed_device' : 'selectable_devices', client_request_id: clientRequestId, operation,
-        }, device);
+        }, target);
         contextTimer.current = window.setTimeout(() => {
             directorySelectors.current = null;
             contextTimer.current = null;

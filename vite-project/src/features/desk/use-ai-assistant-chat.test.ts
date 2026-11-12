@@ -608,7 +608,7 @@ describe('useAiAssistantChat', () => {
         expect(result.current.fileScope.revision).toBe(1);
         unmount();
     });
-    it('routes a selectable directory decision to the device recorded in the snapshot', async () => {
+    it('routes a selectable directory decision to the live connection of the device recorded in the snapshot', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
             ...snapshotFields, sessionId: 'account-session', seq: 10, active: false, messages: [],
             fileScope: { revision: 2, directories: [{ requestId: 'original-directory', deviceRef: 'device-a',
@@ -619,9 +619,14 @@ describe('useAiAssistantChat', () => {
             initialConversationId: 'account-conversation', connected: true, subscribe: () => () => undefined, sendMessage }));
         await waitFor(() => expect(result.current.fileScope.revision).toBe(2));
         const revoke = { kind: 'revoke_directory' as const, directory_request_id: 'original-directory', expected_revision: 2 };
-        act(() => { expect(result.current.updateDirectory(revoke, 'timeout', 'device-b')).toBe(true); });
+        // Without a live connection for the device nothing is sent.
+        act(() => { expect(result.current.updateDirectory(revoke, 'timeout', 'device-b', () => undefined)).toBe(false); });
+        expect(sendMessage).not.toHaveBeenCalledWith(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+            expect.anything(), expect.anything());
+        const connectionFor = (device: string) => ({ 'device-a': 'connection-a' } as Record<string, string>)[device];
+        act(() => { expect(result.current.updateDirectory(revoke, 'timeout', 'device-b', connectionFor)).toBe(true); });
         expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
-            expect.objectContaining({ conversation_target: 'selectable_devices', operation: revoke }), 'device-a');
+            expect.objectContaining({ conversation_target: 'selectable_devices', operation: revoke }), 'connection-a');
         unmount();
     });
     it('selects live resources on the requested device and freezes only admitted attachments', async () => {

@@ -49,13 +49,20 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
     const browsingDevice = deskId || (selectedDevice && devices?.some(device => device.id === selectedDevice) ? selectedDevice
         : devices?.length === 1 ? devices[0].id : undefined);
     const canBrowse = !!browsingDevice && (!deskId || sessionTargetId !== undefined);
-    const submit = (operation: AssistantDirectoryOperation, deviceRef?: string) => onUpdate(operation, t('pages.aiAssistant.directories.timeout'), deviceRef);
+    const [unavailable, setUnavailable] = useState(false);
+    // An action that cannot be sent says so instead of ignoring the click.
+    const submit = (operation: AssistantDirectoryOperation, deviceRef?: string) => {
+        const sent = onUpdate(operation, t('pages.aiAssistant.directories.timeout'), deviceRef);
+        setUnavailable(!sent);
+        return sent;
+    };
     return <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-lg">
             <SheetHeader>
                 <SheetTitle>{t('pages.aiAssistant.directories.title')}</SheetTitle>
                 <SheetDescription>{t('pages.aiAssistant.directories.hint')}</SheetDescription>
             </SheetHeader>
+            {unavailable && <p role="alert" className="px-4 text-sm text-destructive">{t('pages.aiAssistant.directories.submitUnavailable')}</p>}
             <div className="space-y-2 px-4">
                 {devices && devices.length > 1 && <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button type="button" variant="outline" disabled={disabled || selectionDisabled}>

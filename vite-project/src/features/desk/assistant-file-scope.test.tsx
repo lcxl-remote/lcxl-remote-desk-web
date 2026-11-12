@@ -61,6 +61,21 @@ describe('conversation directories', () => {
         expect(update.mock.calls[1][0]).toEqual({ kind: 'revoke_directory', directory_request_id: 'approved', expected_revision: 9 });
     });
 
+    it('says when a directory action cannot be sent instead of ignoring the click', () => {
+        const scope: AssistantFileScopeView = { revision: 3, directories: [
+            { requestId: 'approved', canonicalPath: '/other/path', purpose: 'purpose', state: 'approved', source: 'owner_selection', referenceExpiresAt: '' },
+        ] };
+        const update = vi.fn((..._args: unknown[]) => false);
+        const view = render(<AssistantFileScope scope={scope} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
+        expect(screen.queryByRole('alert')).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.directories.remove' }));
+        expect(screen.getByRole('alert')).toHaveTextContent('pages.aiAssistant.directories.submitUnavailable');
+        update.mockReturnValue(true);
+        view.rerender(<AssistantFileScope scope={scope} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.directories.remove' }));
+        expect(screen.queryByRole('alert')).toBeNull();
+    });
+
     it('does not show directory paths while the panel is closed', () => {
         render(<AssistantFileScope scope={{ revision: 0, directories: [] }} open={false} onOpenChange={() => {}} disabled={false} onUpdate={() => true} />);
         expect(screen.queryByRole('dialog')).toBeNull();

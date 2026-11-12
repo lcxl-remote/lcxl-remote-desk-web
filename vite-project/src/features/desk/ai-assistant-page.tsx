@@ -27,7 +27,7 @@ import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AssistantContextMeter } from './assistant-context-meter';
 import { AssistantDirectoryApproval } from './assistant-directory-approval';
-import { AssistantFileScope } from './assistant-file-scope';
+import { AssistantFileScope, type AssistantDirectoryOperation } from './assistant-file-scope';
 import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { exportDeviceFileRecovery } from '@/services/clients';
 import { FileRecoverySettings } from '@/features/settings/file-recovery-settings';
@@ -287,7 +287,9 @@ export function AiAssistantWorkspace({
     const [contextDeviceChoice, setContextDeviceChoice] = useState<string>();
     const contextDevice = requestDevices.selected.find(device => device.id === contextDeviceChoice)
         ?? (requestDevices.selected.length === 1 ? requestDevices.selected[0] : undefined);
-    const contextConnection = deskId || contextDevice?.id;
+    const contextConnection = deskId || (contextDevice && requestDevices.connectionFor(contextDevice.id));
+    const updateDirectory = (operation: AssistantDirectoryOperation, timeoutMessage: string, deviceRef?: string) =>
+        chat.updateDirectory(operation, timeoutMessage, deviceRef, requestDevices.connectionFor);
     const capabilities = useAiAssistantCapabilities({
         deskId: contextConnection ?? null, subscribe, sendMessage,
         enabled: !!contextConnection && assistantEnabled && isConnected,
@@ -1008,7 +1010,7 @@ export function AiAssistantWorkspace({
                         <AssistantDirectoryApproval directory={directory} revision={chat.fileScope.revision}
                             deviceLabel={hasDevice ? undefined : requestDevices.selected.find(device => device.id === directory.deviceRef)?.name || directory.deviceRef || undefined}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating}
-                            busy={chat.contextUpdating} onUpdate={chat.updateDirectory} />
+                            busy={chat.contextUpdating} onUpdate={updateDirectory} />
                     </div>)}
                     <AssistantBackgroundTasks key={`tasks:${permissionHistoryKey}`}
                         open={taskPanelSession === permissionHistoryKey}
@@ -1020,7 +1022,7 @@ export function AiAssistantWorkspace({
                         deskId={deskId} sessionTargetId={hasDevice && chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         devices={hasDevice ? undefined : requestDevices.selected}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
-                        disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
+                        disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />}
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
                     <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {

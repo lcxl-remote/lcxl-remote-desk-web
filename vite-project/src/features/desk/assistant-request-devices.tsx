@@ -42,6 +42,8 @@ export function useConversationRequestDevices(
     const ready = !scope || (!saving && (!conversation || !!roster.data));
     return {
         ready,
+        /** The live signaling connection of a device, which device-bound frames target. */
+        connectionFor: (id: string) => connections.data?.data?.find(item => item.device_id === id)?.connection_id,
         selected: roster.data?.targetRefs.map(id => {
             const peer = connections.data?.data?.find(item => item.device_id === id)?.peer;
             return { id, name: peer?.display_name || id, platform: peer?.operation_system ?? '' };
