@@ -68,6 +68,8 @@ async fn reconcile_inner_on(
     let turn = session.current_turn_id.clone().ok_or_else(invalid)?;
     let rows = agent_action_item::Entity::find()
         .filter(agent_action_item::Column::ConversationId.eq(&session.conversation_id))
+        // A Worker session's earlier requests left no open actions.
+        .filter(agent_action_item::Column::Id.gt(session.child_request_admission.action_watermark))
         .order_by_asc(agent_action_item::Column::Id)
         .limit(desk_diagnose_core::subagent::facts::MAX_ACTION_FACTS as u64 + 1)
         .all(txn)

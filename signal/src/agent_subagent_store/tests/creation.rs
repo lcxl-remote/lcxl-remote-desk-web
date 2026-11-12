@@ -239,9 +239,8 @@ async fn spawn_replays_one_independent_child_and_capacity_is_root_scoped() {
 }
 
 #[tokio::test]
-async fn reused_worker_projects_only_retained_history_for_the_current_model() {
-    use crate::entity::agent_subagent_inbox as inbox;
-    use desk_diagnose_core::{session::TurnState, subagent::report::StoredReport};
+async fn a_reused_worker_continues_in_its_session_with_the_full_history() {
+    use desk_diagnose_core::{session::TurnState, subagent::runtime::RuntimeTurn};
 
     let db = database().await;
     let (mut parent, mut calls) =
@@ -272,6 +271,15 @@ async fn reused_worker_projects_only_retained_history_for_the_current_model() {
         .spawn_for_turn(&parent, &calls[1], &next)
         .await
         .unwrap();
+    assert_eq!(second.child_session_id, first.child_session_id);
+    assert_eq!(
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&first.child_session_id))
+            .count(&db)
+            .await
+            .unwrap(),
+        1
+    );
     let SubAgentClaimOutcome::Claimed(claimed) = store
         .claim_child(
             &claim_params(&original),
@@ -284,6 +292,14 @@ async fn reused_worker_projects_only_retained_history_for_the_current_model() {
     else {
         panic!("original worker request");
     };
+    // The session works on one request at a time.
+    assert!(
+        store
+            .child_runtime_candidate(&second.task_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let mut session = claimed.session;
     let answer = super::lifecycle::report();
     super::lifecycle::append_report(&db, &mut session, &answer).await;
@@ -294,7 +310,36 @@ async fn reused_worker_projects_only_retained_history_for_the_current_model() {
         .unwrap()
         .unwrap();
 
+    let Some(RuntimeTurn::Child { session, run, .. }) = store
+        .child_runtime_candidate(&second.task_id)
+        .await
+        .unwrap()
+    else {
+        panic!("the next request is admitted to the Worker session");
+    };
+    assert_eq!(run.binding.task_id, second.task_id);
+    assert_eq!(session.conversation_id, first.child_session_id);
+    assert!(
+        session
+            .conversation
+            .iter()
+            .any(|message| message.text.contains(&answer.summary))
+    );
+    let instruction = format!("{}-instruction", first.task_id);
+    let source = format!("{}-source", second.task_id);
+    let first_at = session
+        .conversation
+        .iter()
+        .position(|message| message.message_id == instruction)
+        .unwrap();
+    let second_at = session
+        .conversation
+        .iter()
+        .position(|message| message.message_id == source)
+        .unwrap();
+    assert!(first_at < second_at);
     let next_run = load(&db, &second.task_id).await;
+    assert_eq!(next_run.fence(), run.fence());
     let SubAgentClaimOutcome::Claimed(next_claim) = store
         .claim_child(
             &claim_params(&next_run),
@@ -307,137 +352,19 @@ async fn reused_worker_projects_only_retained_history_for_the_current_model() {
     else {
         panic!("follow-up worker request");
     };
-    let prior = inbox::Entity::find()
-        .filter(inbox::Column::TaskId.eq(&first.task_id))
-        .filter(inbox::Column::EventKind.eq("report_completed"))
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    let saved: StoredReport = serde_json::from_str(&prior.event_json).unwrap();
     let projection = store
         .child_projection_for_turn(&next_claim.session)
         .await
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
-    let runtime = &value["runtime_delegation_state"];
-    assert_eq!(runtime["objective"], next.task);
-    assert_eq!(runtime["previous_worker_report"]["summary"], answer.summary);
-    assert_eq!(
-        runtime["previous_worker_report"]["request_id"],
-        first.task_id
-    );
-    assert!(
-        runtime["previous_worker_report"]
-            .get("receipt_refs")
-            .is_none()
-    );
-    assert!(
-        projection
-            .data_envelope
-            .unwrap()
-            .provenance
-            .source_envelope_ids
-            .contains(&saved.envelope.envelope_id)
-    );
-    assert!(
-        !next_claim
-            .session
-            .conversation
-            .iter()
-            .any(|message| message.text.contains(&answer.summary))
-    );
+    assert_eq!(value["runtime_delegation_state"]["objective"], next.task);
+    assert!(!projection.text.contains("previous_worker_report"));
 
     let different = store
         .spawn_for_turn(&parent, &calls[2], &spawn_request())
         .await
         .unwrap();
-
-    let separate = load(&db, &different.task_id).await;
-    let SubAgentClaimOutcome::Claimed(unrelated) = store
-        .claim_child(
-            &claim_params(&separate),
-            &different.task_id,
-            separate.fence(),
-            &destination(),
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("independent worker");
-    };
-    assert!(
-        !store
-            .child_projection_for_turn(&unrelated.session)
-            .await
-            .unwrap()
-            .text
-            .contains(&answer.summary)
-    );
-
-    // The same gateway keeps the report readable after a model or profile
-    // change; another connection revision does not.
-    let mut same_gateway = destination();
-    let mut other_destination = destination();
-    if let (
-        DestinationIdentity::Model {
-            profile_revision, ..
-        },
-        DestinationIdentity::Model {
-            connection_revision,
-            ..
-        },
-    ) = (&mut same_gateway, &mut other_destination)
-    {
-        *profile_revision += 1;
-        *connection_revision += 1;
-    }
-    for (current, readable) in [(&same_gateway, true), (&other_destination, false)] {
-        assert_eq!(
-            desk_assistant_data_store::worker_report::retained_terminal_report_on(
-                &db,
-                &load(&db, &first.task_id).await,
-                current,
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .await
-            .unwrap()
-            .is_some(),
-            readable
-        );
-    }
-    let expiry = chrono::Utc::now().timestamp_millis() - 1;
-    let mut expired = saved.clone();
-    expired.envelope.retention.expires_at_unix_ms = Some(expiry as u64);
-    let mut update: inbox::ActiveModel = prior.clone().into();
-    update.event_json = Set(serde_json::to_string(&expired).unwrap());
-    update.report_expires_at_ms = Set(Some(expiry));
-    update.update(&db).await.unwrap();
-    let projection = store
-        .child_projection_for_turn(&next_claim.session)
-        .await
-        .unwrap();
-    assert!(!projection.text.contains("previous_worker_report"));
-    assert!(projection.text.contains(&next.task));
-
-    let mut restore: inbox::ActiveModel = prior.into();
-    restore.event_json = Set(serde_json::to_string(&saved).unwrap());
-    restore.report_expires_at_ms = Set(None);
-    restore.update(&db).await.unwrap();
-    super::super::tombstone_on(
-        &db,
-        &first.child_session_id,
-        &parent.actor_id,
-        &parent.device_id,
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .await
-    .unwrap();
-    let projection = store
-        .child_projection_for_turn(&next_claim.session)
-        .await
-        .unwrap();
-    assert!(!projection.text.contains("previous_worker_report"));
+    assert_ne!(different.child_session_id, first.child_session_id);
 }
 
 #[tokio::test]
@@ -477,7 +404,7 @@ async fn a_worker_claims_requests_in_order_and_keeps_execution_bindings_separate
         .unwrap();
     assert_eq!(second.worker_id, first.worker_id);
     assert_ne!(second.task_id, first.task_id);
-    assert_ne!(second.child_session_id, first.child_session_id);
+    assert_eq!(second.child_session_id, first.child_session_id);
     assert_eq!(
         store
             .spawn_for_turn(&parent, &calls[1], &follow_up)
@@ -625,6 +552,87 @@ async fn a_worker_claims_requests_in_order_and_keeps_execution_bindings_separate
         load(&db, &second.task_id).await.state,
         SubAgentState::Running
     );
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_worker_request_leaves_the_shared_session_alone() {
+    use desk_agent_protocol::ai_assistant::subagent::{
+        AiAssistantSubAgentControl, SubAgentControlAction,
+    };
+
+    let db = database().await;
+    let (mut parent, mut calls) = runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let first = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let mut follow_up = spawn_request();
+    follow_up.worker_id = Some(first.worker_id.clone());
+    follow_up.task = "Verify a separate symptom".into();
+    calls[1].arguments_json = serde_json::to_string(&follow_up).unwrap();
+    parent.conversation.last_mut().unwrap().tool_calls[1].arguments_json =
+        calls[1].arguments_json.clone();
+    session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(parent.encode_json_for_storage().unwrap()),
+            ..Default::default()
+        })
+        .filter(session_row::Column::ConversationId.eq(&parent.conversation_id))
+        .exec(&db)
+        .await
+        .unwrap();
+    let second = store
+        .spawn_for_turn(&parent, &calls[1], &follow_up)
+        .await
+        .unwrap();
+    let shared = || async {
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&first.child_session_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let before = shared().await;
+    let txn = crate::db::begin_write(&db, session_row::Entity)
+        .await
+        .unwrap();
+    super::super::task_control::apply_task_control_on(
+        &txn,
+        &parent,
+        &AiAssistantSubAgentControl {
+            client_request_id: "cancel-queued".into(),
+            task_id: second.task_id.clone(),
+            expected_input_revision: second.input_revision,
+            expected_control_revision: second.control_revision,
+            action: SubAgentControlAction::Cancel,
+        },
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        load(&db, &second.task_id).await.state,
+        SubAgentState::Cancelled
+    );
+    let after = shared().await;
+    assert_eq!(after.state_json, before.state_json);
+    assert_eq!(after.version, before.version);
+    let first_run = load(&db, &first.task_id).await;
+    assert!(matches!(
+        store
+            .claim_child(
+                &claim_params(&first_run),
+                &first.task_id,
+                first_run.fence(),
+                &destination()
+            )
+            .await
+            .unwrap(),
+        SubAgentClaimOutcome::Claimed(_)
+    ));
 }
 
 #[tokio::test]

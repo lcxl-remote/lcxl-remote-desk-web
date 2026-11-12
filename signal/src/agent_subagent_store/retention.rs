@@ -168,10 +168,24 @@ pub(crate) async fn close_root_for_subject_on(
             .await?;
             for child in children {
                 let mut run = decode_run(&child)?;
-                desk_diagnose_core::future::boxed(|| async {
-                    tombstone_on(db, &run.child_conversation_id, actor, device, now_ms).await
-                })
-                .await?;
+                // A workbench Worker's session outlives one removed work while
+                // another work's request still refers to it.
+                if !desk_assistant_data_store::worker_request::shared_with_other_root_on(
+                    db,
+                    &run.child_conversation_id,
+                    conversation,
+                    tombstone::Entity::find()
+                        .select_only()
+                        .column(tombstone::Column::ConversationId)
+                        .into_query(),
+                )
+                .await?
+                {
+                    desk_diagnose_core::future::boxed(|| async {
+                        tombstone_on(db, &run.child_conversation_id, actor, device, now_ms).await
+                    })
+                    .await?;
+                }
                 if run.state.is_terminal() {
                     continue;
                 }
@@ -695,11 +709,33 @@ pub(crate) async fn redact_deleted_content(
                 .filter(session_row::Column::DeviceId.eq(&run.device_id))
                 .one(&txn)
                 .await?;
+            // A Worker session is redacted with the request it works on, and
+            // only once no other work's request refers to it.
+            let child = match child {
+                Some(_)
+                    if desk_assistant_data_store::worker_request::shared_with_other_root_on(
+                        &txn,
+                        &run.child_conversation_id,
+                        &run.binding.root_conversation_id,
+                        tombstone::Entity::find()
+                            .select_only()
+                            .column(tombstone::Column::ConversationId)
+                            .into_query(),
+                    )
+                    .await? =>
+                {
+                    None
+                }
+                child => child,
+            };
             if let Some(child) = child.filter(|row| {
                 row.conversation_schema_version
                     == Some(i32::from(
                         desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
                     ))
+                    && PersistedAgentSession::decode_json(&row.state_json).map_or(true, |session| {
+                        desk_diagnose_core::subagent::control::is_bound(&session, &run)
+                    })
             }) {
                 let mut session =
                     PersistedAgentSession::decode_json(&child.state_json).map_err(|error| {

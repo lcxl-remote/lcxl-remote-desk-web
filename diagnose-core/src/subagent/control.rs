@@ -1,7 +1,7 @@
 //! Adopt durable controls without granting a new owner input or resetting usage.
 
-use super::{AgentRole, SubAgentState, state::SubAgentRun};
-use crate::session::{PersistedAgentSession, TurnState};
+use super::{AgentRole, SubAgentState, creation::TaskCreationEnvelope, state::SubAgentRun};
+use crate::session::{ChildRequestAdmission, PersistedAgentSession, TriggerOrigin, TurnState};
 use sha2::{Digest, Sha256};
 
 /// Fence main generation while preserving execution identities for immutable
@@ -114,7 +114,18 @@ pub fn synchronize_session(
     {
         return Err("child control does not match its durable source");
     }
-    let input_changed = session.input_revision != run.binding.input_revision;
+    let admission = session.child_request_admission;
+    let input_revision = run
+        .binding
+        .input_revision
+        .checked_add(admission.input_offset)
+        .ok_or("child input revision exhausted")?;
+    let control_revision = run
+        .binding
+        .control_revision
+        .checked_add(admission.control_offset)
+        .ok_or("child control revision exhausted")?;
+    let input_changed = session.input_revision != input_revision;
     let lease = session
         .lease_token
         .checked_add(1)
@@ -125,15 +136,15 @@ pub fn synchronize_session(
         binding: Box::new(run.binding.clone()),
     };
     if input_changed {
-        updated.begin_focus_epoch(run.binding.input_revision, Vec::new())?;
+        updated.begin_focus_epoch(input_revision, Vec::new())?;
         updated.latest_input_seq = updated
             .latest_input_seq
             .checked_add(1)
             .ok_or("child input sequence exhausted")?;
-        updated.input_revision = run.binding.input_revision;
+        updated.input_revision = input_revision;
         updated.bind_assistant_input_targets(&run.binding.targets)?;
     }
-    updated.control_revision = run.binding.control_revision;
+    updated.control_revision = control_revision;
     updated.subagent_report_corrections_used = run.report_corrections_used;
     updated.lease_token = lease;
     updated.finish_turn(
@@ -149,4 +160,120 @@ pub fn synchronize_session(
     }
     *session = updated;
     Ok(())
+}
+
+/// Whether `run` is the request a Worker session currently works on. Other
+/// requests of the same Worker are queued or already finished; their controls
+/// change only their own request row.
+pub fn is_bound(session: &PersistedAgentSession, run: &SubAgentRun) -> bool {
+    session.conversation_id == run.child_conversation_id
+        && session
+            .agent_role
+            .binding()
+            .is_some_and(|binding| binding.task_id == run.binding.task_id)
+}
+
+/// A Worker session admits its next request the way a main conversation admits
+/// a new owner input: once the previous request has finished and the session is
+/// idle, the session takes a new input revision and focus epoch, and the new
+/// request's source and instruction join the retained history. The host holds
+/// the owner lock and writes the session with the same transaction.
+pub fn admit_request(
+    session: &mut PersistedAgentSession,
+    previous: &SubAgentRun,
+    next: &SubAgentRun,
+    creation: &TaskCreationEnvelope,
+    parent: &PersistedAgentSession,
+    action_watermark: i64,
+    now: &str,
+) -> Result<(), &'static str> {
+    next.validate()?;
+    // The previous request's content may already have expired with its work;
+    // only its identity and terminal state matter here.
+    if !is_bound(session, previous)
+        || session.actor_id != next.actor_id
+        || session.device_id != next.device_id
+        || !previous.state.is_terminal()
+        || next.state != SubAgentState::Queued
+        || next.worker_id != previous.worker_id
+        || next.child_conversation_id != session.conversation_id
+        || next.binding.root_conversation_id != parent.conversation_id
+        || action_watermark < session.child_request_admission.action_watermark
+    {
+        return Err("worker request cannot be admitted to this session");
+    }
+    if !admission_ready(session) {
+        return Err("worker session is still settling its previous request");
+    }
+    creation
+        .validate_task(&next.binding)
+        .map_err(|_| "worker request creation differs from its binding")?;
+    let input_revision = session
+        .input_revision
+        .checked_add(1)
+        .ok_or("child input revision exhausted")?
+        .max(next.binding.input_revision);
+    let control_revision = session
+        .control_revision
+        .checked_add(1)
+        .ok_or("child control revision exhausted")?
+        .max(next.binding.control_revision);
+    let mut updated = session.clone();
+    updated.agent_role = AgentRole::SubAgent {
+        binding: Box::new(next.binding.clone()),
+    };
+    updated.child_request_admission = ChildRequestAdmission {
+        input_offset: input_revision - next.binding.input_revision,
+        control_offset: control_revision - next.binding.control_revision,
+        action_watermark,
+    };
+    updated.input_revision = input_revision;
+    updated.control_revision = control_revision;
+    updated.latest_input_seq = updated
+        .latest_input_seq
+        .checked_add(1)
+        .ok_or("child input sequence exhausted")?;
+    updated.delegation_group_id = Some(next.binding.group_id.clone());
+    updated.delegated_owner_requirement = None;
+    updated
+        .bind_delegated_owner_requirement(&creation.source)
+        .map_err(|_| "worker request source is invalid")?;
+    updated.response_locale = creation.response_locale.clone();
+    updated.inherit_direct_approval_origin(parent);
+    updated.trigger_origin = TriggerOrigin::DelegatedTask;
+    updated.chain_id = next.binding.task_id.clone();
+    updated.automation_turns_used = 0;
+    updated.subagent_report_corrections_used = next.report_corrections_used;
+    updated.bind_assistant_input_targets(&next.binding.targets)?;
+    updated.begin_focus_epoch(input_revision, Vec::new())?;
+    updated.lease_token = updated
+        .lease_token
+        .checked_add(1)
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or("child lease exhausted")?;
+    updated.conversation.push(
+        creation
+            .source
+            .child_source_message(&next.binding.task_id)
+            .map_err(|_| "worker request source is invalid")?,
+    );
+    updated.conversation.push(creation.instruction.clone());
+    updated.finish_turn(TurnState::Idle, now);
+    next.validate_session(&updated)?;
+    *session = updated;
+    Ok(())
+}
+
+/// The previous request left nothing the next one could inherit: no open call,
+/// background action, pending result, approval or question.
+pub fn admission_ready(session: &PersistedAgentSession) -> bool {
+    !session.turn_state.is_active()
+        && session.awaiting_permission.is_none()
+        && session.execution_state == crate::session::ExecutionState::None
+        && session.pending_auto_triggers.is_empty()
+        && session.unclosed_tool_call_ids().is_empty()
+        && session
+            .permission_requests
+            .iter()
+            .all(|request| request.state.is_terminal())
 }

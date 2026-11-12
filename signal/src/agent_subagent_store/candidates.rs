@@ -35,6 +35,106 @@ fn required_terminal_wakes(
     }))
 }
 
+/// A Worker session moves to its next request only after the previous one has
+/// finished and left nothing open, the way a main conversation admits a new
+/// input only between turns. Returns whether `run` is now the bound request.
+async fn admit_worker_request_on(
+    txn: &crate::config::connection::DatabaseTransaction,
+    stored: &session_row::Model,
+    session: &mut PersistedAgentSession,
+    run: &SubAgentRun,
+    creation: &TaskCreationEnvelope,
+    parent: &PersistedAgentSession,
+) -> Result<bool, DbErr> {
+    use desk_diagnose_core::subagent::control;
+    if control::is_bound(session, run) {
+        return Ok(true);
+    }
+    let bound = session
+        .agent_role
+        .binding()
+        .ok_or_else(|| invalid())?
+        .task_id
+        .clone();
+    let previous = run_row::Entity::find()
+        .filter(run_row::Column::TaskId.eq(&bound))
+        .filter(run_row::Column::ChildConversationId.eq(&session.conversation_id))
+        .one(txn)
+        .await?
+        .ok_or_else(|| invalid())?;
+    let previous = decode_run(&previous)?;
+    if !previous.state.is_terminal() || !control::admission_ready(session) {
+        return Ok(false);
+    }
+    let actions = crate::entity::agent_action_item::Entity::find().filter(
+        crate::entity::agent_action_item::Column::ConversationId.eq(&session.conversation_id),
+    );
+    if actions
+        .clone()
+        .filter(
+            crate::entity::agent_action_item::Column::Status
+                .is_in(crate::usage_retention::UNRESOLVED_ACTION_STATES),
+        )
+        .count(txn)
+        .await?
+        > 0
+    {
+        return Ok(false);
+    }
+    let watermark = actions
+        .select_only()
+        .column(crate::entity::agent_action_item::Column::Id)
+        .order_by_desc(crate::entity::agent_action_item::Column::Id)
+        .into_tuple::<i64>()
+        .one(txn)
+        .await?
+        .unwrap_or_default();
+    let watermark = Ord::max(watermark, session.child_request_admission.action_watermark);
+    let now = chrono::Utc::now();
+    desk_assistant_data_store::issue_reply::lifecycle::cancel_request_on(
+        txn,
+        &session.actor_id,
+        &session.conversation_id,
+        session.input_revision,
+        "work_changed",
+        now.timestamp_millis(),
+    )
+    .await
+    .map_err(|error| match error {
+        desk_assistant_data_store::AssistantStoreError::Backend(error) => error,
+        _ => invalid(),
+    })?;
+    control::admit_request(
+        session,
+        &previous,
+        run,
+        creation,
+        parent,
+        watermark,
+        &now.to_rfc3339(),
+    )
+    .map_err(|_| invalid())?;
+    session.version = stored.version.checked_add(1).ok_or_else(|| invalid())?;
+    let changed = session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
+            version: Set(session.version),
+            lease_token: Set(i64::try_from(session.lease_token).map_err(|_| invalid())?),
+            lease_deadline: Set(None),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .filter(session_row::Column::Id.eq(stored.id))
+        .filter(session_row::Column::Version.eq(stored.version))
+        .filter(session_row::Column::LeaseToken.eq(stored.lease_token))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
 impl SubAgentStore {
     pub async fn queued_task_candidates(
         &self,
@@ -162,7 +262,7 @@ impl SubAgentStore {
             .await?
             .ok_or_else(|| invalid())?;
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
-        parent_on(
+        let parent = parent_on(
             &txn,
             &selected.root_conversation_id,
             &selected.actor_id,
@@ -207,8 +307,12 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(|| invalid())?;
-        let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+        let mut session =
+            PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if session.version != row.version || session.turn_state.is_active() {
+            return Ok(None);
+        }
+        if !admit_worker_request_on(&txn, &row, &mut session, &run, &creation, &parent).await? {
             return Ok(None);
         }
         match crate::issue_connections::check_work_on(

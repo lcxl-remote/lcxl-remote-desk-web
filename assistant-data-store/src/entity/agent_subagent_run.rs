@@ -10,7 +10,8 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub task_id: String,
-    #[sea_orm(unique)]
+    /// The requests of one Worker share its session.
+    #[sea_orm(indexed)]
     pub child_conversation_id: String,
     #[sea_orm(indexed)]
     pub worker_id: String,

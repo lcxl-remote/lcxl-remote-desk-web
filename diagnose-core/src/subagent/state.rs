@@ -269,8 +269,8 @@ impl SubAgentRun {
             || session.actor_id != self.actor_id
             || session.device_id != self.device_id
             || session.agent_role.binding() != Some(&self.binding)
-            || session.input_revision != self.binding.input_revision
-            || session.control_revision != self.binding.control_revision
+            || session.bound_input_revision() != Some(self.binding.input_revision)
+            || session.bound_control_revision() != Some(self.binding.control_revision)
             || session.subagent_report_corrections_used != self.report_corrections_used
         {
             return Err("child session does not match its durable task");

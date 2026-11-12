@@ -367,6 +367,8 @@ pub(crate) async fn lock_goal_source_on<C: ConnectionTrait + crate::config::Conf
         .iter()
         .map(|run| run.child_conversation_id.clone())
         .collect();
+    // Requests of one Worker share its session.
+    session_ids.dedup();
 
     session_ids.push(root.into());
     session_ids.sort();

@@ -223,7 +223,6 @@ async fn create_request_on(
         let run = decode_run(&existing)?;
         if existing.creation_arguments_sha256 != arguments_sha256
             || run.binding.task_id != task_id
-            || run.child_conversation_id != child_id
             || (held.agent_role.issue_source().is_none()
                 && run.worker_id != requested_worker_id(request, &creation_origin))
             || run.binding.group_id != group_id
@@ -265,6 +264,22 @@ async fn create_request_on(
     let worker_id = preferred
         .clone()
         .unwrap_or_else(|| requested_worker_id(request, &creation_origin));
+    // An existing Worker continues in its session; a new one gets its own.
+    let reused_session = desk_diagnose_core::future::boxed(|| {
+        desk_assistant_data_store::worker_request::worker_session_on(
+            txn,
+            desk_assistant_data_store::worker_request::in_scope(
+                &held.actor_id,
+                &held.device_id,
+                &held.conversation_id,
+                group.source.workbench_id(),
+            ),
+            &worker_id,
+            &group.source,
+        )
+    })
+    .await?;
+    let child_id = reused_session.clone().unwrap_or(child_id);
     if matches!(origin, SpawnOrigin::NativeTool(_))
         && preferred.is_none()
         && let Some(worker_id) = &request.worker_id
@@ -338,9 +353,9 @@ async fn create_request_on(
             }
         }
         let context = match origin {
-            SpawnOrigin::NativeTool(call) => task_context(creation, held, call, &child_id, request),
+            SpawnOrigin::NativeTool(call) => task_context(creation, held, call, &task_id, request),
             SpawnOrigin::FirstDispatch(_) => {
-                first_dispatch_context(creation, held, &child_id, request)
+                first_dispatch_context(creation, held, &task_id, request)
             }
         }
         .map_err(|_| invalid())?;
@@ -369,38 +384,43 @@ async fn create_request_on(
             expires_at: None,
             policy_name: Some("subagent-independent".into()),
         };
-        let mut child = PersistedAgentSession::new_subagent(
-            &child_id,
-            &held.actor_id,
-            &held.device_id,
-            held.policy_revision,
-            base_scope,
-            binding.clone(),
-            now.to_rfc3339(),
-        )
-        .map_err(|_| invalid())?;
-        child.inherit_direct_approval_origin(held);
-        child
-            .bind_delegated_owner_requirement(&context.source)
+        let child = if reused_session.is_none() {
+            let mut child = PersistedAgentSession::new_subagent(
+                &child_id,
+                &held.actor_id,
+                &held.device_id,
+                held.policy_revision,
+                base_scope,
+                binding.clone(),
+                now.to_rfc3339(),
+            )
             .map_err(|_| invalid())?;
-        child.response_locale = context.response_locale.clone();
-        child.trigger_origin = TriggerOrigin::DelegatedTask;
-        child.chain_id = child_id.clone();
-        child.conversation.push(
-            context
-                .source
-                .child_source_message(&child_id)
-                .map_err(|_| invalid())?,
-        );
-        child.conversation.push(context.instruction.clone());
-        // Only non-authorizing data labels cross the parent/child boundary.
-        // Directory consent, capabilities, attachments, approvals and actions do not.
-        let context_bytes = serde_json::to_vec(&child.conversation)
-            .map_err(|_| invalid())?
-            .len();
-        if context_bytes as u64 > group.limits.max_context_bytes {
-            return Err(invalid());
-        }
+            child.inherit_direct_approval_origin(held);
+            child
+                .bind_delegated_owner_requirement(&context.source)
+                .map_err(|_| invalid())?;
+            child.response_locale = context.response_locale.clone();
+            child.trigger_origin = TriggerOrigin::DelegatedTask;
+            child.chain_id = child_id.clone();
+            child.conversation.push(
+                context
+                    .source
+                    .child_source_message(&binding.task_id)
+                    .map_err(|_| invalid())?,
+            );
+            child.conversation.push(context.instruction.clone());
+            // Only non-authorizing data labels cross the parent/child boundary.
+            // Directory consent, capabilities, attachments, approvals and actions do not.
+            let context_bytes = serde_json::to_vec(&child.conversation)
+                .map_err(|_| invalid())?
+                .len();
+            if context_bytes as u64 > group.limits.max_context_bytes {
+                return Err(invalid());
+            }
+            Some(child)
+        } else {
+            None
+        };
         let run = SubAgentRun {
             worker_id: worker_id.clone(),
             child_conversation_id: child_id.clone(),
@@ -421,7 +441,9 @@ async fn create_request_on(
             updated_at: now.to_rfc3339(),
         };
         run.validate().map_err(|_| invalid())?;
-        child.encode_json_for_storage().map_err(|_| invalid())?;
+        if let Some(child) = &child {
+            child.encode_json_for_storage().map_err(|_| invalid())?;
+        }
         desk_diagnose_core::future::boxed(|| async {
             replace_group_on(txn, &original_row, &group, now.timestamp_millis()).await
         })
@@ -456,27 +478,29 @@ async fn create_request_on(
         .await
         })
         .await?;
-        desk_diagnose_core::future::boxed(|| async {
-            session_row::ActiveModel {
-                conversation_id: Set(child_id),
-                actor_id: Set(held.actor_id.clone()),
-                device_id: Set(held.device_id.clone()),
-                conversation_schema_version: Set(Some(i32::from(
-                    desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
-                ))),
-                state_json: Set(child.encode_json_for_storage().map_err(|_| invalid())?),
-                version: Set(0),
-                lease_token: Set(0),
-                lease_deadline: Set(None),
+        if let Some(child) = child {
+            desk_diagnose_core::future::boxed(|| async {
+                session_row::ActiveModel {
+                    conversation_id: Set(child_id),
+                    actor_id: Set(held.actor_id.clone()),
+                    device_id: Set(held.device_id.clone()),
+                    conversation_schema_version: Set(Some(i32::from(
+                        desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                    ))),
+                    state_json: Set(child.encode_json_for_storage().map_err(|_| invalid())?),
+                    version: Set(0),
+                    lease_token: Set(0),
+                    lease_deadline: Set(None),
 
-                created_at: Set(now),
-                updated_at: Set(now),
-                ..Default::default()
-            }
-            .insert(txn)
-            .await
-        })
-        .await?;
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(txn)
+                .await
+            })
+            .await?;
+        }
         desk_diagnose_core::future::boxed(|| async {
             append_state_event_on(txn, &group, &run, now.timestamp_millis()).await
         })

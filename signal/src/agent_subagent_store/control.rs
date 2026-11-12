@@ -26,6 +26,10 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
     {
         return Err(invalid());
     }
+    // A Worker session follows only the request it currently works on.
+    if !desk_diagnose_core::subagent::control::is_bound(&session, run) {
+        return Ok(Default::default());
+    }
     let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(|| invalid())?;
     if matches!(
         run.state,
@@ -46,7 +50,7 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
             run,
             deadline_reached,
         );
-    let input_changed = session.input_revision != run.binding.input_revision;
+    let input_changed = session.bound_input_revision() != Some(run.binding.input_revision);
     if input_changed {
         desk_assistant_data_store::issue_reply::lifecycle::cancel_request_on(
             db,

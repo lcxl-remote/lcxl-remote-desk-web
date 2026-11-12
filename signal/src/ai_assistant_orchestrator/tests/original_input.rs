@@ -821,7 +821,8 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
             followup.workbench_id.as_deref(),
             Some(row.conversation_id.as_str())
         );
-        assert_ne!(followup.child_conversation_id, task.child_conversation_id);
+        // A workbench Worker continues in one session across works.
+        assert_eq!(followup.child_conversation_id, task.child_conversation_id);
         assert_ne!(followup.group_id, task.group_id);
         let store = SubAgentStore::new(db.clone());
         let independent = run::Entity::find()
@@ -939,7 +940,8 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
                 capture_one_openai_request_with_reply(listener.as_ref(), |body| {
                     let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
                     let messages = sent["messages"].to_string();
-                    assert!(messages.contains("previous_worker_report"));
+                    // The Worker sees its earlier work in its own history.
+                    assert!(!messages.contains("previous_worker_report"));
                     assert!(messages.contains("Validated version 15"));
                     assert!(messages.contains("Investigate the independent second work"));
                     assert!(!messages.contains("Coordinate request C"));

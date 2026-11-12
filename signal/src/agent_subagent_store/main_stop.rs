@@ -426,20 +426,23 @@ async fn stop_native_parent_on(
                 .ok_or_else(|| invalid())?;
                 let child =
                     PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
-                run.validate_session(&child).map_err(|_| invalid())?;
-                desk_diagnose_core::future::boxed(|| async {
-                    super::native_cancel::cancel_native_actions_on(
-                        txn,
-                        &child,
-                        scope.key,
-                        now.timestamp_millis(),
-                    )
-                    .await
-                })
-                .await?;
-                effects
-                    .cancel_request_ids
-                    .extend(child.current_request_id.iter().cloned());
+                // Only the request a Worker session works on owns its actions.
+                if desk_diagnose_core::subagent::control::is_bound(&child, &run) {
+                    run.validate_session(&child).map_err(|_| invalid())?;
+                    desk_diagnose_core::future::boxed(|| async {
+                        super::native_cancel::cancel_native_actions_on(
+                            txn,
+                            &child,
+                            scope.key,
+                            now.timestamp_millis(),
+                        )
+                        .await
+                    })
+                    .await?;
+                    effects
+                        .cancel_request_ids
+                        .extend(child.current_request_id.iter().cloned());
+                }
                 run.request_cancel(run.fence(), &now.to_rfc3339())
                     .map_err(|_| invalid())?;
                 run.settle_cancel(&now.to_rfc3339())

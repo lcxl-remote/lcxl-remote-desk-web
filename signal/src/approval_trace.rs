@@ -344,6 +344,7 @@ impl Store {
         let row = agent_subagent_run::Entity::find()
             .filter(agent_subagent_run::Column::ChildConversationId.eq(session))
             .filter(agent_subagent_run::Column::ActorId.eq(owner))
+            .order_by_desc(agent_subagent_run::Column::Id)
             .one(&self.db)
             .await?;
         Ok(row
@@ -360,6 +361,7 @@ impl Store {
         let row = agent_subagent_run::Entity::find()
             .filter(agent_subagent_run::Column::ChildConversationId.eq(session))
             .filter(agent_subagent_run::Column::ActorId.eq(owner))
+            .order_by_desc(agent_subagent_run::Column::Id)
             .one(&self.db)
             .await?;
         Ok(row

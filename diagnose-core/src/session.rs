@@ -519,6 +519,25 @@ pub struct MainCoordinationLease {
     pub expires_at_ms: i64,
 }
 
+/// A Worker session admits its requests one after another, like owner inputs
+/// to a main conversation. Each request keeps its own revisions, which start at
+/// one and fence the parent's waits and controls; the session's revisions keep
+/// increasing across requests. The offsets map the bound request's revisions to
+/// the session's, and the watermark excludes earlier requests' actions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildRequestAdmission {
+    pub input_offset: u64,
+    pub control_offset: u64,
+    pub action_watermark: i64,
+}
+
+impl ChildRequestAdmission {
+    pub fn is_first(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// One agent conversation + session, in the shape the manager persists (and the
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +572,9 @@ pub struct PersistedAgentSession {
     pub interpreted_subagent_results: Vec<crate::subagent::seam::AcceptedResultObservation>,
     // Historical audit count; text answers never consume a report-repair call.
     pub subagent_report_corrections_used: u8,
+    /// How a Worker session numbers its currently bound request.
+    #[serde(default, skip_serializing_if = "ChildRequestAdmission::is_first")]
+    pub child_request_admission: ChildRequestAdmission,
     /// Presentation preference only; never used as execution authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_locale: Option<String>,
@@ -1133,13 +1155,18 @@ impl PersistedAgentSession {
                 "invalid workbench coordination slot".into(),
             ));
         }
+        if session.agent_role.binding().is_none() && !session.child_request_admission.is_first() {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "only a Worker session admits further requests".into(),
+            ));
+        }
         if let Some(binding) = session.agent_role.binding() {
             binding
                 .validate(&session.conversation_id)
                 .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
             if session.surface != AgentSessionSurface::AiAssistant
-                || session.input_revision != binding.input_revision
-                || session.control_revision != binding.control_revision
+                || session.bound_input_revision() != Some(binding.input_revision)
+                || session.bound_control_revision() != Some(binding.control_revision)
                 || !crate::dynamic_run::AssistantInputTarget::matches_request(
                     &binding.targets,
                     &session,
@@ -1566,6 +1593,7 @@ impl PersistedAgentSession {
             accepted_subagent_observations: Vec::new(),
             interpreted_subagent_results: Vec::new(),
             subagent_report_corrections_used: 0,
+            child_request_admission: ChildRequestAdmission::default(),
             conversation_id,
             response_locale: None,
             client_conversation_id: None,
@@ -1731,17 +1759,18 @@ impl PersistedAgentSession {
         }
     }
 
+    /// A child takes its direct approval origin from the parent of its bound
+    /// request; a Worker's next request does not keep the previous one's.
     pub fn inherit_direct_approval_origin(&mut self, parent: &Self) {
-        if parent.has_direct_approval_origin()
+        self.owner_direct_input_revision = (parent.has_direct_approval_origin()
             && self
                 .agent_role
                 .binding()
                 .is_some_and(|binding| binding.root_conversation_id == parent.conversation_id)
             && self.actor_id == parent.actor_id
-            && self.device_id == parent.device_id
-        {
-            self.owner_direct_input_revision = parent.owner_direct_input_revision;
-        }
+            && self.device_id == parent.device_id)
+            .then_some(parent.owner_direct_input_revision)
+            .flatten();
     }
 
     /// The child source is authenticated separately from its delegated objective.
@@ -2000,6 +2029,18 @@ impl PersistedAgentSession {
         }
     }
 
+    /// The session's input revision in its bound request's numbering.
+    pub fn bound_input_revision(&self) -> Option<u64> {
+        self.input_revision
+            .checked_sub(self.child_request_admission.input_offset)
+    }
+
+    /// The session's control revision in its bound request's numbering.
+    pub fn bound_control_revision(&self) -> Option<u64> {
+        self.control_revision
+            .checked_sub(self.child_request_admission.control_offset)
+    }
+
     /// The pending work result an automation turn handles first.
     pub fn earliest_pending_trigger(&self) -> Option<&PendingAutoTrigger> {
         self.pending_auto_triggers.iter().min_by(|left, right| {
@@ -2074,11 +2115,12 @@ impl PersistedAgentSession {
         next_input_revision: u64,
         selected_attachment_ids: impl IntoIterator<Item = String>,
     ) -> Result<usize, &'static str> {
-        if self
-            .agent_role
-            .binding()
-            .is_some_and(|binding| binding.input_revision != next_input_revision)
-        {
+        if self.agent_role.binding().is_some_and(|binding| {
+            binding
+                .input_revision
+                .checked_add(self.child_request_admission.input_offset)
+                != Some(next_input_revision)
+        }) {
             return Err("child input must be adjusted through its durable task control");
         }
         self.close_awaiting_permission(

@@ -302,36 +302,6 @@ pub fn decode_projectable(
     Ok(stored)
 }
 
-pub async fn retained_terminal_report_on(
-    db: &impl ConnectionTrait,
-    previous: &SubAgentRun,
-    destination: &DestinationIdentity,
-    now_ms: i64,
-) -> Result<Option<StoredReport>, DbErr> {
-    let kind = match previous.state {
-        desk_diagnose_core::subagent::SubAgentState::Completed => ReportKind::Completed,
-        desk_diagnose_core::subagent::SubAgentState::Failed => ReportKind::Failed,
-        _ => return Ok(None),
-    };
-    let query = report_rows(previous)
-        .filter(inbox::Column::EventKind.eq(kind.inbox_kind()))
-        .filter(
-            inbox::Column::StateRevision
-                .eq(i64::try_from(previous.state_revision).map_err(|_| invalid())?),
-        )
-        .order_by_desc(inbox::Column::ReportSeq);
-    let Some(row) = projectable_at(query, destination, now_ms)?.one(db).await? else {
-        return Ok(None);
-    };
-    let stored = decode_projectable(&row, destination)?;
-    if stored.report.worker_id != previous.worker_id
-        || row.workbench_id.as_deref() != previous.binding.source.workbench_id()
-    {
-        return Err(invalid());
-    }
-    Ok(Some(stored))
-}
-
 pub async fn batch_candidates_on(
     db: &impl ConnectionTrait,
     workbench: &str,

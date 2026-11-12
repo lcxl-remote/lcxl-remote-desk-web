@@ -120,67 +120,6 @@ async fn begin_child_control(
     Ok(txn)
 }
 
-async fn previous_worker_report_on(
-    txn: &DatabaseTransaction,
-    row: &run_row::Model,
-    run: &SubAgentRun,
-    held: &PersistedAgentSession,
-    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
-    now_ms: i64,
-) -> Result<Option<desk_diagnose_core::subagent::report::StoredReport>, DbErr> {
-    use crate::entity::agent_file_recovery_cleanup as tombstone;
-    use desk_assistant_data_store::{device_roster, worker_report, worker_request};
-    use sea_orm::QueryTrait;
-
-    let retained = || {
-        let deleted = tombstone::Entity::find()
-            .select_only()
-            .column(tombstone::Column::ConversationId)
-            .into_query();
-        session_row::Entity::find()
-            .filter(session_row::Column::ConversationId.not_in_subquery(deleted))
-            .filter(session_row::Column::ActorId.eq(&row.actor_id))
-            .filter(session_row::Column::DeviceId.eq(&row.device_id))
-            .select_only()
-            .column(session_row::Column::ConversationId)
-            .into_query()
-    };
-    let candidates = worker_request::previous_requests(row)
-        .filter(run_row::Column::RootConversationId.in_subquery(retained()))
-        .filter(run_row::Column::ChildConversationId.in_subquery(retained()))
-        .all(txn)
-        .await?;
-    for candidate in candidates {
-        let previous = decode_run(&candidate)?;
-        if !worker_request::shares_history_scope(&previous.binding, &run.binding) {
-            continue;
-        }
-        let Some(report) =
-            worker_report::retained_terminal_report_on(txn, &previous, destination, now_ms).await?
-        else {
-            continue;
-        };
-        if !previous.binding.targets.is_empty() {
-            let live = device_roster::current_request_devices(txn, held)
-                .await
-                .map_err(|_| invalid())?;
-            let devices: Vec<_> = previous
-                .binding
-                .targets
-                .into_iter()
-                .map(|target| target.device_id)
-                .collect();
-            if !devices.iter().all(|device| live.contains(device))
-                || !super::notification::retained_devices_are_eligible_on(txn, &devices).await?
-            {
-                continue;
-            }
-        }
-        return Ok(Some(report));
-    }
-    Ok(None)
-}
-
 impl SubAgentStore {
     pub async fn wait_for_device_for_turn(
         &self,
@@ -666,9 +605,6 @@ impl SubAgentStore {
             }
         }
         let destination = &creation.source.model_destination;
-        let previous =
-            previous_worker_report_on(&txn, &row, &run, held, destination, now.timestamp_millis())
-                .await?;
         let projection = desk_diagnose_core::subagent::projection::worker_runtime_message(
             payload,
             sources,
@@ -676,7 +612,6 @@ impl SubAgentStore {
             destination,
             u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?,
             group.limits.max_context_bytes,
-            previous,
         )
         .map_err(|_| invalid())?;
         txn.commit().await?;

@@ -234,7 +234,9 @@ impl PendingEnds {
             SubAgentState::Cancelled | SubAgentState::Cancelling => PermissionOutcome::Cancelled,
             SubAgentState::Failed if deadline_reached => PermissionOutcome::Expired,
             SubAgentState::Failed => PermissionOutcome::Unavailable,
-            _ if session.input_revision != run.binding.input_revision => PermissionOutcome::Revoked,
+            _ if session.bound_input_revision() != Some(run.binding.input_revision) => {
+                PermissionOutcome::Revoked
+            }
             _ => return Self::default(),
         };
         Self::waiting(session, outcome)

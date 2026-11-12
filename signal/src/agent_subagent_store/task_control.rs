@@ -323,7 +323,11 @@ async fn apply_task_control_with_source_on(
         .ok_or_else(|| invalid())?;
         let child =
             PersistedAgentSession::decode_json(&child_row.state_json).map_err(|_| invalid())?;
-        run.validate_session(&child).map_err(|_| invalid())?;
+        // A queued or finished request of a Worker changes only its own row.
+        let bound = desk_diagnose_core::subagent::control::is_bound(&child, &run);
+        if bound {
+            run.validate_session(&child).map_err(|_| invalid())?;
+        }
         let now = chrono::DateTime::from_timestamp_millis(now_ms)
             .ok_or_else(|| invalid())?
             .to_rfc3339();
@@ -335,17 +339,19 @@ async fn apply_task_control_with_source_on(
                     .request_cancel(run.fence(), &now)
                     .map_err(|_| invalid())?;
                 if changed {
-                    desk_diagnose_core::future::boxed(|| async {
-                        super::native_cancel::cancel_native_actions_on(
-                            txn,
-                            &child,
-                            &reservation_id,
-                            now_ms,
-                        )
-                        .await
-                    })
-                    .await?;
-                    cancellation = child.current_request_id.clone();
+                    if bound {
+                        desk_diagnose_core::future::boxed(|| async {
+                            super::native_cancel::cancel_native_actions_on(
+                                txn,
+                                &child,
+                                &reservation_id,
+                                now_ms,
+                            )
+                            .await
+                        })
+                        .await?;
+                        cancellation = child.current_request_id.clone();
+                    }
                     run.settle_cancel(&now).map_err(|_| invalid())?;
                 }
                 changed
@@ -404,7 +410,7 @@ async fn apply_task_control_with_source_on(
                     .adjusted(
                         &run.binding,
                         label,
-                        &run.child_conversation_id,
+                        &run.binding.task_id,
                         if adjustment_source.is_none() {
                             Some((now_ms as u64, client_timezone.as_str()))
                         } else {
@@ -435,7 +441,9 @@ async fn apply_task_control_with_source_on(
                 if changed.rows_affected != 1 {
                     return Err(invalid());
                 }
-                cancellation = child.current_request_id.clone();
+                if bound {
+                    cancellation = child.current_request_id.clone();
+                }
                 true
             }
         };

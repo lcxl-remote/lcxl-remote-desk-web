@@ -164,6 +164,22 @@ describe('owner subagent views', () => {
         unmount();
     });
 
+    it('opens a finished request after its Worker session moved on to a later request', async () => {
+        const finished = { ...task, state: 'completed', wait_reason: null, state_revision: 5 } as AiAssistantSubAgentSummary;
+        const later = { ...task, task_id: 'task-2', group_id: 'group-2', state: 'running', wait_reason: null } as AiAssistantSubAgentSummary;
+        const fetch = vi.fn(async (url: string) => url.includes('/subagents/result') ? ok({ ...report, task: finished })
+            : url.endsWith('/subagents/read') ? ok(true)
+            : ok({ ...child, inputRevision: 2, controlRevision: 2, messages: [], subagents: { ...child.subagents, task: later } }));
+        vi.stubGlobal('fetch', fetch);
+        const { result, unmount } = renderHook(() => useAiAssistantSubagents(props));
+        act(() => result.current.openDetail(finished));
+        await waitFor(() => expect(result.current.detail).not.toBeNull());
+        expect(result.current.error).toBeNull();
+        expect(result.current.detail?.session.sessionId).toBe('child-1');
+        expect(result.current.detail?.result.task.task_id).toBe('task-1');
+        unmount();
+    });
+
     it('rejects a result and child snapshot taken across an adjustment', async () => {
         const changed = { ...task, input_revision: 2, control_revision: 2, state_revision: 4 };
         const fetch = vi.fn(async (url: string) => url.includes('/subagents/result') ? ok(report)

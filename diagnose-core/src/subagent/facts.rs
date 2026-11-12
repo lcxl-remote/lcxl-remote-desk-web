@@ -78,8 +78,8 @@ pub fn validate_origin(
     if fence.conversation_id != session.conversation_id
         || fence.actor_id != session.actor_id
         || !session.admits_assistant_device(&fence.device_id)
-        || fence.input_revision > binding.input_revision
-        || fence.control_revision > binding.control_revision
+        || fence.input_revision > session.input_revision
+        || fence.control_revision > session.control_revision
         || delegation.source_epoch > binding.source_epoch
         || delegation.root_conversation_id != binding.root_conversation_id
         || delegation.group_id != binding.group_id

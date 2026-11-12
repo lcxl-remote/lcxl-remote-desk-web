@@ -4,9 +4,7 @@
 use crate::entity::agent_subagent_run as run;
 use desk_agent_protocol::ai_assistant::subagent::{SubAgentState, SubAgentWaitReason};
 use desk_diagnose_core::subagent::{
-    SUBAGENT_ROOT_CAPACITY,
-    role::{DelegatedTaskBinding, DelegationSource},
-    state::SubAgentRun,
+    SUBAGENT_ROOT_CAPACITY, role::DelegationSource, state::SubAgentRun,
 };
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
@@ -239,47 +237,52 @@ pub async fn worker_status_on(
     Ok(Some(result))
 }
 
-pub fn previous_requests(row: &run::Model) -> Select<run::Entity> {
-    in_scope(
-        &row.actor_id,
-        &row.device_id,
-        &row.root_conversation_id,
-        row.workbench_id.as_deref(),
-    )
-    .filter(run::Column::WorkerId.eq(&row.worker_id))
-    .filter(run::Column::Id.lt(row.id))
-    .filter(run::Column::State.is_in(["completed", "failed"]))
-    .order_by_desc(run::Column::Id)
-    .limit(4)
+/// A workbench Worker keeps one session across works. Removing one work
+/// keeps that session while a request of another work that has not been
+/// removed (`removed` lists removed conversation ids) still refers to it.
+pub async fn shared_with_other_root_on(
+    db: &impl ConnectionTrait,
+    child_conversation_id: &str,
+    root_conversation_id: &str,
+    removed: sea_orm::sea_query::SelectStatement,
+) -> Result<bool, DbErr> {
+    Ok(run::Entity::find()
+        .filter(run::Column::ChildConversationId.eq(child_conversation_id))
+        .filter(run::Column::RootConversationId.ne(root_conversation_id))
+        .filter(run::Column::RootConversationId.not_in_subquery(removed))
+        .select_only()
+        .column(run::Column::Id)
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .is_some())
 }
 
-/// A report can summarize any device the previous request could use, including
-/// earlier reports it received. Preserve the whole scope when carrying it on.
-pub fn shares_history_scope(
-    previous: &DelegatedTaskBinding,
-    current: &DelegatedTaskBinding,
-) -> bool {
-    let same_source = match (&previous.source, &current.source) {
-        (DelegationSource::UserInput { .. }, DelegationSource::UserInput { .. }) => true,
-        (
-            DelegationSource::WorkbenchOwner {
-                workbench_id: a, ..
-            },
-            DelegationSource::WorkbenchOwner {
-                workbench_id: b, ..
-            },
-        ) => a == b,
-        (DelegationSource::Goal { goal_id: a }, DelegationSource::Goal { goal_id: b }) => a == b,
-        (a @ DelegationSource::ScheduledOccurrence { .. }, b) => a == b,
-        _ => false,
+/// The session an existing Worker continues in: the one its latest request
+/// used, when both that request and the new one follow their owner's devices.
+/// Goal and scheduled requests keep a session of their own.
+pub async fn worker_session_on(
+    db: &impl ConnectionTrait,
+    scope: Select<run::Entity>,
+    worker_id: &str,
+    source: &DelegationSource,
+) -> Result<Option<String>, DbErr> {
+    if !source.follows_owner_devices() {
+        return Ok(None);
+    }
+    let Some(latest) = scope
+        .filter(run::Column::WorkerId.eq(worker_id))
+        .order_by_desc(run::Column::Id)
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
     };
-    same_source
-        && previous.targets.iter().all(|old| {
-            current.targets.iter().any(|target| {
-                old.device_id == target.device_id
-                    && old.member_generation == target.member_generation
-            })
-        })
+    Ok(decode_run(&latest)?
+        .binding
+        .source
+        .follows_owner_devices()
+        .then_some(latest.child_conversation_id))
 }
 
 /// Admissions and claims hold the authenticated owner lock (Manager) or
@@ -299,60 +302,4 @@ pub async fn is_worker_head_on(db: &impl ConnectionTrait, row: &run::Model) -> R
     .one(db)
     .await?
     .is_none())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use desk_diagnose_core::dynamic_run::AssistantInputTarget;
-
-    fn work(root: &str, targets: &[(&str, u64)]) -> DelegatedTaskBinding {
-        DelegatedTaskBinding {
-            root_conversation_id: root.into(),
-            group_id: format!("group-{root}"),
-            task_id: format!("request-{root}"),
-            source: DelegationSource::WorkbenchOwner {
-                workbench_id: "workbench".into(),
-                input_revision: 1,
-            },
-            targets: targets
-                .iter()
-                .map(|(id, generation)| AssistantInputTarget {
-                    reference: format!("{root}-{id}"),
-                    device_id: (*id).into(),
-                    member_generation: Some(*generation),
-                })
-                .collect(),
-            objective: "Check the reported behavior".into(),
-            acceptance_criteria: vec!["Summarize the findings".into()],
-            input_revision: 1,
-            control_revision: 1,
-            source_epoch: 1,
-            deadline_ms: 123,
-        }
-    }
-
-    #[test]
-    fn worker_history_requires_the_same_source_and_all_original_device_memberships() {
-        let original = work("a", &[("mac", 2)]);
-        let same_mac = work("b", &[("linux", 3), ("mac", 2)]);
-        assert!(shares_history_scope(&original, &same_mac));
-        assert!(!shares_history_scope(
-            &original,
-            &work("c", &[("linux", 3)])
-        ));
-        assert!(!shares_history_scope(&original, &work("d", &[("mac", 4)])));
-        assert!(shares_history_scope(&work("e", &[]), &same_mac));
-
-        let mut unrelated = same_mac;
-        unrelated.source = DelegationSource::WorkbenchOwner {
-            workbench_id: "other-workbench".into(),
-            input_revision: 1,
-        };
-        assert!(!shares_history_scope(&original, &unrelated));
-        unrelated.source = DelegationSource::Goal {
-            goal_id: "goal".into(),
-        };
-        assert!(!shares_history_scope(&original, &unrelated));
-    }
 }

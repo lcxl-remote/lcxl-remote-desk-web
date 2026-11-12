@@ -1843,3 +1843,108 @@ fn timer_delegation_uses_its_frozen_target_and_preserves_owner_group_and_lineage
     assert_eq!(parent.delegation_group_id.as_deref(), Some("owner-group"));
     assert_eq!(parent.assistant_request_targets().unwrap(), [latest]);
 }
+
+#[test]
+fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
+    let mut session = child();
+    let mut first = run();
+    first
+        .adjust(
+            first.fence(),
+            "Inspect the second symptom".into(),
+            vec!["Cite the actual observation".into()],
+            "2026-09-30T00:00:01Z",
+        )
+        .unwrap();
+    control::synchronize_session(&mut session, &first, "2026-09-30T00:00:01Z").unwrap();
+    first
+        .fail("delegation_deadline_reached", "2026-09-30T00:00:02Z")
+        .unwrap();
+    control::synchronize_session(&mut session, &first, "2026-09-30T00:00:02Z").unwrap();
+    assert_eq!(session.turn_state, crate::session::TurnState::Failed);
+    session.conversation.push(crate::chat::ChatMessage::text(
+        "first-answer",
+        crate::chat::ChatRole::Assistant,
+        "The first request found the root cause",
+    ));
+    let history = session.conversation.len();
+    let (input, control, seq) = (
+        session.input_revision,
+        session.control_revision,
+        session.latest_input_seq,
+    );
+
+    let mut next = run();
+    next.binding.task_id = "next-task".into();
+    next.binding.group_id = "next-group".into();
+    let creation = completion_context();
+    let parent = PersistedAgentSession::new(
+        "root",
+        "owner",
+        "device",
+        1,
+        scope(),
+        "2026-09-30T00:00:00Z",
+    );
+    let now = "2026-09-30T00:00:03Z";
+    // The previous request must have finished and the session must be idle.
+    assert!(
+        control::admit_request(
+            &mut session.clone(),
+            &run(),
+            &next,
+            &creation,
+            &parent,
+            7,
+            now
+        )
+        .is_err()
+    );
+    let mut busy = session.clone();
+    busy.begin_turn("turn", None, None, 1, scope(), now)
+        .unwrap();
+    assert!(control::admit_request(&mut busy, &first, &next, &creation, &parent, 7, now).is_err());
+
+    control::admit_request(&mut session, &first, &next, &creation, &parent, 7, now).unwrap();
+    assert!(control::is_bound(&session, &next));
+    assert!(!control::is_bound(&session, &first));
+    next.validate_session(&session).unwrap();
+    assert_eq!(session.input_revision, input + 1);
+    assert_eq!(session.control_revision, control + 1);
+    assert_eq!(session.latest_input_seq, seq + 1);
+    assert_eq!(session.bound_input_revision(), Some(1));
+    assert_eq!(session.child_request_admission.action_watermark, 7);
+    assert_eq!(session.delegation_group_id.as_deref(), Some("next-group"));
+    assert_eq!(session.chain_id, "next-task");
+    assert_eq!(session.turn_state, crate::session::TurnState::Idle);
+    assert_eq!(session.conversation.len(), history + 2);
+    assert_eq!(session.conversation[history - 1].message_id, "first-answer");
+    assert_eq!(session.conversation[history].message_id, "next-task-source");
+    let stored = session.encode_json_for_storage().unwrap();
+    assert_eq!(
+        PersistedAgentSession::decode_json(&stored).unwrap(),
+        session
+    );
+
+    // Adjusting the bound request keeps the session ahead of the request's
+    // own numbering; the finished request no longer reaches the session.
+    next.adjust(
+        next.fence(),
+        "Inspect a third symptom".into(),
+        vec!["Cite the actual observation".into()],
+        "2026-09-30T00:00:04Z",
+    )
+    .unwrap();
+    control::synchronize_session(&mut session, &next, "2026-09-30T00:00:04Z").unwrap();
+    assert_eq!(session.input_revision, input + 2);
+    assert_eq!(session.bound_input_revision(), Some(2));
+    next.validate_session(&session).unwrap();
+    assert!(control::synchronize_session(&mut session, &first, "later").is_err());
+
+    // A Worker session from before shared sessions has no admission record.
+    let legacy = child().encode_json_for_storage().unwrap();
+    assert!(!legacy.contains("child_request_admission"));
+    run()
+        .validate_session(&PersistedAgentSession::decode_json(&legacy).unwrap())
+        .unwrap();
+}

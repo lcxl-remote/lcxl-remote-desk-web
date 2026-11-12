@@ -316,3 +316,142 @@ async fn a_delegated_child_follows_its_owner_conversation_devices() {
         ["mac"]
     );
 }
+
+#[tokio::test]
+async fn a_worker_keeps_one_session_across_works_until_no_request_refers_to_it() {
+    use crate::{entity::agent_subagent_run as run, worker_request};
+    use desk_diagnose_core::subagent::{
+        SubAgentState,
+        role::{DelegatedTaskBinding, DelegationSource},
+        state::SubAgentRun,
+    };
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, QueryTrait, Set,
+    };
+    let store = setup().await;
+    let source = DelegationSource::WorkbenchOwner {
+        workbench_id: "workbench".into(),
+        input_revision: 1,
+    };
+    let insert = |task: &str, root: &str, child: &str, source: DelegationSource| {
+        let state = SubAgentRun {
+            worker_id: "worker".into(),
+            child_conversation_id: child.into(),
+            actor_id: "1".into(),
+            device_id: String::new(),
+            name: "Investigate".into(),
+            binding: DelegatedTaskBinding {
+                root_conversation_id: root.into(),
+                group_id: format!("group-{task}"),
+                task_id: task.into(),
+                source,
+                targets: Vec::new(),
+                objective: "Check the reported behavior".into(),
+                acceptance_criteria: vec!["Summarize the findings".into()],
+                input_revision: 1,
+                control_revision: 1,
+                source_epoch: 1,
+                deadline_ms: 123,
+            },
+            state: SubAgentState::Queued,
+            state_revision: 1,
+            source_paused: false,
+            dependencies: Vec::new(),
+            pending_question_id: None,
+            partial_report: None,
+            terminal_report: None,
+            failure_reason: None,
+            report_corrections_used: 0,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        run::ActiveModel {
+            task_id: Set(task.into()),
+            child_conversation_id: Set(child.into()),
+            worker_id: Set("worker".into()),
+            workbench_id: Set(state.binding.source.workbench_id().map(str::to_owned)),
+            root_conversation_id: Set(root.into()),
+            group_id: Set(state.binding.group_id.clone()),
+            actor_id: Set("1".into()),
+            device_id: Set(String::new()),
+            origin_kind: Set("subagent_creation".into()),
+            origin_ref: Set(task.into()),
+            creation_arguments_sha256: Set(String::new()),
+            creation_envelope_json: Set(String::new()),
+            state: Set(state.state.as_str().into()),
+            input_revision: Set(1),
+            control_revision: Set(1),
+            source_epoch: Set(1),
+            state_revision: Set(1),
+            state_json: Set(serde_json::to_string(&state).unwrap()),
+            deadline_ms: Set(123),
+            created_at: Set(1),
+            updated_at: Set(1),
+            ..Default::default()
+        }
+    };
+    // A removed work no longer keeps the session.
+    let removed = |ids: &[&str]| {
+        run::Entity::find()
+            .select_only()
+            .column(run::Column::RootConversationId)
+            .filter(run::Column::RootConversationId.is_in(ids.iter().copied()))
+            .into_query()
+    };
+    insert("first", "work-a", "worker-session", source.clone())
+        .insert(&store.db)
+        .await
+        .unwrap();
+    let scope = || worker_request::in_scope("1", "", "", Some("workbench"));
+    assert_eq!(
+        worker_request::worker_session_on(&store.db, scope(), "worker", &source)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("worker-session")
+    );
+    // Goal and scheduled requests keep a session of their own.
+    let goal = DelegationSource::Goal {
+        goal_id: "goal".into(),
+    };
+    assert!(
+        worker_request::worker_session_on(&store.db, scope(), "worker", &goal)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !worker_request::shared_with_other_root_on(
+            &store.db,
+            "worker-session",
+            "work-a",
+            removed(&[])
+        )
+        .await
+        .unwrap()
+    );
+    insert("second", "work-b", "worker-session", source.clone())
+        .insert(&store.db)
+        .await
+        .unwrap();
+    assert!(
+        worker_request::shared_with_other_root_on(
+            &store.db,
+            "worker-session",
+            "work-a",
+            removed(&[])
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        !worker_request::shared_with_other_root_on(
+            &store.db,
+            "worker-session",
+            "work-a",
+            removed(&["work-b"]),
+        )
+        .await
+        .unwrap()
+    );
+}

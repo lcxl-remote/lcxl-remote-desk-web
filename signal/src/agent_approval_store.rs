@@ -151,6 +151,9 @@ pub async fn pending_permission_reviews(
                 .into_iter()
                 .map(|child| child.child_conversation_id),
         );
+        // Requests of one Worker share its session.
+        let mut seen = std::collections::BTreeSet::new();
+        conversations.retain(|conversation| seen.insert(conversation.clone()));
         for conversation_id in conversations {
             let session_row = agent_session::Entity::find()
                 .filter(

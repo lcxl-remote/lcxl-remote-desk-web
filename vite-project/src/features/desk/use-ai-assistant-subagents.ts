@@ -130,16 +130,12 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
                     session: task.child_session_id })}`),
             ]);
             if (currentScope.current !== scope || selectionEpoch.current !== epoch || selectedId.current !== task.task_id || order < acceptedDetailOrder.current) return;
+            // A Worker's requests share its session; it may already work on a later request.
+            const bound = child.subagents.task?.task_id === task.task_id ? child.subagents.task : null;
             if (result.task.task_id !== task.task_id || result.task.child_session_id !== task.child_session_id
-                || child.sessionId !== task.child_session_id || child.subagents.parent_session_id !== session
-                || child.subagents.task?.task_id !== task.task_id || !Array.isArray(child.messages)
+                || child.sessionId !== task.child_session_id || !Array.isArray(child.messages)
                 || result.task.group_id !== task.group_id || result.task.state_revision < task.state_revision
-                || child.inputRevision !== result.task.input_revision || child.controlRevision !== result.task.control_revision
-                || !sameSubagentHistoryScope(child.subagents.task, result.task)
-                || child.subagents.task.state_revision !== result.task.state_revision
-                || child.subagents.task.input_revision !== result.task.input_revision
-                || child.subagents.task.control_revision !== result.task.control_revision
-                || child.subagents.task.group_id !== result.task.group_id || child.subagents.task.state !== result.task.state) {
+                || (bound && (child.subagents.parent_session_id !== session || !sameSubagentHistoryScope(bound, result.task)))) {
                 throw new Error(t('pages.aiAssistant.subagents.readFailed'));
             }
             const prior = detailRef.current;
@@ -235,9 +231,7 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
             const latest = detailRef.current;
             const prior = historyRef.current;
             if (!latest || !prior || prior.nextBefore !== cursor || !sameSubagentHistoryScope(latest.result.task, task)
-                || page.sessionId !== task.child_session_id || page.subagents.parent_session_id !== session
-                || !page.subagents.task || !sameSubagentHistoryScope(page.subagents.task, task)
-                || page.inputRevision !== task.input_revision || page.controlRevision !== task.control_revision
+                || page.sessionId !== task.child_session_id
                 || !Array.isArray(page.messages) || !Number.isSafeInteger(page.seq) || page.seq < current.session.seq) return;
             historyRef.current = prependSubagentHistory(prior, page); setHistory(historyRef.current);
         } catch (reason) {

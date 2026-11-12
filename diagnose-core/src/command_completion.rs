@@ -212,11 +212,9 @@ pub fn project_child_request(
     request
         .messages
         .retain(|message| message.role == ChatRole::System);
-    request.messages.push(
-        creation
-            .source
-            .child_source_message(&session.conversation_id)?,
-    );
+    request
+        .messages
+        .push(creation.source.child_source_message(&binding.task_id)?);
     request.messages.push(creation.instruction.clone());
     let mut result = result;
     result.role = ChatRole::UntrustedOutput;

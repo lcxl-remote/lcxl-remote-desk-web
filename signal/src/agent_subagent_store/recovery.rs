@@ -69,6 +69,11 @@ impl SubAgentStore {
             .ok_or_else(|| invalid())?;
         let mut session =
             PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
+        // A queued request of a Worker has nothing to reconcile in the
+        // session another request is working on.
+        if !desk_diagnose_core::subagent::control::is_bound(&session, &run) {
+            return Ok(false);
+        }
         run.validate_session(&session).map_err(|_| invalid())?;
         if session.version != stored.version
             || i64::try_from(session.lease_token).ok() != Some(stored.lease_token)

@@ -22,7 +22,9 @@ pub(crate) async fn runtime_facts_on(
     let rows = desk_diagnose_core::future::boxed(|| async {
         let query = work::Entity::find()
             .filter(work::Column::ConversationId.eq(&session.conversation_id))
-            .filter(work::Column::ActorId.eq(&session.actor_id));
+            .filter(work::Column::ActorId.eq(&session.actor_id))
+            // A Worker session's earlier requests do not decide this one.
+            .filter(work::Column::Id.gt(session.child_request_admission.action_watermark));
         let query = if session.device_id.is_empty() {
             query
         } else {
