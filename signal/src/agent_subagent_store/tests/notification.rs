@@ -101,7 +101,12 @@ pub(super) async fn answer(
 async fn a_finished_required_request_wakes_the_idle_parent_and_an_optional_one_does_not() {
     for required in [true, false] {
         let db = database().await;
-        let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+        let (mut parent, calls) = super::creation::runnable_parent_with_source(
+            &db,
+            super::creation::destination(),
+            desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+        )
+        .await;
         let store = SubAgentStore::new(db.clone());
         let task = store
             .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
@@ -164,6 +169,28 @@ async fn a_finished_required_request_wakes_the_idle_parent_and_an_optional_one_d
         let payload: serde_json::Value = serde_json::from_str(&message.text).unwrap();
         assert_eq!(payload["tasks"][0]["task_id"], task.task_id);
         assert!(payload["tasks"][0].get("failure_reason").is_some());
+        // The woken turn answers and its save marks the event notified.
+        let event_id = notification.events[0].event_id.clone();
+        let mut claimed = store
+            .claim_parent_completion(
+                &super::parent_wait::completion_params(&stored),
+                &super::creation::destination(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .session;
+        answer(&db, &mut claimed, true).await;
+        save_main_delegation_session(&db, &mut claimed)
+            .await
+            .unwrap();
+        let event = inbox::Entity::find()
+            .filter(inbox::Column::EventId.eq(&event_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(event.model_notified_at_ms.is_some());
     }
 }
 

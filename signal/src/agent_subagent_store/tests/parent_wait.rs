@@ -72,7 +72,7 @@ pub(super) async fn waiting_parent(db: &DatabaseConnection) -> (PersistedAgentSe
     (parent, task_id)
 }
 
-fn completion_params(parent: &PersistedAgentSession) -> ClaimTurnParams {
+pub(super) fn completion_params(parent: &PersistedAgentSession) -> ClaimTurnParams {
     ClaimTurnParams {
         conversation_id: parent.conversation_id.clone(),
         actor_id: parent.actor_id.clone(),

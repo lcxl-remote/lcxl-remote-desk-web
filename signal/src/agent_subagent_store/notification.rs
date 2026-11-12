@@ -643,10 +643,11 @@ pub(crate) async fn acknowledge_notification_on(
     let mut unaccepted = notification.clone();
     unaccepted.accepted_response_message_id = None;
     if *original != unaccepted
+        // A published scheduled result turn, or the completion turn that a
+        // workbench report or a finished required request woke.
         || !(next.is_subagent_result_turn()
-            || (next.has_workbench_report_notification()
-                && next.trigger_origin
-                    == desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion))
+            || next.trigger_origin
+                == desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion)
         || next.current_turn_id.is_none()
     {
         return Err(invalid());
