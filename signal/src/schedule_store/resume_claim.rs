@@ -160,18 +160,10 @@ impl ScheduleStore {
             // Freeze the approved task text separately from later chat. It is
             // context, not a new user input or a tool permission grant.
             let id = desk_diagnose_core::native_ids::scheduled_message(&work.run_id);
-            let parent = session
-                .conversation
-                .iter()
-                .rev()
-                .filter(|message| message.role == desk_diagnose_core::chat::ChatRole::SystemEvent)
-                .find(|message| {
-                    serde_json::from_str::<serde_json::Value>(&message.text).is_ok_and(|value| {
-                        value["event"] == "scheduled_task_activated"
-                            && value["schedule_id"].as_str() == Some(task.schedule_id.as_str())
-                    })
-                })
-                .and_then(|message| message.data_envelope.as_ref());
+            let parent = desk_diagnose_core::schedule::review_result::activation_envelope(
+                &session.conversation,
+                &task.schedule_id,
+            );
             let mut message =
                 desk_diagnose_core::chat::ChatMessage::system_event(&id, &task.prompt);
             message.data_envelope =

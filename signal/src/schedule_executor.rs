@@ -449,6 +449,12 @@ impl SignalScheduleExecutor {
             // A lost task is not proof of completion or permission to replay.
             return DispatchResult::Reconcile;
         };
+        if let Err(error) = &result {
+            log::warn!(
+                "[schedule-executor] continuation {run_id} stopped before settlement: {}",
+                error.message
+            );
+        }
         let store = ScheduleStore::new(self.db.clone());
         let settled = match result {
             Ok(LoopOutcome::Answered(answer)) => {

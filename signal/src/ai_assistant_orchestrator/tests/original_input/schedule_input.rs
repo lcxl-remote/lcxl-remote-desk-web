@@ -213,9 +213,12 @@ fn assert_feedback(step: usize, content: &str) {
     } else {
         let value: Value = serde_json::from_str(content).unwrap();
         if step == 2 {
+            // The owner decided while the turn waited; the model sees that decision.
             assert_eq!(value["kind"], "fresh_task");
-            assert_eq!(value["state"], "pending_review");
-            assert_eq!(value["awaiting_decision"], true);
+            assert_eq!(value["state"], "active");
+            assert_eq!(value["awaiting_decision"], false);
+            assert_eq!(value["review_complete"], true);
+            assert_eq!(value["decided_by"], "owner");
         } else {
             assert_eq!(value["ok"], true);
             assert_eq!(

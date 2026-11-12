@@ -47,7 +47,7 @@ impl SessionSeam for ReviewStore<'_> {
             parent.as_ref(),
             "draft".into(),
             &call.id,
-            r#"{"schedule_id":"timer","state":"pending_review","kind":"conversation_resume","awaiting_confirmation":true}"#.into(),
+            r#"{"schedule_id":"timer","state":"pending_review","kind":"fresh_task","awaiting_decision":true}"#.into(),
             "schedule_proposal",
         )?;
         session.pending_schedule_review = Some("timer".into());
@@ -76,7 +76,7 @@ impl SessionSeam for ReviewStore<'_> {
         if count < 3 {
             return Ok(false);
         }
-        let text = serde_json::json!({"event": self.decision, "schedule_id": id, "state": if self.decision == "scheduled_task_activated" { "active" } else { "deleted" }, "owner_decision": if self.decision == "scheduled_task_activated" { "approved" } else { "rejected" }}).to_string();
+        let text = serde_json::json!({"event": self.decision, "schedule_id": id, "state": if self.decision == "scheduled_task_activated" { "active" } else { "deleted" }, "decided_by": "owner"}).to_string();
         let mut message = ChatMessage::system_event("decision", &text);
         message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
             session.conversation.last().unwrap().data_envelope.as_ref(),
@@ -121,7 +121,7 @@ async fn model_waits_for_explicit_schedule_decision_and_stop_interrupts_wait() {
         let model = ScriptModel {
             turns: RefCell::new(
                 [
-                    tool_use_args("create", crate::schedule::proposal::REQUEST_SCHEDULE, r#"{"kind":"conversation_resume","title":"Reminder","prompt":"Remind me","rule":{"kind":"after_confirmation","delay_seconds":60}}"#),
+                    tool_use_args("create", crate::schedule::proposal::REQUEST_SCHEDULE, r#"{"kind":"fresh_task","title":"Reminder","prompt":"Remind me","rule":{"kind":"once","at":"2026-09-10T00:00:00Z"}}"#),
                     answer("decision received"),
                 ]
                 .into(),
@@ -159,10 +159,9 @@ async fn model_waits_for_explicit_schedule_decision_and_stop_interrupts_wait() {
                 .iter()
                 .find(|m| m.tool_call_id.as_deref() == Some("create"))
                 .unwrap();
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&result.text).unwrap()["review_complete"],
-                true
-            );
+            let projected: serde_json::Value = serde_json::from_str(&result.text).unwrap();
+            assert_eq!(projected["review_complete"], true);
+            assert_eq!(projected["awaiting_decision"], false);
             assert!(
                 mem.inner
                     .borrow()
