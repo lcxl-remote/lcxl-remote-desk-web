@@ -28,41 +28,12 @@ pub fn stop_main_session(
         .ok_or("main lease exhausted")?;
     next.close_awaiting_permission("not executed: the owner stopped generation before approval")
         .map_err(|_| "paused permission call is missing")?;
-    let content = "tool result unavailable after the owner stopped generation; do not infer success, nonexecution, or permission to retry";
-    for call_id in next.unclosed_tool_call_ids() {
-        let label = next
-            .conversation
-            .iter()
-            .find(|message| {
-                message.role == crate::chat::ChatRole::Assistant
-                    && message.tool_calls.iter().any(|call| call.id == call_id)
-            })
-            .and_then(|message| message.data_envelope.as_ref());
-        let envelope = crate::model_message_labels::internal_tool_result_envelope(
-            label,
-            &call_id,
-            content,
-            "owner_stop_result_unavailable",
-        )
-        .map_err(|_| "invalid stopped tool result label")?;
-        let mut message = crate::chat::ChatMessage::tool_result(
-            format!(
-                "owner-stop-{:x}",
-                Sha256::digest(
-                    format!(
-                        "{}:{}:{call_id}",
-                        next.conversation_id, next.control_revision
-                    )
-                    .as_bytes()
-                )
-            ),
-            &call_id,
-            content,
-        );
-        message.turn_id = next.current_turn_id.clone();
-        message.data_envelope = envelope;
-        next.conversation.push(message);
-    }
+    close_unclosed_calls(
+        &mut next,
+        "tool result unavailable after the owner stopped generation; do not infer success, nonexecution, or permission to retry",
+        "owner_stop_result_unavailable",
+        "owner-stop",
+    )?;
     next.main_stopped = true;
     next.main_coordination = None;
     next.coordinating_work = None;
@@ -83,6 +54,68 @@ pub fn stop_main_session(
     next.finish_turn(TurnState::Cancelled, now);
     *session = next;
     Ok(())
+}
+
+/// Answer every call the conversation left open with an unavailable result,
+/// keyed by the session's control revision so a replay writes the same ids.
+fn close_unclosed_calls(
+    next: &mut PersistedAgentSession,
+    content: &str,
+    reason_code: &str,
+    id_prefix: &str,
+) -> Result<(), &'static str> {
+    for call_id in next.unclosed_tool_call_ids() {
+        let label = next
+            .conversation
+            .iter()
+            .find(|message| {
+                message.role == crate::chat::ChatRole::Assistant
+                    && message.tool_calls.iter().any(|call| call.id == call_id)
+            })
+            .and_then(|message| message.data_envelope.as_ref());
+        let envelope = crate::model_message_labels::internal_tool_result_envelope(
+            label,
+            &call_id,
+            content,
+            reason_code,
+        )
+        .map_err(|_| "invalid unavailable tool result label")?;
+        let mut message = crate::chat::ChatMessage::tool_result(
+            format!(
+                "{id_prefix}-{:x}",
+                Sha256::digest(
+                    format!(
+                        "{}:{}:{call_id}",
+                        next.conversation_id, next.control_revision
+                    )
+                    .as_bytes()
+                )
+            ),
+            &call_id,
+            content,
+        );
+        message.turn_id = next.current_turn_id.clone();
+        message.data_envelope = envelope;
+        next.conversation.push(message);
+    }
+    Ok(())
+}
+
+/// The planning fence a session-level action fence names, in the bound
+/// request's numbering. A Worker session counts revisions across requests.
+pub fn request_fence(
+    session: &PersistedAgentSession,
+    fence: &crate::action_turn_fence::AssistantTurnFence,
+) -> Option<super::state::PlanningFence> {
+    Some(super::state::PlanningFence {
+        input_revision: fence
+            .input_revision
+            .checked_sub(session.child_request_admission.input_offset)?,
+        control_revision: fence
+            .control_revision
+            .checked_sub(session.child_request_admission.control_offset)?,
+        source_epoch: fence.delegation.as_ref()?.source_epoch,
+    })
 }
 
 /// The host holds source/task/session control and writes the task and session in
@@ -219,6 +252,14 @@ pub fn admit_request(
         .ok_or("child control revision exhausted")?
         .max(next.binding.control_revision);
     let mut updated = session.clone();
+    // The previous request's open calls never dispatched (the host found no
+    // unresolved work); close them like a main turn superseded by new input.
+    close_unclosed_calls(
+        &mut updated,
+        "not executed: the previous request ended before this call ran",
+        "previous_request_ended",
+        "request-ended",
+    )?;
     updated.agent_role = AgentRole::SubAgent {
         binding: Box::new(next.binding.clone()),
     };
@@ -264,14 +305,14 @@ pub fn admit_request(
     Ok(())
 }
 
-/// The previous request left nothing the next one could inherit: no open call,
-/// background action, pending result, approval or question.
+/// The previous request left nothing the next one could inherit: no active
+/// turn, background action, pending result, approval or question. Calls it
+/// left open without durable work never ran; admission closes them.
 pub fn admission_ready(session: &PersistedAgentSession) -> bool {
     !session.turn_state.is_active()
         && session.awaiting_permission.is_none()
         && session.execution_state == crate::session::ExecutionState::None
         && session.pending_auto_triggers.is_empty()
-        && session.unclosed_tool_call_ids().is_empty()
         && session
             .permission_requests
             .iter()

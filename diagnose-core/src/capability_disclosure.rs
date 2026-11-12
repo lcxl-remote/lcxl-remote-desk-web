@@ -216,23 +216,11 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
             "Invalid describe_tools input: {reason}. Required: tool_names, a non-empty array of exact Provider names. Complete example: {{\"tool_names\":[\"inspect_desktop_ui\"]}}. No permission or focus was changed."
         ),
         CapabilityDisclosureError::UnknownOrOutOfSurface(name) => {
-            if crate::subagent::tools::effect(&name).is_some()
-                || crate::schedule::management_tools::specs()
-                    .iter()
-                    .any(|spec| spec.name == name)
-                || name == crate::goal_tools::REQUEST_GOAL_TOOL_NAME
-                || matches!(
-                    name.as_str(),
-                    "request_permissions"
-                        | "describe_tools"
-                        | "load_skill"
-                        | "update_task_status"
-                        | "control_goal"
-                        | "load_conversation_history"
-                        | "read_conversation_attachment"
-                        | "request_directory"
+            if name == crate::command_confirmation::COMMAND_TOOL {
+                format!(
+                    "`{name}` is offered directly for the selected devices whenever a command can be requested in this turn. It does not need capability loading: call it directly with the parameters in its definition when present in the current tool list. Absence means no selected device can run a command in this phase. No working set or permission was changed; no approval card was created."
                 )
-            {
+            } else if crate::model_input::is_built_in_tool(&name) {
                 format!(
                     "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading. Use its definition directly when present in the current tool list. Absence means it is not exposed in this phase, not that the product lacks this feature. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
                 )
@@ -1098,6 +1086,60 @@ mod tests {
             assert!(error.message.contains("Complete example"));
             assert!(state.loaded_tool_names.is_empty());
         }
+    }
+
+    #[test]
+    fn loading_a_directly_offered_tool_points_the_model_back_to_calling_it() {
+        let (registry, mut inventory, callable) = every_capability_ready();
+        // Selected-device sessions offer the command tool directly, outside the inventory.
+        inventory.retain(|item| item.tool_name != crate::command_confirmation::COMMAND_TOOL);
+        let mut state = CapabilityDisclosureState::default();
+        let mut load = |name: &str| {
+            apply_load_call(
+                &ToolCall {
+                    id: "load".into(),
+                    name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                    arguments_json: json!({ "tool_names": [name] }).to_string(),
+                },
+                &mut state,
+                1,
+                &CapabilityLoadContext {
+                    registry: &registry,
+                    inventory: &inventory,
+                    max_context_bytes: 262_144,
+                    callable_tools: &callable,
+                    permission_candidates: &[],
+                },
+            )
+            .unwrap_err()
+            .message
+        };
+        let command = load(crate::command_confirmation::COMMAND_TOOL);
+        assert!(command.contains("offered directly"), "{command}");
+        assert!(!command.contains("unknown or unavailable"), "{command}");
+        for name in [
+            crate::wait_tools::WAIT_TOOL_NAME,
+            crate::skills::LOAD_TOOL,
+            crate::goal_tools::REQUEST_GOAL_TOOL_NAME,
+            "request_permissions",
+            "update_task_status",
+            "control_goal",
+            "load_conversation_history",
+            "read_conversation_attachment",
+            "request_directory",
+            "send_subagent_request",
+        ] {
+            let message = load(name);
+            assert!(
+                message.contains("is a built-in conversation tool"),
+                "{name}: {message}"
+            );
+        }
+        for spec in crate::schedule::management_tools::specs() {
+            assert!(load(&spec.name).contains("is a built-in conversation tool"));
+        }
+        assert!(load("run_command").contains("unknown or unavailable"));
+        assert!(state.loaded_tool_names.is_empty());
     }
 
     #[test]

@@ -514,7 +514,7 @@ impl SubAgentStore {
                 })
                 .await?;
                 labels.extend(task_labels(&row)?);
-                serde_json::to_value(decode_run(&row)?.summary()).map_err(|_| invalid())?
+                decode_run(&row)?.model_view()
             }
             Operation::Reply {
                 request_id,
@@ -697,7 +697,7 @@ impl SubAgentStore {
                     {
                         reports.push(report);
                     }
-                    summaries.push(run.summary());
+                    summaries.push(run.model_view());
                     current.push((
                         TaskFence {
                             task_id: cursor.request_id.clone(),

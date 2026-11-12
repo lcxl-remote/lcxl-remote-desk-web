@@ -352,6 +352,39 @@ async fn a_reused_worker_continues_in_its_session_with_the_full_history() {
     else {
         panic!("follow-up worker request");
     };
+    // Actions of the admitted request pass the delegated action check although
+    // the shared session counts revisions across requests.
+    let held = &next_claim.session;
+    let binding = held.agent_role.binding().unwrap();
+    assert_ne!(held.input_revision, binding.input_revision);
+    let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence {
+        schema_version: 1,
+        conversation_id: held.conversation_id.clone(),
+        turn_id: held.current_turn_id.clone().unwrap(),
+        actor_id: held.actor_id.clone(),
+        device_id: held.device_id.clone(),
+        input_revision: held.input_revision,
+        lease_token: held.lease_token,
+        control_revision: held.control_revision,
+        delegation: Some(
+            desk_diagnose_core::action_turn_fence::DelegatedActionFence {
+                root_conversation_id: binding.root_conversation_id.clone(),
+                group_id: binding.group_id.clone(),
+                task_id: binding.task_id.clone(),
+                source_epoch: binding.source_epoch,
+            },
+        ),
+    };
+    assert!(
+        crate::agent_subagent_store::check_child_action_on(
+            &db,
+            held,
+            &fence,
+            chrono::Utc::now().timestamp_millis()
+        )
+        .await
+        .unwrap()
+    );
     let projection = store
         .child_projection_for_turn(&next_claim.session)
         .await

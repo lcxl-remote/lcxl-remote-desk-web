@@ -478,10 +478,7 @@ pub(crate) async fn prepare_notification_on(
                 task_id: run.binding.task_id.clone(),
                 state_revision: run.state_revision,
             });
-            let mut task = serde_json::to_value(run.summary()).map_err(|_| invalid())?;
-            // The server's failure code tells why a request ended without a report.
-            task["failure_reason"] = serde_json::json!(run.failure_reason);
-            tasks.push(task);
+            tasks.push(run.model_view());
         }
         if events.is_empty() {
             return Ok(false);

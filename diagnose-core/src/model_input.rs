@@ -1,9 +1,42 @@
 //! Model-facing input assistance; protocol versions remain server-owned metadata.
 use crate::chat::ToolSpec;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 pub mod lenient;
+
+/// Conversation tools the host exposes directly; they are never Provider
+/// capabilities and are never loaded through capability discovery.
+fn built_in_specs() -> impl Iterator<Item = ToolSpec> {
+    crate::permission_tools::permission_planning_tool_registry()
+        .into_iter()
+        .chain(crate::capability_disclosure::capability_discovery_tool_registry())
+        .chain(crate::task_status_tools::task_status_tool_registry())
+        .chain(crate::subagent::tools::registry())
+        .chain(crate::goal_tools::registry())
+        .chain(crate::goal_tools::open_registry())
+        .chain(crate::directory_tools::registry())
+        .chain(crate::schedule::proposal::registry())
+        .chain(crate::conversation_history::conversation_history_tool_registry())
+        .chain(crate::wait_tools::wait_tool_registry())
+        .map(|tool| tool.spec)
+        .chain(crate::schedule::management_tools::specs())
+}
+
+pub(crate) fn is_built_in_tool(name: &str) -> bool {
+    static NAMES: OnceLock<BTreeSet<String>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            built_in_specs()
+                .map(|spec| spec.name)
+                .chain([crate::skills::LOAD_TOOL.to_string()])
+                .collect()
+        })
+        .contains(name)
+}
 
 fn tools() -> &'static BTreeMap<String, ToolSpec> {
     static TOOLS: OnceLock<BTreeMap<String, ToolSpec>> = OnceLock::new();
@@ -11,22 +44,9 @@ fn tools() -> &'static BTreeMap<String, ToolSpec> {
         crate::ai_assistant::ai_assistant_provider_registry()
             .registered_tools()
             .into_iter()
-            .chain(crate::permission_tools::permission_planning_tool_registry())
-            .chain(crate::capability_disclosure::capability_discovery_tool_registry())
-            .chain(crate::task_status_tools::task_status_tool_registry())
-            .chain(crate::subagent::tools::registry())
-            .chain(crate::goal_tools::registry())
-            .chain(crate::goal_tools::open_registry())
-            .chain(crate::directory_tools::registry())
-            .chain(crate::schedule::proposal::registry())
-            .chain(crate::conversation_history::conversation_history_tool_registry())
-            .chain(crate::wait_tools::wait_tool_registry())
-            .map(|tool| (tool.spec.name.clone(), tool.spec))
-            .chain(
-                crate::schedule::management_tools::specs()
-                    .into_iter()
-                    .map(|tool| (tool.name.clone(), tool)),
-            )
+            .map(|tool| tool.spec)
+            .chain(built_in_specs())
+            .map(|spec| (spec.name.clone(), spec))
             .collect()
     })
 }

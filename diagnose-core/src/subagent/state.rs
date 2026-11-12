@@ -139,6 +139,14 @@ impl SubAgentRun {
         }
     }
 
+    /// The task as the parent model reads it: the summary plus the server's
+    /// failure code, which tells why a request ended without a report.
+    pub fn model_view(&self) -> serde_json::Value {
+        let mut task = serde_json::to_value(self.summary()).expect("task summary is serializable");
+        task["failure_reason"] = serde_json::json!(self.failure_reason);
+        task
+    }
+
     pub fn result(&self) -> desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentResult {
         desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentResult {
             task: self.summary(),

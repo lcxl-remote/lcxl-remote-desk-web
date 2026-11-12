@@ -241,7 +241,7 @@ impl SubAgentStore {
                 },
                 run.state,
             ));
-            tasks.push(run.summary());
+            tasks.push(run.model_view());
         }
         let evaluation = if wait.source_epoch != group.source_epoch {
             WaitEvaluation::DependencyChanged

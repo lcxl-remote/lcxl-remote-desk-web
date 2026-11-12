@@ -596,10 +596,9 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
     {
         return Ok(false);
     }
-    let expected = desk_diagnose_core::subagent::state::PlanningFence {
-        input_revision: fence.input_revision,
-        control_revision: fence.control_revision,
-        source_epoch: delegation.source_epoch,
+    let Some(expected) = desk_diagnose_core::subagent::control::request_fence(session, fence)
+    else {
+        return Ok(false);
     };
     Ok(run.require_current(expected).is_ok())
 }

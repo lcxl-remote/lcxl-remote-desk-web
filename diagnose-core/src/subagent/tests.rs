@@ -1867,7 +1867,20 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
         crate::chat::ChatRole::Assistant,
         "The first request found the root cause",
     ));
-    let history = session.conversation.len();
+    // A failed turn can leave a call that never dispatched.
+    session
+        .conversation
+        .push(crate::chat::ChatMessage::assistant_tool_calls(
+            "first-call",
+            String::new(),
+            vec![crate::chat::ToolCallRef {
+                id: "left-open".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+    assert_eq!(session.unclosed_tool_call_ids(), ["left-open"]);
+    let history = session.conversation.len() + 1;
     let (input, control, seq) = (
         session.input_revision,
         session.control_revision,
@@ -1918,8 +1931,41 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
     assert_eq!(session.chain_id, "next-task");
     assert_eq!(session.turn_state, crate::session::TurnState::Idle);
     assert_eq!(session.conversation.len(), history + 2);
-    assert_eq!(session.conversation[history - 1].message_id, "first-answer");
+    assert_eq!(session.conversation[history - 3].message_id, "first-answer");
+    let closed = &session.conversation[history - 1];
+    assert_eq!(closed.tool_call_id.as_deref(), Some("left-open"));
+    assert!(closed.text.starts_with("not executed"));
+    assert!(session.unclosed_tool_call_ids().is_empty());
     assert_eq!(session.conversation[history].message_id, "next-task-source");
+
+    // Action fences carry session revisions; the request sees its own numbering.
+    let fence = crate::action_turn_fence::AssistantTurnFence {
+        schema_version: 1,
+        conversation_id: session.conversation_id.clone(),
+        turn_id: "turn".into(),
+        actor_id: session.actor_id.clone(),
+        device_id: String::new(),
+        input_revision: session.input_revision,
+        lease_token: session.lease_token,
+        control_revision: session.control_revision,
+        delegation: Some(crate::action_turn_fence::DelegatedActionFence {
+            root_conversation_id: next.binding.root_conversation_id.clone(),
+            group_id: next.binding.group_id.clone(),
+            task_id: next.binding.task_id.clone(),
+            source_epoch: next.binding.source_epoch,
+        }),
+    };
+    assert_ne!(fence.input_revision, next.binding.input_revision);
+    next.require_current(control::request_fence(&session, &fence).unwrap())
+        .unwrap();
+    let stale = crate::action_turn_fence::AssistantTurnFence {
+        input_revision: input,
+        ..fence.clone()
+    };
+    assert!(
+        next.require_current(control::request_fence(&session, &stale).unwrap())
+            .is_err()
+    );
     let stored = session.encode_json_for_storage().unwrap();
     assert_eq!(
         PersistedAgentSession::decode_json(&stored).unwrap(),

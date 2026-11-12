@@ -556,6 +556,56 @@ async fn already_completed_dependency_returns_immediately_instead_of_registering
 }
 
 #[tokio::test]
+async fn a_request_that_ended_without_a_report_tells_the_parent_why() {
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let run = load(&db, &task.task_id).await;
+    assert!(
+        store
+            .expire_task_at(
+                &task.task_id,
+                chrono::DateTime::from_timestamp_millis(run.binding.deadline_ms + 1).unwrap(),
+            )
+            .await
+            .unwrap()
+    );
+    for (id, tool, input) in [
+        (
+            "status-failed",
+            tools::STATUS,
+            serde_json::json!({"task_id": &task.task_id}),
+        ),
+        (
+            "wait-failed",
+            tools::WAIT_REPORTS,
+            serde_json::json!({"requests":[{"request_id":&task.task_id,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"}),
+        ),
+    ] {
+        let call = committed_call(&db, &mut parent, id, tool, input).await;
+        let operation = tools::parse(&parent, &call).unwrap();
+        let receipt = store
+            .execute_main_tool(&mut parent, &call, operation, &format!("{id}-result"))
+            .await
+            .unwrap();
+        let task = if tool == tools::STATUS {
+            &receipt.payload
+        } else {
+            &receipt.payload["tasks"][0]
+        };
+        assert_eq!(task["state"], "failed", "{tool}");
+        assert_eq!(
+            task["failure_reason"], "delegation_deadline_reached",
+            "{tool}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn protected_terminal_report_is_not_returned_or_staged_for_observation() {
     let db = database().await;
     let (mut parent, calls) = super::creation::runnable_parent(&db).await;
