@@ -63,7 +63,7 @@ impl SubAgentStore {
         })
         .await?;
 
-        let owner_targets = desk_diagnose_core::future::boxed(|| async {
+        let owner = desk_diagnose_core::future::boxed(|| async {
             parent_on(
                 &txn,
                 &selected.root_conversation_id,
@@ -72,9 +72,8 @@ impl SubAgentStore {
             )
             .await
         })
-        .await?
-        .assistant_request_targets()
-        .map(<[_]>::to_vec);
+        .await?;
+        let owner_targets = owner.assistant_request_targets().map(<[_]>::to_vec);
         let history = desk_diagnose_core::future::boxed(|| {
             crate::assistant_data_store::native_scope_on(
                 &txn,
@@ -288,6 +287,11 @@ impl SubAgentStore {
             {
                 run.binding.targets.clone_from(targets);
             }
+            // It also uses the directories its owner approved in that conversation.
+            session.refresh_delegated_directories(
+                &owner,
+                u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?,
+            );
             session
                 .begin_turn(
                     &params.turn_id,

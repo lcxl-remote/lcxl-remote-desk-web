@@ -943,3 +943,93 @@ async fn child_read_binding_is_narrowed_and_parent_completion_keeps_its_original
     assert!(absent.tool_names.is_empty());
     assert!(absent.object_attachments.is_empty() && absent.live_targets.is_empty());
 }
+
+/// A child uses the directories its owner approved in the main conversation:
+/// its turn starts with them, and dispatch re-reads the owner's current consent.
+#[tokio::test]
+async fn a_child_uses_the_main_conversations_approved_directories_until_revoked() {
+    use desk_diagnose_core::file_scope::{DirectoryConsentSource, DirectoryProposal};
+    let db = database().await;
+    let (mut parent, calls) = runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let subject = parent
+        .file_scope_subject(&parent.actor_id, &parent.device_id, &parent.conversation_id)
+        .unwrap();
+    let directory = desk_agent_protocol::computer_use::ObjectRef {
+        token: "device-reference".into(),
+        snapshot_id: "device-generation".into(),
+        object_kind: desk_agent_protocol::computer_use::ObjectKind::Directory,
+        expires_at: String::new(),
+    };
+    parent
+        .file_scope
+        .propose(
+            &subject,
+            parent.file_scope.revision(),
+            DirectoryProposal {
+                request_id: "directory-request".into(),
+                requested_path: "/srv/reports".into(),
+                canonical_path: "/srv/reports".into(),
+                directory: directory.clone(),
+                purpose: "Write the report".into(),
+                source: DirectoryConsentSource::ModelProposal,
+            },
+            1,
+        )
+        .unwrap();
+    parent
+        .file_scope
+        .decide(
+            &subject,
+            parent.file_scope.revision(),
+            "directory-request",
+            true,
+            1,
+        )
+        .unwrap();
+    crate::agent_subagent_store::save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    let run = load(&db, &task.task_id).await;
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &claim_params(&run),
+            &task.task_id,
+            run.fence(),
+            &destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("child claim");
+    };
+    let child = claimed.session;
+    assert_eq!(child.delegated_directories.len(), 1);
+    assert_eq!(child.delegated_directories[0].directory, directory);
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let txn = db.begin().await.unwrap();
+    let view = crate::agent_subagent_store::current_directory_view_on(&txn, &child, now)
+        .await
+        .unwrap();
+    assert_eq!(view.delegated_directories, child.delegated_directories);
+    txn.rollback().await.unwrap();
+    // The owner revokes it in the main conversation: the next dispatch check
+    // no longer sees it, although the child's turn snapshot still lists it.
+    parent
+        .file_scope
+        .revoke(&subject, parent.file_scope.revision(), "directory-request")
+        .unwrap();
+    crate::agent_subagent_store::save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    let txn = db.begin().await.unwrap();
+    let view = crate::agent_subagent_store::current_directory_view_on(&txn, &child, now)
+        .await
+        .unwrap();
+    assert!(view.delegated_directories.is_empty());
+    assert!(!child.delegated_directories.is_empty());
+}

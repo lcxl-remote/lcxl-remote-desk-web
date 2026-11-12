@@ -177,6 +177,29 @@ fn admission_label(admission: SourceAdmission) -> &'static str {
     }
 }
 
+/// A child's directory check at dispatch uses what its owner approves in the
+/// main conversation now, read inside the caller's transaction.
+pub(crate) async fn current_directory_view_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
+    db: &C,
+    session: &PersistedAgentSession,
+    now_unix_ms: u64,
+) -> Result<Box<PersistedAgentSession>, DbErr> {
+    let mut view = Box::new(session.clone());
+    if let Some(binding) = session.agent_role.binding() {
+        let root = parent_on(
+            db,
+            &binding.root_conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await?;
+        view.refresh_delegated_directories(&root, now_unix_ms);
+    }
+    Ok(view)
+}
+
 #[inline(never)]
 fn parent_on<'a, C: ConnectionTrait + crate::config::ConfigConnection + 'a>(
     db: &'a C,

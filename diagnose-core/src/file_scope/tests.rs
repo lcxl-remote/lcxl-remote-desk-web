@@ -777,3 +777,87 @@ fn conversion_directory_boundary_accepts_two_exact_resources_and_still_rejects_w
         .unwrap();
     assert!(validate_artifact_scope(&session, "convert_document", &resources, 1).is_err());
 }
+
+#[test]
+fn a_child_uses_the_directories_its_owner_approved_in_the_main_conversation() {
+    let scope = AgentScope {
+        granted: Vec::new(),
+        mode: ExecutionMode::ReadOnly,
+        expires_at: None,
+        policy_name: None,
+    };
+    let mut root =
+        PersistedAgentSession::new("conversation", "owner", "device", 1, scope.clone(), "now");
+    root.surface = AgentSessionSurface::AiAssistant;
+    root.file_scope = approved();
+    let mut child = PersistedAgentSession::new_subagent(
+        "sa_child",
+        "owner",
+        "device",
+        1,
+        scope,
+        crate::subagent::DelegatedTaskBinding {
+            targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                "device".into(),
+            )],
+            root_conversation_id: "conversation".into(),
+            group_id: "group".into(),
+            task_id: "task".into(),
+            source: crate::subagent::DelegationSource::UserInput { input_revision: 1 },
+            objective: "Write the report".into(),
+            acceptance_criteria: vec!["Report".into()],
+            input_revision: 1,
+            control_revision: 1,
+            source_epoch: 1,
+            deadline_ms: 1_799_999_999_999,
+        },
+        "now",
+    )
+    .unwrap();
+    child.surface = AgentSessionSurface::AiAssistant;
+    let named = crate::chat::ToolCall {
+        id: "write".into(),
+        name: "create_text_file".into(),
+        arguments_json: serde_json::json!({"directory_request_id":"directory-request"}).to_string(),
+    };
+    let labels = crate::capability_grant::fresh_object_resource_scope(&[proposal().directory]);
+    // Nothing until the child's turn picks up the main conversation's consent.
+    assert!(select_device_directory(&child, "device", &named, 1).is_err());
+    child.refresh_delegated_directories(&root, 1);
+    assert_eq!(
+        approved_device_directories(&child, "device", 1).unwrap(),
+        vec![proposal().directory]
+    );
+    assert_eq!(
+        select_device_directory(&child, "device", &named, 1).unwrap(),
+        proposal().directory
+    );
+    let unnamed = crate::chat::ToolCall {
+        arguments_json: "{}".into(),
+        ..named.clone()
+    };
+    assert_eq!(
+        select_device_directory(&child, "device", &unnamed, 1).unwrap(),
+        proposal().directory
+    );
+    validate_device_artifact_scope(&child, "device", "create_text_file", &labels, 1).unwrap();
+    // Consent stays with the device it was given for.
+    assert!(
+        approved_device_directories(&child, "other", 1)
+            .is_ok_and(|directories| directories.is_empty())
+            || approved_device_directories(&child, "other", 1).is_err()
+    );
+    // The child cannot change the main conversation's consent; the owner can.
+    assert!(child.file_scope.records().is_empty());
+    root.file_scope
+        .revoke(&subject(), root.file_scope.revision(), "directory-request")
+        .unwrap();
+    child.refresh_delegated_directories(&root, 1);
+    assert!(select_device_directory(&child, "device", &named, 1).is_err());
+    assert!(
+        validate_device_artifact_scope(&child, "device", "create_text_file", &labels, 1).is_err()
+    );
+    // A main conversation has no delegated view.
+    root.refresh_delegated_directories(&child, 1);
+    assert!(root.delegated_directories.is_empty());
+}

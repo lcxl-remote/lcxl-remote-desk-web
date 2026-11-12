@@ -927,3 +927,146 @@ fn handled_control_recovery_fits_explicit_small_stacks() {
         );
     }
 }
+
+/// A child reads the objects its main conversation selected when it delegated,
+/// only while the owner still keeps them selected there.
+#[tokio::test]
+async fn a_child_reads_only_the_objects_its_main_conversation_selected_and_still_keeps() {
+    use desk_diagnose_core::subagent::{
+        DelegatedTaskBinding, DelegationSource,
+        creation::{CreationEnvelope, TaskCreationEnvelope},
+    };
+    use sea_orm::{ActiveModelTrait, Set};
+    let store = setup("sqlite::memory:").await;
+    let chosen = attach(&store, "first", ObjectKind::File).await;
+    let params = input("message", vec![chosen.clone()]);
+    store.append_user_followup(&params).await.unwrap();
+    let selection = params.read_context.clone().unwrap();
+    let mut child = PersistedAgentSession::new_subagent(
+        "sa_child",
+        "1",
+        "device",
+        desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        params.current_scope.clone(),
+        DelegatedTaskBinding {
+            targets: vec![
+                desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device".into()),
+            ],
+            root_conversation_id: "run".into(),
+            group_id: "group".into(),
+            task_id: "task".into(),
+            source: DelegationSource::UserInput { input_revision: 1 },
+            objective: "Read the chosen object".into(),
+            acceptance_criteria: vec!["Report".into()],
+            input_revision: 1,
+            control_revision: 1,
+            source_epoch: 1,
+            deadline_ms: 1_799_999_999_999,
+        },
+        Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    child.surface = AgentSessionSurface::AiAssistant;
+    agent_session::ActiveModel {
+        conversation_id: Set(child.conversation_id.clone()),
+        actor_id: Set("1".into()),
+        device_id: Set("device".into()),
+        conversation_schema_version: Set(Some(i32::from(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+        ))),
+        state_json: Set(child.encode_json_for_storage().unwrap()),
+        version: Set(child.version),
+        lease_token: Set(child.lease_token as i64),
+        created_at: Set(Utc::now()),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    }
+    .insert(&store.db)
+    .await
+    .unwrap();
+    let creation = TaskCreationEnvelope {
+        source: CreationEnvelope {
+            root_conversation_id: "run".into(),
+            actor_id: "1".into(),
+            device_id: "device".into(),
+            targets: vec![
+                desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device".into()),
+            ],
+            main_request_id: None,
+            source: DelegationSource::UserInput { input_revision: 1 },
+            parent_input_revision: 1,
+            parent_control_revision: 1,
+            owner_requirement: params.message.clone(),
+            scheduled_source: None,
+            original_read_context: Some(selection.clone()),
+            model_destination: destination(),
+            assistant_seed: None,
+        },
+        instruction: desk_diagnose_core::chat::ChatMessage::text(
+            "task-instruction",
+            desk_diagnose_core::chat::ChatRole::SystemEvent,
+            "{}",
+        ),
+        input_envelopes: Vec::new(),
+        response_locale: None,
+    };
+    crate::entity::agent_subagent_run::ActiveModel {
+        task_id: Set("task".into()),
+        child_conversation_id: Set(child.conversation_id.clone()),
+        worker_id: Set("worker".into()),
+        root_conversation_id: Set("run".into()),
+        group_id: Set("group".into()),
+        actor_id: Set("1".into()),
+        device_id: Set("device".into()),
+        origin_kind: Set("subagent_creation".into()),
+        origin_ref: Set("call".into()),
+        creation_arguments_sha256: Set("digest".into()),
+        creation_envelope_json: Set(serde_json::to_string(&creation).unwrap()),
+        state: Set("running".into()),
+        input_revision: Set(1),
+        control_revision: Set(1),
+        source_epoch: Set(1),
+        state_revision: Set(1),
+        state_json: Set("{}".into()),
+        deadline_ms: Set(1_799_999_999_999),
+        created_at: Set(0),
+        updated_at: Set(0),
+        ..Default::default()
+    }
+    .insert(&store.db)
+    .await
+    .unwrap();
+    let read = |selection: ReadContextSelection| {
+        let store = &store;
+        let revision = child.input_revision;
+        async move {
+            store
+                .validate_object_read(
+                    InputSubject {
+                        run_id: "sa_child",
+                        actor_id: "1",
+                        device_id: "device",
+                        client_conversation_id: None,
+                    },
+                    "device",
+                    revision,
+                    &selection,
+                    &destination(),
+                    Utc::now().timestamp_millis() as u64,
+                )
+                .await
+        }
+    };
+    assert_eq!(
+        creation.source.child_read_context(),
+        Some(selection.clone())
+    );
+    read(selection.clone()).await.unwrap();
+    // Only the delegated selection, not one the child names itself.
+    let mut other = selection.clone();
+    other.object_attachments.clear();
+    assert!(read(other).await.is_err());
+    // The owner removing the object from the main conversation ends access.
+    detach(&store, &chosen).await;
+    assert!(read(selection).await.is_err());
+}

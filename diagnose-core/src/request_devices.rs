@@ -920,9 +920,13 @@ impl RequestDevice {
                 session.file_scope.records().iter().any(|record| {
                     record.device_id == target.device_id
                         && record.state == crate::file_scope::DirectoryConsentState::Approved
-                }) || original.is_some_and(|selection| {
-                    selection.has_device_objects_for_tool(name, &target.device_id)
-                })
+                }) || session
+                    .delegated_directories
+                    .iter()
+                    .any(|delegated| delegated.device_id == target.device_id)
+                    || original.is_some_and(|selection| {
+                        selection.has_device_objects_for_tool(name, &target.device_id)
+                    })
             });
         }
         descriptor.exposure != crate::tool_exposure::ExposureRequirement::SelectedContext
@@ -1087,7 +1091,9 @@ pub(crate) fn append_catalogue(
             if let Some(target) = &device.read_target {
                 let dirs = session.file_scope.records().iter().filter(|record| {
                     record.device_id == target.device_id && record.state == crate::file_scope::DirectoryConsentState::Approved
-                }).map(|record| serde_json::json!({"directory_request_id": record.proposal.request_id, "path": record.proposal.canonical_path})).take_while(|entry| {
+                }).map(|record| serde_json::json!({"directory_request_id": record.proposal.request_id, "path": record.proposal.canonical_path}))
+                .chain(session.delegated_directories.iter().filter(|delegated| delegated.device_id == target.device_id).map(|delegated| serde_json::json!({"directory_request_id": delegated.request_id, "path": delegated.canonical_path, "approved_in": "main_conversation"})))
+                .take_while(|entry| {
                     directory_bytes += entry.to_string().len();
                     directory_bytes <= crate::directory_tools::DIRECTORY_PROMPT_MAX_BYTES
                 }).collect::<Vec<_>>();

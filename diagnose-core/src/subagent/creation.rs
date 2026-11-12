@@ -397,8 +397,9 @@ impl CreationEnvelope {
         Ok(envelope)
     }
 
-    /// Selection metadata may be reused for planning. Consent, live handles and
-    /// attachment authority stay in the original conversation.
+    /// Selection metadata may be reused for planning, and the objects the owner
+    /// selected with this input stay readable while the main conversation keeps
+    /// them. Consent and live handles stay in the original conversation.
     pub fn child_read_context(&self) -> Option<ReadContextSelection> {
         let mut selection = self.original_read_context.clone().or_else(|| {
             Some(ReadContextSelection {
@@ -410,7 +411,6 @@ impl CreationEnvelope {
                 live_targets: Vec::new(),
             })
         })?;
-        selection.object_attachments.clear();
         selection.live_targets.clear();
         Some(selection)
     }

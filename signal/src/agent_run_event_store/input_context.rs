@@ -503,6 +503,61 @@ impl SignalAgentRunEventStore {
                 "object read device is outside the original request",
             ));
         }
+        // A child reads the objects its main conversation selected when it
+        // delegated, while the owner still keeps them in that conversation.
+        if let Some(binding) = session.agent_role.binding() {
+            let run = crate::entity::agent_subagent_run::Entity::find()
+                .filter(crate::entity::agent_subagent_run::Column::TaskId.eq(&binding.task_id))
+                .filter(
+                    crate::entity::agent_subagent_run::Column::ChildConversationId
+                        .eq(&session.conversation_id),
+                )
+                .one(&txn)
+                .await
+                .map_err(|_| internal("object read storage unavailable"))?
+                .ok_or_else(|| internal("delegated object read request missing"))?;
+            let creation: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
+                serde_json::from_str(&run.creation_envelope_json)
+                    .map_err(|_| internal("invalid delegated object read request"))?;
+            if session.input_revision != input_revision
+                || creation.source.child_read_context().as_ref() != Some(original)
+                || !original.live_targets.is_empty()
+                || original.expires_at.as_ref().is_some_and(|expiry| {
+                    parse_time(expiry)
+                        .ok()
+                        .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+                        .is_none_or(|expiry| expiry <= now)
+                })
+            {
+                return Err(internal("delegated object input changed or expired"));
+            }
+            let root_row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(&binding.root_conversation_id))
+                .filter(agent_session::Column::ActorId.eq(&session.actor_id))
+                .one(&txn)
+                .await
+                .map_err(|_| internal("object read storage unavailable"))?
+                .ok_or_else(|| internal("delegating conversation missing"))?;
+            let root = PersistedAgentSession::decode_boxed_json(&root_row.state_json)
+                .map_err(|_| internal("invalid delegating conversation"))?;
+            if root.conversation_id != binding.root_conversation_id
+                || root.actor_id != session.actor_id
+                || !root.agent_role.is_main()
+            {
+                return Err(internal("delegating conversation changed"));
+            }
+            desk_diagnose_core::input_read_context::validate_current_device_objects(
+                &root,
+                &original.object_attachments,
+                destination,
+                now,
+                target_device_id,
+            )?;
+            return txn
+                .commit()
+                .await
+                .map_err(|_| internal("object read storage unavailable"));
+        }
         let (stored, input_created_at) = original_with_time_on(&txn, &session).await?;
         if session.input_revision != input_revision
             || stored.as_ref() != Some(original)

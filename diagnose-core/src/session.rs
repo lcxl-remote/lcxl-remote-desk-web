@@ -631,6 +631,10 @@ pub struct PersistedAgentSession {
     /// Owner directory consent is durable security state, never model context.
     #[serde(default)]
     pub file_scope: crate::file_scope::SessionFileScope,
+    /// A child's view of the directories the owner approved in its main
+    /// conversation, refreshed each turn and re-read at dispatch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegated_directories: Vec<crate::file_scope::DelegatedDirectory>,
     /// Bounded metadata for screen pixels shown to the model/owner. Live preview
     /// bytes are stripped from every storage projection.
     #[serde(default)]
@@ -1619,6 +1623,7 @@ impl PersistedAgentSession {
             context_attachments: Vec::new(),
             skills: Default::default(),
             file_scope: crate::file_scope::SessionFileScope::default(),
+            delegated_directories: Vec::new(),
             visual_evidence: Vec::new(),
             pending_visual_verification: None,
             actor_id,
@@ -1952,6 +1957,40 @@ impl PersistedAgentSession {
                     && binding.source.is_owner_direct()
             }
         }
+    }
+
+    /// A child uses the directories the owner approved in its main
+    /// conversation for the devices the child may use. Hosts call this when a
+    /// turn starts and again inside each dispatch transaction.
+    pub fn refresh_delegated_directories(
+        &mut self,
+        root: &PersistedAgentSession,
+        now_unix_ms: u64,
+    ) {
+        let Some(binding) = self.agent_role.binding() else {
+            self.delegated_directories.clear();
+            return;
+        };
+        let devices = if self.device_id.is_empty() {
+            self.admitted_assistant_request_targets()
+                .map(|targets| {
+                    targets
+                        .iter()
+                        .map(|target| target.device_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![self.device_id.clone()]
+        };
+        self.delegated_directories = if root.agent_role.is_main()
+            && root.actor_id == self.actor_id
+            && root.conversation_id == binding.root_conversation_id
+        {
+            crate::file_scope::delegated_directories(root, &devices, now_unix_ms)
+        } else {
+            Vec::new()
+        };
     }
 
     /// The main conversation, or a child carrying its request's frozen owner data.
