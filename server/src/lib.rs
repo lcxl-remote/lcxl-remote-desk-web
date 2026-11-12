@@ -307,6 +307,7 @@ pub fn configure_api_surface(
                 .service(desk_signal::controller::subagent_policy::get_my_subagent_policy)
                 .service(desk_signal::controller::issue_connections::get_my_issue_connections)
                         .service(list_assistant_images)
+                        .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_context_summary)
                         .service(desk_signal::controller::ai_assistant_session::list_assistant_attachments)
                         .service(desk_signal::controller::ai_assistant_session::get_assistant_attachment)
                         .service(desk_signal::controller::ai_assistant_session::read_assistant_attachment)

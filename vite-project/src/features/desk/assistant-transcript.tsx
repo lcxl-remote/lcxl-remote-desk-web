@@ -1,5 +1,5 @@
 import { Bot } from 'lucide-react';
-import { Fragment, useEffect, useRef, type ComponentProps } from 'react';
+import { Fragment, useEffect, useRef, useState, type ComponentProps } from 'react';
 import { matchesAssistantMessage, type AssistantMessageFocus } from './assistant-message-history';
 import { useTranslation } from 'react-i18next';
 import { MarkdownContent } from '@/components/markdown-content';
@@ -12,16 +12,30 @@ import { AssistantToolGroup } from './assistant-tool-group';
 import { AssistantToolCall, isHistoricalPermissionSkip } from './assistant-tool-call';
 import { AssistantCommandResult } from './assistant-command-result';
 import { AssistantResultAttachments } from './assistant-attachments';
-import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
+import { AssistantContextNotices, noticeMessageId, type ContextSummarySourceNavigation } from './assistant-context-notices';
 
 /** Main and delegated sessions share presentation, never their input authority. */
-export function AssistantTranscript({ sessionId, messages, tools, running, evidence = [], notices = [], displayNameForTool, exportBackup, focus, readOnly = false }: {
+export function AssistantTranscript({ sessionId, messages, tools, running, evidence = [], notices = [], displayNameForTool, exportBackup, focus: requestedFocus, readOnly = false, revealSource }: {
     focus?: AssistantMessageFocus; readOnly?: boolean;
+    /** Loads earlier history until a summarized source is present. */
+    revealSource?: (messageId: string) => Promise<boolean>;
     sessionId?: string; messages: AiAssistantMessage[]; tools: AiAssistantToolActivity[]; running: boolean;
     evidence?: ComponentProps<typeof AssistantImages>['evidence']; notices?: ContextNoticeDto[]; displayNameForTool?: (name: string) => string;
     exportBackup?: (id: string) => Promise<void>;
 }) {
     const { t } = useTranslation();
+    // A summary source jump temporarily takes over the requested focus.
+    const [sourceFocus, setSourceFocus] = useState<AssistantMessageFocus>();
+    useEffect(() => setSourceFocus(undefined), [requestedFocus?.messageId, sessionId]);
+    const focus = sourceFocus ?? requestedFocus;
+    const loaded = (id: string) => messages.some(message => matchesAssistantMessage(message, id));
+    const sources: ContextSummarySourceNavigation = {
+        available: id => !!revealSource || loaded(id),
+        open: id => {
+            if (loaded(id) || !revealSource) setSourceFocus({ messageId: id });
+            else void revealSource(id).then(found => { if (found) setSourceFocus({ messageId: id }); });
+        },
+    };
     const focusedId = messages.find(message => message.id === focus?.messageId)?.id
         ?? messages.find(message => matchesAssistantMessage(message, focus?.messageId))?.id;
     const target = useRef<HTMLDivElement | null>(null);
@@ -67,7 +81,8 @@ export function AssistantTranscript({ sessionId, messages, tools, running, evide
                 : <p className="whitespace-pre-wrap">{message.id === focusedId && focus?.parts
                     ? <>{focus.parts.before}<mark className="bg-primary/20 text-foreground">{focus.parts.match}</mark>{focus.parts.after}</> : message.text}</p>}
         </div>}
-        <AssistantContextNotices notices={notices.filter(notice => noticeMessageId(notice, messages) === message.id)} />
+        <AssistantContextNotices sessionId={sessionId} sources={sources}
+            notices={notices.filter(notice => noticeMessageId(notice, messages) === message.id)} />
         </Fragment>
                         );
 
@@ -78,6 +93,7 @@ export function AssistantTranscript({ sessionId, messages, tools, running, evide
             renderToolGroup={group => <AssistantToolGroup messages={group} tools={tools}
                 renderMessage={renderTranscriptMessage} displayNameForTool={displayNameForTool}
                 focused={group.some(message => message.id === focusedId)} />} />
-        <AssistantContextNotices historical notices={notices.filter(notice => !noticeMessageId(notice, messages))} />
+        <AssistantContextNotices historical sessionId={sessionId} sources={sources}
+            notices={notices.filter(notice => !noticeMessageId(notice, messages))} />
     </div>;
 }

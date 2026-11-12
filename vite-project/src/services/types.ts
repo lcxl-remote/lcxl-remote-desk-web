@@ -396,6 +396,73 @@ export type AiAssistantCommandCancelBody = {
     session: string;
 };
 
+export const contextSummaryStateDtoEnum = {
+    available: "available",
+    superseded: "superseded",
+    unavailable: "unavailable"
+} as const;
+
+export type ContextSummaryStateDtoEnumKey = (typeof contextSummaryStateDtoEnum)[keyof typeof contextSummaryStateDtoEnum];
+
+export type ContextSummaryStateDto = ContextSummaryStateDtoEnumKey;
+
+export type ContextSummaryFactDto = {
+    /**
+     * @description Original messages shown in the conversation snapshot.
+     * @type array
+    */
+    sourceMessageIds: string[];
+    /**
+     * @type string
+    */
+    text: string;
+};
+
+export const contextSummaryKindDtoEnum = {
+    goals: "goals",
+    historical_constraints: "historical_constraints",
+    reported_observations: "reported_observations",
+    completed_actions: "completed_actions",
+    unresolved_questions: "unresolved_questions",
+    next_steps: "next_steps",
+    important_identifiers: "important_identifiers",
+    omitted_evidence: "omitted_evidence"
+} as const;
+
+export type ContextSummaryKindDtoEnumKey = (typeof contextSummaryKindDtoEnum)[keyof typeof contextSummaryKindDtoEnum];
+
+export type ContextSummaryKindDto = ContextSummaryKindDtoEnumKey;
+
+export type ContextSummarySectionDto = {
+    /**
+     * @type array
+    */
+    facts: ContextSummaryFactDto[];
+    /**
+     * @type string
+    */
+    kind: ContextSummaryKindDto;
+};
+
+export type ContextSummaryContentDto = {
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @type array
+    */
+    sections: ContextSummarySectionDto[];
+};
+
+export type AiAssistantContextSummaryDto = {
+    /**
+     * @type string
+    */
+    state: ContextSummaryStateDto;
+    summary?: (null | ContextSummaryContentDto);
+};
+
 export const subAgentSourceKindEnum = {
     user_input: "user_input"
 } as const;
@@ -11456,6 +11523,31 @@ export type RestResponseAiAssistantAttentionListDto = {
          * @type boolean
         */
         offPageReminderAvailable: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantContextSummaryDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        state: ContextSummaryStateDto;
+        summary?: (null | ContextSummaryContentDto);
     };
     /**
      * @type string,null
@@ -22551,6 +22643,38 @@ export type CancelAiAssistantCommandMutationResponse = CancelAiAssistantCommand2
 export type CancelAiAssistantCommandMutation = {
     Response: CancelAiAssistantCommand200;
     Request: CancelAiAssistantCommandMutationRequest;
+    Errors: any;
+};
+
+export type GetAiAssistantContextSummaryQueryParams = {
+    /**
+     * @description Opaque session id from the snapshot
+     * @type string
+    */
+    session: string;
+    /**
+     * @description Turn id of the compaction notice
+     * @type string
+    */
+    turn: string;
+    /**
+     * @description Checkpoint generation of the compaction notice
+     * @minLength 0
+     * @type integer, int32
+    */
+    generation: number;
+};
+
+/**
+ * @description Summary state, or a uniform not-found/not-accessible response
+*/
+export type GetAiAssistantContextSummary200 = RestResponseAiAssistantContextSummaryDto;
+
+export type GetAiAssistantContextSummaryQueryResponse = GetAiAssistantContextSummary200;
+
+export type GetAiAssistantContextSummaryQuery = {
+    Response: GetAiAssistantContextSummary200;
+    QueryParams: GetAiAssistantContextSummaryQueryParams;
     Errors: any;
 };
 

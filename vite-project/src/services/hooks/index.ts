@@ -34,6 +34,8 @@ export type { DeleteAssistantAttachmentsMutationKey } from "./aiAssistantSession
 export type { DeleteAssistantImageMutationKey } from "./aiAssistantSessionController/useDeleteAssistantImage.ts";
 export type { GetAiAssistantApprovalModeQueryKey } from "./aiAssistantSessionController/useGetAiAssistantApprovalMode.ts";
 export type { GetAiAssistantApprovalModeSuspenseQueryKey } from "./aiAssistantSessionController/useGetAiAssistantApprovalModeSuspense.ts";
+export type { GetAiAssistantContextSummaryQueryKey } from "./aiAssistantSessionController/useGetAiAssistantContextSummary.ts";
+export type { GetAiAssistantContextSummarySuspenseQueryKey } from "./aiAssistantSessionController/useGetAiAssistantContextSummarySuspense.ts";
 export type { GetAiAssistantDeviceRosterQueryKey } from "./aiAssistantSessionController/useGetAiAssistantDeviceRoster.ts";
 export type { GetAiAssistantDeviceRosterSuspenseQueryKey } from "./aiAssistantSessionController/useGetAiAssistantDeviceRosterSuspense.ts";
 export type { GetAiAssistantIssueSubscriptionAccountsQueryKey } from "./aiAssistantSessionController/useGetAiAssistantIssueSubscriptionAccounts.ts";
@@ -388,6 +390,12 @@ export { useGetAiAssistantApprovalMode } from "./aiAssistantSessionController/us
 export { getAiAssistantApprovalModeSuspenseQueryKey } from "./aiAssistantSessionController/useGetAiAssistantApprovalModeSuspense.ts";
 export { getAiAssistantApprovalModeSuspenseQueryOptions } from "./aiAssistantSessionController/useGetAiAssistantApprovalModeSuspense.ts";
 export { useGetAiAssistantApprovalModeSuspense } from "./aiAssistantSessionController/useGetAiAssistantApprovalModeSuspense.ts";
+export { getAiAssistantContextSummaryQueryKey } from "./aiAssistantSessionController/useGetAiAssistantContextSummary.ts";
+export { getAiAssistantContextSummaryQueryOptions } from "./aiAssistantSessionController/useGetAiAssistantContextSummary.ts";
+export { useGetAiAssistantContextSummary } from "./aiAssistantSessionController/useGetAiAssistantContextSummary.ts";
+export { getAiAssistantContextSummarySuspenseQueryKey } from "./aiAssistantSessionController/useGetAiAssistantContextSummarySuspense.ts";
+export { getAiAssistantContextSummarySuspenseQueryOptions } from "./aiAssistantSessionController/useGetAiAssistantContextSummarySuspense.ts";
+export { useGetAiAssistantContextSummarySuspense } from "./aiAssistantSessionController/useGetAiAssistantContextSummarySuspense.ts";
 export { getAiAssistantDeviceRosterQueryKey } from "./aiAssistantSessionController/useGetAiAssistantDeviceRoster.ts";
 export { getAiAssistantDeviceRosterQueryOptions } from "./aiAssistantSessionController/useGetAiAssistantDeviceRoster.ts";
 export { useGetAiAssistantDeviceRoster } from "./aiAssistantSessionController/useGetAiAssistantDeviceRoster.ts";

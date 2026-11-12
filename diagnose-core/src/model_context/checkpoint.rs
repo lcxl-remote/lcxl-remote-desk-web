@@ -1426,6 +1426,70 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// A compacted history and its validated state, for host and facade tests.
+/// Messages `old-a` and `old-b` are summarized by `summary_json`; `pending` and
+/// `current` (in `turn_id`) stay raw.
+#[cfg(any(test, feature = "test-support"))]
+pub fn compacted_history_for_test(
+    turn_id: &str,
+    summary_json: &str,
+) -> (Vec<ChatMessage>, ModelContextState) {
+    let source = crate::replay::SourceContextKey::derive(
+        crate::model_profile::WireProtocol::OpenAiChatCompletions,
+        "same",
+        "model:1",
+        "test",
+    );
+    let policy = PinnedContextPolicy::checkpoint_summary(
+        source.clone(),
+        1,
+        crate::MIN_MODEL_CONTEXT_BYTES * 4,
+        0,
+    )
+    .expect("test policy");
+    let user = |id: &str, size: usize| ChatMessage::text(id, ChatRole::User, "x".repeat(size));
+    let conversation = vec![
+        user("old-a", 5000),
+        user("old-b", 5000),
+        user("pending", 3500),
+        user("current", 3500).with_turn_id(turn_id),
+    ];
+    let mut protection = ContextProtectionSet::default();
+    protection.protect_message("current");
+    protection.protect_message("pending");
+    let ContextBuildPlan::NeedsCompression(plan) = plan_model_context(
+        &conversation,
+        &ModelContextState::default(),
+        &policy,
+        &protection,
+        7,
+    )
+    .expect("test plan") else {
+        panic!("test history must need compression");
+    };
+    let provenance = CompressorProvenanceV1 {
+        source_context_key: source.as_str().to_string(),
+        connection_revision: 1,
+        model_profile_revision: 1,
+        prompt_version: CONTEXT_SUMMARY_PROMPT_VERSION.into(),
+        schema_version: CONTEXT_SUMMARY_SCHEMA_VERSION,
+        provider_call_key: "c".repeat(64),
+        created_at: "2026-08-23T00:00:00Z".into(),
+        created_turn_id: turn_id.into(),
+    };
+    let validated =
+        parse_validated_context_summary(summary_json, &plan, provenance).expect("test summary");
+    let (state, _) = apply_validated_checkpoint(
+        &plan,
+        validated,
+        &conversation,
+        &ModelContextState::default(),
+        7,
+    )
+    .expect("test checkpoint");
+    (conversation, state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1765,6 +1829,58 @@ mod tests {
                 .v1()
                 .generation,
             1
+        );
+    }
+
+    #[test]
+    fn a_compaction_notice_finds_its_own_summary_by_turn_and_generation() {
+        use crate::model_context::{ContextNotice, ContextSummaryLookup, context_summary_lookup};
+        let (_, mut state) = compacted_history_for_test(
+            "turn-7",
+            r#"{"goals":[{"text":"An earlier goal was recorded.","source_message_ids":["old-a"]}]}"#,
+        );
+        // Another model policy compacted its own first generation in a later turn.
+        let mut other = state.entries[0].clone();
+        let ContextCheckpoint::V1(checkpoint) = other.checkpoint.as_mut().unwrap();
+        checkpoint.compressor.created_turn_id = "turn-9".into();
+        checkpoint.summary.goals[0].text = "A later model goal.".into();
+        state.entries.push(other);
+        let notices = vec![
+            ContextNotice::compacted("turn-7", 1, 2),
+            ContextNotice::compacted("turn-9", 1, 3),
+        ];
+        let text = |lookup: ContextSummaryLookup| match lookup {
+            ContextSummaryLookup::Available(found) => found.summary.goals[0].text.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            text(context_summary_lookup(&state, &notices, "turn-7", 1)),
+            "An earlier goal was recorded."
+        );
+        assert_eq!(
+            text(context_summary_lookup(&state, &notices, "turn-9", 1)),
+            "A later model goal."
+        );
+        // A retired summary is superseded only by a later, larger generation.
+        let retained = state.clone();
+        state.entries.remove(0);
+        assert_eq!(
+            context_summary_lookup(&state, &notices, "turn-7", 1),
+            ContextSummaryLookup::Unavailable
+        );
+        let mut later = notices.clone();
+        later.push(ContextNotice::compacted("turn-11", 2, 4));
+        assert_eq!(
+            context_summary_lookup(&state, &later, "turn-7", 1),
+            ContextSummaryLookup::Superseded
+        );
+        assert_eq!(
+            context_summary_lookup(&ModelContextState::default(), &later, "turn-11", 2),
+            ContextSummaryLookup::Unavailable
+        );
+        assert_eq!(
+            context_summary_lookup(&retained, &notices, "turn-8", 1),
+            ContextSummaryLookup::Unavailable
         );
     }
 

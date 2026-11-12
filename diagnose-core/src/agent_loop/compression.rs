@@ -68,6 +68,7 @@ pub(super) async fn apply_checkpoint(
         plan.covered_message_count,
         plan.input_model_context_cost,
     );
+    sink.on_context_compressing(turn_id, plan.generation);
     let authorized_input = match deps.model.model_egress_policy()? {
         Some(policy) => match crate::model_context::authorize_compression_input(
             &policy,

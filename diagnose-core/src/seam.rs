@@ -300,6 +300,11 @@ pub trait TurnSink {
         let _ = (turn_id, kind);
     }
 
+    /// The model is summarizing earlier history before this turn can continue.
+    fn on_context_compressing(&mut self, turn_id: &str, generation: u32) {
+        let _ = (turn_id, generation);
+    }
+
     /// A validated checkpoint and its new raw-history floor were committed.
     fn on_context_compacted(&mut self, turn_id: &str, generation: u32, covered_message_count: u32) {
         let _ = (turn_id, generation, covered_message_count);

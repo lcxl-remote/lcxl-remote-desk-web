@@ -931,12 +931,18 @@ export function AiAssistantWorkspace({
                     <div ref={contentRef} className="mx-auto w-full max-w-[840px] space-y-4 pb-4">
                     <AssistantConversationMessages sessionId={chat.sessionId} messages={chat.messages} tools={chat.tools}
                         running={chat.running} evidence={chat.visualEvidence} notices={chat.contextNotices}
+                        revealSource={chat.revealMessage}
                         displayNameForTool={displayNameForTool} exportBackup={exportBackup}
                         loading={chat.hydrating} hasMore={chat.hasMoreMessages} loadingOlder={chat.loadingOlderMessages}
                         onOlder={() => void chat.loadOlderMessages()}
                         before={<AssistantDocumentPreviews previews={chat.documentPreviews} requestPage={chat.requestDocumentPreviewPage} />}>
                         <ScheduleProposalCards key={permissionHistoryKey} tools={chat.tools} running={chat.running}
                             deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
+                        {chat.contextCompressing && <p role="status" data-testid="assistant-context-compressing"
+                            className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                            <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            {t('pages.aiAssistant.contextCompressing')}
+                        </p>}
                         {chat.partial && (
                             <MarkdownContent disableLinks className="w-full max-w-full rounded-lg bg-muted px-3 py-2 text-sm sm:max-w-[90%]">
                                 {chat.partial}

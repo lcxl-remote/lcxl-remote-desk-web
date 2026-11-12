@@ -1,0 +1,1 @@
+{"type":"string","enum":["available","superseded","unavailable"],"x-readme-ref-name":"ContextSummaryStateDto"}

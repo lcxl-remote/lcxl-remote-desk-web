@@ -51,6 +51,7 @@ pub struct StreamingTurnSink<S> {
     uncommitted_partial: bool,
     context_trimmed_turn_id: Option<String>,
     context_compacted_generation: Option<u32>,
+    context_compressing_generation: Option<u32>,
     /// Machine-readable AI marking stamped onto the terminal `Answer` frame, when
     /// the upper layer (which knows the model and has a clock) injected one before
     /// running the turn. This crate has neither, so it carries the pre-built stamp
@@ -76,6 +77,7 @@ impl<S: AgentFrameSink> StreamingTurnSink<S> {
             uncommitted_partial: false,
             context_trimmed_turn_id: None,
             context_compacted_generation: None,
+            context_compressing_generation: None,
             provenance: None,
         }
     }
@@ -347,6 +349,18 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
             kind.status().replace('-', "_"),
             turn_id,
         ));
+    }
+
+    fn on_context_compressing(&mut self, turn_id: &str, generation: u32) {
+        if self.terminated || self.context_compressing_generation == Some(generation) {
+            return;
+        }
+        self.context_compressing_generation = Some(generation);
+        let seq = self.next_seq();
+        let mut event =
+            AgentEvent::status_for_turn(&self.request_id, seq, "context_compressing", turn_id);
+        event.checkpoint_generation = Some(generation);
+        self.sink.emit(event);
     }
 
     fn on_context_compacted(&mut self, turn_id: &str, generation: u32, covered_message_count: u32) {
@@ -874,6 +888,23 @@ mod tests {
         assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
         assert!(!events[0].is_terminal());
         assert_eq!(events[1].kind, AgentEventKind::Answer);
+    }
+
+    #[test]
+    fn context_compressing_status_is_non_terminal_and_deduped_by_generation() {
+        let (store, sink) = recorder();
+        let mut bridge = StreamingTurnSink::new(sink, "r");
+        bridge.on_context_compressing("turn-7", 2);
+        bridge.on_context_compressing("turn-7", 2);
+        bridge.on_context_compacted("turn-7", 2, 9);
+        let events = store.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, AgentEventKind::Status);
+        assert_eq!(events[0].status.as_deref(), Some("context_compressing"));
+        assert_eq!(events[0].turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(events[0].checkpoint_generation, Some(2));
+        assert!(!events[0].is_terminal());
+        assert_eq!(events[1].status.as_deref(), Some("context_compacted"));
     }
 
     #[test]

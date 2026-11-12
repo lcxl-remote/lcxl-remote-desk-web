@@ -13,6 +13,8 @@ export type { DeleteAssistantAttachmentsMutationKey } from "./useDeleteAssistant
 export type { DeleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
 export type { GetAiAssistantApprovalModeQueryKey } from "./useGetAiAssistantApprovalMode.ts";
 export type { GetAiAssistantApprovalModeSuspenseQueryKey } from "./useGetAiAssistantApprovalModeSuspense.ts";
+export type { GetAiAssistantContextSummaryQueryKey } from "./useGetAiAssistantContextSummary.ts";
+export type { GetAiAssistantContextSummarySuspenseQueryKey } from "./useGetAiAssistantContextSummarySuspense.ts";
 export type { GetAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
 export type { GetAiAssistantDeviceRosterSuspenseQueryKey } from "./useGetAiAssistantDeviceRosterSuspense.ts";
 export type { GetAiAssistantIssueSubscriptionAccountsQueryKey } from "./useGetAiAssistantIssueSubscriptionAccounts.ts";
@@ -102,6 +104,12 @@ export { useGetAiAssistantApprovalMode } from "./useGetAiAssistantApprovalMode.t
 export { getAiAssistantApprovalModeSuspenseQueryKey } from "./useGetAiAssistantApprovalModeSuspense.ts";
 export { getAiAssistantApprovalModeSuspenseQueryOptions } from "./useGetAiAssistantApprovalModeSuspense.ts";
 export { useGetAiAssistantApprovalModeSuspense } from "./useGetAiAssistantApprovalModeSuspense.ts";
+export { getAiAssistantContextSummaryQueryKey } from "./useGetAiAssistantContextSummary.ts";
+export { getAiAssistantContextSummaryQueryOptions } from "./useGetAiAssistantContextSummary.ts";
+export { useGetAiAssistantContextSummary } from "./useGetAiAssistantContextSummary.ts";
+export { getAiAssistantContextSummarySuspenseQueryKey } from "./useGetAiAssistantContextSummarySuspense.ts";
+export { getAiAssistantContextSummarySuspenseQueryOptions } from "./useGetAiAssistantContextSummarySuspense.ts";
+export { useGetAiAssistantContextSummarySuspense } from "./useGetAiAssistantContextSummarySuspense.ts";
 export { getAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
 export { getAiAssistantDeviceRosterQueryOptions } from "./useGetAiAssistantDeviceRoster.ts";
 export { useGetAiAssistantDeviceRoster } from "./useGetAiAssistantDeviceRoster.ts";

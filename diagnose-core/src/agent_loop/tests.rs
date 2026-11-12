@@ -3132,13 +3132,27 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
         seam: &safety,
         context: safety_context(),
     };
-    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    // Records the compression lifecycle the browser stream observes.
+    struct CompressionEvents(Vec<String>, String);
+    impl TurnSink for CompressionEvents {
+        fn on_text_delta(&mut self, delta: &str) {
+            self.1.push_str(delta);
+        }
+        fn on_context_compressing(&mut self, _turn_id: &str, generation: u32) {
+            self.0.push(format!("compressing:{generation}"));
+        }
+        fn on_context_compacted(&mut self, _turn_id: &str, generation: u32, _count: u32) {
+            self.0.push(format!("compacted:{generation}"));
+        }
+    }
+    let mut sink = CompressionEvents(Vec::new(), String::new());
     let current = ChatMessage::text("current", ChatRole::User, "c".repeat(7000));
     let outcome = run_agent_turn(&loop_deps, claim(), current, &mut sink)
         .await
         .unwrap();
 
     assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+    assert_eq!(sink.0, ["compressing:1", "compacted:1"]);
     let requests = requests.borrow();
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -3203,7 +3217,7 @@ async fn compression_precedes_main_call_and_counts_tokens_but_not_steps() {
         notice.kind == crate::model_context::ContextNoticeKind::Compacted
             && notice.checkpoint_generation == Some(1)
     }));
-    assert_eq!(sink.0.borrow().as_str(), "done");
+    assert_eq!(sink.1, "done");
     let audits = audits.borrow();
     assert_eq!(audits.len(), 1);
     let crate::seam::ContextCompressionAuditOutcome::Committed {

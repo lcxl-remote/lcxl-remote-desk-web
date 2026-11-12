@@ -399,6 +399,59 @@ pub struct ContextNotice {
     pub covered_message_count: Option<u32>,
 }
 
+/// What a compaction notice can still show of its summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSummaryLookup<'a> {
+    Available(&'a ContextCheckpointV1),
+    /// A later, larger generation was recorded after this notice.
+    Superseded,
+    /// The summary is no longer retained, for example after a model switch,
+    /// retention cleanup or a context floor change.
+    Unavailable,
+}
+
+/// Finds the summary created by one compaction. Generations count within one
+/// model policy, so the compaction turn identifies the checkpoint.
+pub fn context_summary_lookup<'a>(
+    state: &'a ModelContextState,
+    notices: &[ContextNotice],
+    turn_id: &str,
+    generation: u32,
+) -> ContextSummaryLookup<'a> {
+    if let Some(checkpoint) = state
+        .entries
+        .iter()
+        .filter_map(|entry| entry.checkpoint.as_ref())
+        .map(ContextCheckpoint::v1)
+        .find(|checkpoint| {
+            checkpoint.generation == generation && checkpoint.compressor.created_turn_id == turn_id
+        })
+    {
+        return ContextSummaryLookup::Available(checkpoint);
+    }
+    let compacted = |notice: &&ContextNotice| notice.kind == ContextNoticeKind::Compacted;
+    let Some(position) = notices.iter().position(|notice| {
+        notice.kind == ContextNoticeKind::Compacted
+            && notice.turn_id == turn_id
+            && notice.checkpoint_generation == Some(generation)
+    }) else {
+        return ContextSummaryLookup::Unavailable;
+    };
+    if notices[position + 1..]
+        .iter()
+        .filter(compacted)
+        .any(|notice| {
+            notice
+                .checkpoint_generation
+                .is_some_and(|later| later > generation)
+        })
+    {
+        ContextSummaryLookup::Superseded
+    } else {
+        ContextSummaryLookup::Unavailable
+    }
+}
+
 impl ContextNotice {
     pub fn trimmed(turn_id: impl Into<String>) -> Self {
         Self::adjusted(turn_id, ContextNoticeKind::Trimmed)

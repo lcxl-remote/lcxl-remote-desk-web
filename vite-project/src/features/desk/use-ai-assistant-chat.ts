@@ -1,4 +1,4 @@
-import { mergeAssistantMessages } from './assistant-message-history';
+import { matchesAssistantMessage, mergeAssistantMessages } from './assistant-message-history';
 import { projectGoalReviewReceipt } from './assistant-goal-review-receipt';
 import type { AssistantContextUsage } from './assistant-context-meter';
 import type { AssistantFileScopeView, AssistantDirectoryOperation } from './assistant-file-scope';
@@ -46,6 +46,9 @@ import {
 const PREVIEW_TOOL = 'preview_computer_action';
 
 const SNAPSHOT_TIMEOUT_MS = 30_000;
+/** Earlier pages a source jump may load before giving up. */
+const REVEAL_PAGE_LIMIT = 5;
+type MessagePage = { hasMore: boolean; nextBeforeMessageId: string | null };
 const REQUEST_QUEUE_PATH = '/api/my/ai-assistant-session/requests';
 
 export type AiAssistantMessage = {
@@ -529,10 +532,15 @@ export function useAiAssistantChat({
             if (oldest !== undefined) ids.delete(oldest);
         }
     }, []);
-    const [messagePage, setMessagePage] = useState<{
-        hasMore: boolean;
-        nextBeforeMessageId: string | null;
-    }>({ hasMore: false, nextBeforeMessageId: null });
+    const [messagePage, setMessagePageState] = useState<MessagePage>({ hasMore: false, nextBeforeMessageId: null });
+    // Paging reads the latest cursor before React renders the previous page.
+    const messagePageRef = useRef<MessagePage>(messagePage);
+    const setMessagePage = useCallback((page: MessagePage) => {
+        messagePageRef.current = page;
+        setMessagePageState(page);
+    }, []);
+    // Set while the model summarizes earlier history; any later event ends it.
+    const [contextCompressing, setContextCompressing] = useState(false);
     const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
     const [visualEvidence, setVisualEvidence] = useState<AiAssistantVisualEvidence[]>([]);
     const [documentPreviews, setDocumentPreviews] = useState<AiAssistantDocumentPreview[]>([]);
@@ -980,12 +988,12 @@ export function useAiAssistantChat({
         })();
     }, [loadRequestQueue, loadSnapshot]);
 
-    const loadOlderMessages = useCallback(async () => {
-        const cursor = messagePage.nextBeforeMessageId;
+    const loadOlderMessages = useCallback(async (): Promise<boolean> => {
+        const cursor = messagePageRef.current.nextBeforeMessageId;
         const expectedConversationId = conversationId.current;
         const watermark = snapshotWatermark.current;
-        if (!messagePage.hasMore || !cursor || !expectedConversationId || !watermark || olderRequest.current) {
-            return;
+        if (!messagePageRef.current.hasMore || !cursor || !expectedConversationId || !watermark || olderRequest.current) {
+            return false;
         }
         const expectedEpoch = snapshotEpoch.current;
         const request = {};
@@ -1008,11 +1016,11 @@ export function useAiAssistantChat({
                 || snapshot.sessionId !== watermark.sessionId
                 || !Number.isSafeInteger(snapshot.seq) || snapshot.seq < watermark.seq
                 || !Array.isArray(snapshot.messages)
-            ) return;
+            ) return false;
             const projected = projectPersistedSnapshot(snapshot);
             const current = historyWindow.current;
             if (!current || current.conversationId !== expectedConversationId
-                || current.sessionId !== snapshot.sessionId) return;
+                || current.sessionId !== snapshot.sessionId) return false;
             const page = {
                 hasMore: Boolean(snapshot.messagePage?.hasMore),
                 nextBeforeMessageId: snapshot.messagePage?.nextBeforeMessageId ?? null,
@@ -1025,13 +1033,23 @@ export function useAiAssistantChat({
             setMessages((messages) => mergeAssistantMessages(projected.messages, messages));
             setTools((tools) => tools.reduce((items, tool) => upsertTool(items, tool), projected.tools));
             setMessagePage(page);
+            return true;
         } finally {
             if (olderRequest.current === request) {
                 olderRequest.current = null;
                 setLoadingOlderMessages(false);
             }
         }
-    }, [deskId, messagePage]);
+    }, [deskId, setMessagePage]);
+
+    /** Loads earlier pages until a message is present, within a small page budget. */
+    const revealMessage = useCallback(async (id: string): Promise<boolean> => {
+        const conversation = conversationId.current;
+        for (let page = 0; ; page += 1) {
+            if (historyWindow.current?.messages.some(message => matchesAssistantMessage(message, id))) return true;
+            if (page >= REVEAL_PAGE_LIMIT || conversationId.current !== conversation || !await loadOlderMessages()) return false;
+        }
+    }, [loadOlderMessages]);
 
     useEffect(() => {
         let stored: string | null = null;
@@ -1048,6 +1066,7 @@ export function useAiAssistantChat({
         setRequestQueue(null);
         historyWindow.current = null;
         olderRequest.current = null;
+        setContextCompressing(false);
         pendingDelivery.current = null;
         deliveryFailure.current = null;
         setDeliveryState(null);
@@ -1157,6 +1176,7 @@ export function useAiAssistantChat({
             setRequestQueue(null);
             historyWindow.current = null;
             olderRequest.current = null;
+            setContextCompressing(false);
             setMessagePage({ hasMore: false, nextBeforeMessageId: null });
             setLoadingOlderMessages(false);
             conversationId.current = event.newValue;
@@ -1345,6 +1365,7 @@ export function useAiAssistantChat({
             setMessages(current => current.filter(message => message.id !== rejectedId));
         }
         if ((event.kind === 'error' || event.kind === 'retracted') && currentSubmission && pendingDelivery.current) setDeliveryState('unconfirmed');
+        setContextCompressing(event.kind === 'status' && event.status === 'context_compressing');
         switch (event.kind) {
             case 'status':
                 setStatus(event.status ?? 'running');
@@ -1415,6 +1436,7 @@ export function useAiAssistantChat({
             snapshotWatermark.current = null;
             historyWindow.current = null;
             olderRequest.current = null;
+            setContextCompressing(false);
             conversationId.current = v4();
             try {
                 localStorage.setItem(
@@ -2054,6 +2076,7 @@ export function useAiAssistantChat({
         setRequestQueue(null);
         historyWindow.current = null;
         olderRequest.current = null;
+        setContextCompressing(false);
         conversationId.current = null;
         lastSeq.current = -1;
         setMessages([]);
@@ -2232,6 +2255,8 @@ export function useAiAssistantChat({
             || backgroundTasks.some(task => task.state === 'running')
             || (!mainStopped && !!goal && ['queued', 'running', 'waiting_approval', 'waiting_work', 'waiting_device', 'waiting_model'].includes(goal.state))),
         turnRunning: activeRequest.current !== null || remoteActive,
+        contextCompressing: contextCompressing && (activeRequest.current !== null || remoteActive),
+        revealMessage,
         running: activeRequest.current !== null || remoteActive || deliveryState === 'sending'
             || contextUpdating || approvalInitializing || permissionUpdating || outcomeDisposing,
         start,

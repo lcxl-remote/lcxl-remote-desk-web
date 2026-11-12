@@ -1042,6 +1042,57 @@ describe('useAiAssistantChat', () => {
         expect(JSON.stringify(payload)).not.toMatch(/handle|process_id|coordinate/);
     });
 
+    it('shows context compression only until the stream moves on', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'compressing',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        try {
+            act(() => { result.current.start('Long task'); });
+            const request_id = sendMessage.mock.calls[0][3]!;
+            const emit = (seq: number, data: Record<string, unknown>) => act(() => subscriber?.({ request_id,
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED, signaling_data: { request_id, seq, ...data } }));
+            emit(1, { kind: 'status', status: 'accepted' });
+            expect(result.current.contextCompressing).toBe(false);
+            emit(2, { kind: 'status', status: 'context_compressing', checkpoint_generation: 1 });
+            expect(result.current.contextCompressing).toBe(true);
+            emit(3, { kind: 'partial', partial_summary: 'continuing' });
+            expect(result.current.contextCompressing).toBe(false);
+            emit(4, { kind: 'status', status: 'context_compressing', checkpoint_generation: 2 });
+            expect(result.current.contextCompressing).toBe(true);
+            emit(5, { kind: 'error', error: { message: 'compression failed' } });
+            expect(result.current.contextCompressing).toBe(false);
+        } finally { unmount(); }
+    });
+
+    it('loads earlier pages until a summarized source message is present', async () => {
+        localStorage.setItem('ai-assistant-conversation:desk-reveal', 'conversation-1');
+        const page = (seq: number, ids: string[], cursor?: string) => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'session-1', seq, active: false,
+            messages: ids.map(id => ({ id, role: 'user', text: id })),
+            messagePage: { hasMore: !!cursor, nextBeforeMessageId: cursor ?? null, limit: 100 },
+            contextAttachments: [],
+        } }) });
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(page(7, ['m5', 'm6'], 'm5'))
+            .mockResolvedValueOnce(page(7, ['m3', 'm4'], 'm3'))
+            .mockResolvedValueOnce(page(7, ['m1', 'm2']));
+        stubSnapshotFetch(fetchMock);
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-reveal', subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        await waitFor(() => expect(result.current.hydrating).toBe(false));
+        let found = false;
+        await act(async () => { found = await result.current.revealMessage('m1'); });
+        expect(found).toBe(true);
+        expect(fetchMock.mock.calls[1]?.[0]).toContain('message_before=m5');
+        expect(fetchMock.mock.calls[2]?.[0]).toContain('message_before=m3');
+        expect(result.current.messages.map(message => message.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+        await act(async () => { found = await result.current.revealMessage('missing'); });
+        expect(found).toBe(false);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
     it('prepends an older page only for the same durable snapshot', async () => {
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
         const fetchMock = vi.fn()

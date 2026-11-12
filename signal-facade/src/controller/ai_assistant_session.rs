@@ -1,6 +1,8 @@
 //! Shared browser/mobile wire DTOs and pure projections for AI Assistant sessions.
 
+mod context_summary;
 mod subagents;
+pub use context_summary::*;
 pub use subagents::*;
 
 pub use desk_agent_protocol::ai_assistant::{MainRequestReceipt, MainRequestState};

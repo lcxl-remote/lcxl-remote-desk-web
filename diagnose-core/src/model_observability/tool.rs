@@ -486,6 +486,9 @@ impl TurnSink for ObservedTurnSink<'_> {
     fn on_context_adjusted(&mut self, id: &str, kind: crate::model_context::ContextNoticeKind) {
         self.inner.on_context_adjusted(id, kind);
     }
+    fn on_context_compressing(&mut self, id: &str, generation: u32) {
+        self.inner.on_context_compressing(id, generation);
+    }
     fn on_context_compacted(&mut self, id: &str, generation: u32, count: u32) {
         self.inner.on_context_compacted(id, generation, count);
     }

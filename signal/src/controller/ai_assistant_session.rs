@@ -1603,6 +1603,9 @@ mod tests {
     }
 }
 
+mod context_summary;
+pub use context_summary::get_ai_assistant_context_summary;
+
 mod images;
 pub use images::{delete_assistant_image, get_assistant_image, list_assistant_images};
 

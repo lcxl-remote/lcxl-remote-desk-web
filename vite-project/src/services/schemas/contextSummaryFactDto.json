@@ -1,0 +1,1 @@
+{"type":"object","required":["text","sourceMessageIds"],"properties":{"sourceMessageIds":{"type":"array","items":{"type":"string"},"description":"Original messages shown in the conversation snapshot."},"text":{"type":"string"}},"x-readme-ref-name":"ContextSummaryFactDto"}

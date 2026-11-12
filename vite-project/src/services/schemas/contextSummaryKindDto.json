@@ -1,0 +1,1 @@
+{"type":"string","enum":["goals","historical_constraints","reported_observations","completed_actions","unresolved_questions","next_steps","important_identifiers","omitted_evidence"],"x-readme-ref-name":"ContextSummaryKindDto"}
