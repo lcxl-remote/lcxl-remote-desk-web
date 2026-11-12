@@ -1978,10 +1978,17 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
     closed.sort();
     assert_eq!(closed, ["awaiting", "left-open"]);
     assert!(session.awaiting_permission.is_none());
-    // The earlier approval can no longer be granted as it was asked.
+    // The finished request's approval is withdrawn, so it neither blocks the
+    // next request's claim nor can be granted later.
     assert_eq!(
         session.permission_requests[0].state,
-        crate::dynamic_run::PermissionRequestState::NeedsRevalidation
+        crate::dynamic_run::PermissionRequestState::Withdrawn
+    );
+    assert!(
+        session
+            .permission_requests
+            .iter()
+            .all(|request| request.state.is_terminal())
     );
     assert!(session.unclosed_tool_call_ids().is_empty());
     assert_eq!(session.conversation[history].message_id, "next-task-source");

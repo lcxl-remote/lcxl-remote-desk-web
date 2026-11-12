@@ -257,6 +257,12 @@ pub fn admit_request(
     updated
         .close_awaiting_permission("not executed: the previous request ended before approval")
         .map_err(|_| "paused permission call is missing")?;
+    // The finished request can no longer use its unanswered approvals.
+    for request in &mut updated.permission_requests {
+        if !request.state.is_terminal() {
+            request.state = crate::dynamic_run::PermissionRequestState::Withdrawn;
+        }
+    }
     close_unclosed_calls(
         &mut updated,
         "not executed: the previous request ended before this call ran",
@@ -311,7 +317,7 @@ pub fn admit_request(
 /// The previous request left nothing running the next one could inherit: no
 /// active turn, background action or pending result. As with a new owner input,
 /// its unanswered approvals and open calls do not block: admission closes the
-/// calls and marks the approvals for revalidation.
+/// calls and withdraws the approvals, which belong to the finished request.
 pub fn admission_ready(session: &PersistedAgentSession) -> bool {
     !session.turn_state.is_active()
         && session.execution_state == crate::session::ExecutionState::None
