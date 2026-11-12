@@ -992,7 +992,6 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             );
         }
         if session.surface == AgentSessionSurface::AiAssistant
-            && session.agent_role.binding().is_none()
             && let Some(data) = &session.assistant_data
             && !data.instructions.content.is_empty()
         {
@@ -2642,7 +2641,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
 
                                 let forget_targets = if session.surface
                                     == AgentSessionSurface::AiAssistant
-                                    && session.agent_role.is_main()
+                                    && session.uses_owner_assistant_data()
                                 {
                                     match crate::ai_assistant::data_tools::prepare_memory_batch(
                                         &turn.tool_calls,

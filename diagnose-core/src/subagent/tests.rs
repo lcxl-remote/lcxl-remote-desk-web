@@ -909,6 +909,7 @@ fn adjusted_task_projection_retains_source_labels_locale_and_current_objective()
         scheduled_source: None,
         original_read_context: None,
         model_destination: destination.clone(),
+        assistant_seed: None,
     };
     let inputs = vec![owner.data_envelope.unwrap()];
     let task = binding();
@@ -1030,6 +1031,7 @@ fn completion_context() -> creation::TaskCreationEnvelope {
             scheduled_source: None,
             original_read_context: None,
             model_destination: destination,
+            assistant_seed: None,
         },
         instruction,
         input_envelopes: inputs,
@@ -1954,7 +1956,12 @@ fn a_worker_session_admits_its_next_request_like_a_new_owner_input() {
         .unwrap();
     assert!(control::admit_request(&mut busy, &first, &next, &creation, &parent, 7, now).is_err());
 
+    // The previous request's owner data never carries over to the next one.
+    session.assistant_data =
+        crate::ai_assistant::test_support::personal_session("owner", "root", "").assistant_data;
+    assert!(creation.source.assistant_seed.is_none());
     control::admit_request(&mut session, &first, &next, &creation, &parent, 7, now).unwrap();
+    assert!(session.assistant_data.is_none());
     assert!(control::is_bound(&session, &next));
     assert!(!control::is_bound(&session, &first));
     next.validate_session(&session).unwrap();

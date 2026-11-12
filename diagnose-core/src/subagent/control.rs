@@ -305,6 +305,10 @@ pub fn admit_request(
     updated.automation_turns_used = 0;
     updated.subagent_report_corrections_used = next.report_corrections_used;
     updated.bind_assistant_input_targets(&next.binding.targets)?;
+    crate::ai_assistant::delegated_retrieval::DelegatedAssistantSeed::bind(
+        creation.source.assistant_seed.as_deref(),
+        &mut updated,
+    )?;
     updated.begin_focus_epoch(input_revision, Vec::new())?;
     updated.lease_token = updated
         .lease_token

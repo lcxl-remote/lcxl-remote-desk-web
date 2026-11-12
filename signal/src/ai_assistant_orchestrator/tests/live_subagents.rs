@@ -162,11 +162,20 @@ async fn formatted_delegation_scenario(personal: bool) {
             for target in target_refs {
                 assert!(messages.contains(target), "{messages}");
             }
+            // The worker has the owner's personal instructions and data tools
+            // like its main conversation.
             assert!(
-                worker["tools"]
-                    .to_string()
-                    .contains("report_subagent_status")
+                messages.contains("Answer every question in haiku"),
+                "{messages}"
             );
+            let tools = worker["tools"].to_string();
+            assert!(tools.contains("report_subagent_status"));
+            for tool in [
+                desk_diagnose_core::ai_assistant::data_tools::SEARCH_MEMORIES,
+                desk_diagnose_core::ai_assistant::data_tools::SEARCH_CONVERSATIONS,
+            ] {
+                assert!(tools.contains(tool), "{tool}: {tools}");
+            }
         } else {
             capture_one_openai_request_with_sse(&listener, &answer).await;
         }
@@ -197,6 +206,17 @@ async fn formatted_delegation_scenario(personal: bool) {
                 .await
                 .unwrap();
         }
+        crate::assistant_data_config::update_instructions(
+            &db,
+            &desk_agent_protocol::ai_assistant::user_instructions::UserInstructionsUpdate {
+                expected_revision: crate::assistant_data_config::instructions(&db)
+                    .await
+                    .revision,
+                content: "Answer every question in haiku".into(),
+            },
+        )
+        .await
+        .unwrap();
     }
     let connections = web::Data::new(SharedConnectionMap::new());
     run_turn_inner(
@@ -239,6 +259,20 @@ async fn formatted_delegation_scenario(personal: bool) {
         derive_conversation_key("1", "device", Some("formatted-delegation"), "unused")
     };
     if personal {
+        // The owner's data generations move after dispatch, as when the main
+        // conversation writes a memory: the worker starts with the current ones.
+        crate::assistant_data_store::ensure_runtime_on(&db, "1")
+            .await
+            .unwrap();
+        let runtime = crate::entity::agent_assistant_runtime::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut moved: crate::entity::agent_assistant_runtime::ActiveModel = runtime.clone().into();
+        moved.memory_state_generation = sea_orm::Set(runtime.memory_state_generation + 1);
+        moved.control_generation = sea_orm::Set(runtime.control_generation + 1);
+        sea_orm::ActiveModelTrait::update(moved, &db).await.unwrap();
         let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
         let task = children
             .iter()
@@ -270,6 +304,33 @@ async fn formatted_delegation_scenario(personal: bool) {
         assert!(
             matches!(outcome, LoopOutcome::Answered(ref answer) if answer == "worker-complete"),
             "{outcome:?}"
+        );
+        let child = PersistedAgentSession::decode_json(
+            &crate::entity::agent_session::Entity::find()
+                .filter(
+                    crate::entity::agent_session::Column::ConversationId
+                        .eq(&task.child_conversation_id),
+                )
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .state_json,
+        )
+        .unwrap();
+        let runtime = crate::entity::agent_assistant_runtime::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = child.assistant_data.as_deref().unwrap();
+        assert_eq!(
+            data.control_generation,
+            u64::try_from(runtime.control_generation).unwrap()
+        );
+        assert_eq!(
+            data.memory_state_generation,
+            u64::try_from(runtime.memory_state_generation).unwrap()
         );
     }
     tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
@@ -1086,6 +1147,12 @@ async fn personal_worker_web_request_scenario() {
         },
         request,
     };
+    // A seeded child is saved as an ordinary session, never as main history.
+    assert!(child.assistant_data.is_some());
+    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .save(&mut child)
+        .await
+        .unwrap();
     crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .save_permission_request(&mut child, &event)
         .await

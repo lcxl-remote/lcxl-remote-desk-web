@@ -322,6 +322,15 @@ pub(super) async fn task_deadline_on(
     else {
         return Ok(None);
     };
+    // A child request's owner data lives no longer than the request itself.
+    if let Some(binding) = session.agent_role.binding() {
+        if binding.task_id != *task_id {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+        return u64::try_from(binding.deadline_ms)
+            .map(Some)
+            .map_err(|_| AssistantStoreError::Invalid("invalid child request deadline"));
+    }
     if matches!(
         session.trigger_origin,
         desk_diagnose_core::session::TriggerOrigin::ScheduledTask

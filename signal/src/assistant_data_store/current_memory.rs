@@ -69,7 +69,7 @@ pub(crate) async fn prepare(
     maximum_bytes: usize,
 ) -> Result<CurrentMemoryBlock, AssistantStoreError> {
     if session.surface != AgentSessionSurface::AiAssistant
-        || !session.agent_role.is_main()
+        || !session.uses_owner_assistant_data()
         || maximum_bytes == 0
         || !matches!(destination, DestinationIdentity::Model { .. })
         || destination.validate().is_err()

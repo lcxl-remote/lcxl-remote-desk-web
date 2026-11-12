@@ -320,6 +320,7 @@ mod tests {
             scheduled_source: None,
             original_read_context: Some(selected.clone()),
             model_destination: destination,
+            assistant_seed: None,
         };
         creation.validate().unwrap();
         assert_eq!(creation.child_read_context().unwrap(), selected);

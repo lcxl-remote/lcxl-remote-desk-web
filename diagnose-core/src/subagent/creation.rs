@@ -62,6 +62,10 @@ pub struct CreationEnvelope {
     pub scheduled_source: Option<ScheduledCreationSource>,
     pub original_read_context: Option<ReadContextSelection>,
     pub model_destination: DestinationIdentity,
+    /// The main conversation's assistant data for this source, if it may use any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_seed:
+        Option<Box<crate::ai_assistant::delegated_retrieval::DelegatedAssistantSeed>>,
 }
 
 #[derive(Default)]
@@ -386,6 +390,8 @@ impl CreationEnvelope {
             scheduled_source: Some(source),
             original_read_context: None,
             model_destination,
+            assistant_seed:
+                crate::ai_assistant::delegated_retrieval::DelegatedAssistantSeed::capture(session),
         };
         envelope.validate()?;
         Ok(envelope)
@@ -461,6 +467,8 @@ impl CreationEnvelope {
             owner_requirement,
             original_read_context,
             scheduled_source: None,
+            assistant_seed:
+                crate::ai_assistant::delegated_retrieval::DelegatedAssistantSeed::capture(session),
         };
         envelope.validate()?;
         Ok(envelope)

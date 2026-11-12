@@ -24,7 +24,7 @@ pub(super) async fn prepare_request(
     session: &PersistedAgentSession,
     request: &mut ModelRequest,
 ) -> Result<(), AgentError> {
-    if session.surface != AgentSessionSurface::AiAssistant || !session.agent_role.is_main() {
+    if session.surface != AgentSessionSurface::AiAssistant || !session.uses_owner_assistant_data() {
         if request.assistant_data.is_some() {
             return Err(invalid(
                 "assistant data manifest is invalid on this surface",

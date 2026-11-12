@@ -649,6 +649,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         scheduled_source: None,
         original_read_context: None,
         model_destination: destination.clone(),
+        assistant_seed: None,
     };
     let inputs = vec![owner.data_envelope.unwrap()];
     let payload = serde_json::json!({"delegated_task": binding.objective, "acceptance_criteria": binding.acceptance_criteria});

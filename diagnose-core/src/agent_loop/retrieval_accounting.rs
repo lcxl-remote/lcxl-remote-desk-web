@@ -177,7 +177,7 @@ pub(super) async fn reserve(
             desk_agent_protocol::ai_assistant::limits::RetrievalEpisodeLimits::default()
                 .response_bytes
         });
-    if session.surface != AgentSessionSurface::AiAssistant || !session.agent_role.is_main() {
+    if session.surface != AgentSessionSurface::AiAssistant || !session.uses_owner_assistant_data() {
         return Ok(Admission::New(RetrievalCall {
             id: None,
             upper_bytes,

@@ -112,6 +112,21 @@ pub fn owner_history_scope(
 /// Explicit dependency waits continue the original owner's frozen retrieval scope.
 /// Command callbacks retain their separate, narrow native context.
 pub fn eligible_origin(session: &PersistedAgentSession) -> bool {
+    // A child uses only the owner data frozen for its current request.
+    if let Some(binding) = session.agent_role.binding() {
+        return session.surface == AgentSessionSurface::AiAssistant
+            && matches!(
+                session.trigger_origin,
+                TriggerOrigin::DelegatedTask
+                    | TriggerOrigin::PermissionDecision
+                    | TriggerOrigin::WorkContinuation
+            )
+            && session.assistant_data.as_ref().is_some_and(|data| {
+                !data.temporary
+                    && data.validate().is_ok()
+                    && data.retrieval_task_id.as_deref() == Some(binding.task_id.as_str())
+            });
+    }
     session.surface == AgentSessionSurface::AiAssistant
         && session.agent_role.is_main()
         && matches!(
@@ -149,7 +164,7 @@ pub fn eligible_origin(session: &PersistedAgentSession) -> bool {
 pub fn retained_context_eligible(session: &PersistedAgentSession) -> bool {
     eligible_origin(session)
         || (session.surface == AgentSessionSurface::AiAssistant
-            && session.agent_role.is_main()
+            && session.uses_owner_assistant_data()
             && matches!(session.trigger_origin, TriggerOrigin::WorkCompletion { .. })
             && session
                 .assistant_data

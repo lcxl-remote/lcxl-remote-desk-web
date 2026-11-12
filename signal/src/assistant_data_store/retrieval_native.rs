@@ -821,9 +821,16 @@ async fn control_owner_input_on(
         .assistant_data
         .as_ref()
         .ok_or(AssistantStoreError::Inaccessible)?;
+    // A child acts on the owner input its main conversation delegated.
+    let owner_root = session
+        .agent_role
+        .binding()
+        .map_or(session.conversation_id.as_str(), |binding| {
+            binding.root_conversation_id.as_str()
+        });
     let mut rows = origin::Entity::find()
         .filter(origin::Column::ActorId.eq(&session.actor_id))
-        .filter(origin::Column::RootConversationId.eq(&session.conversation_id))
+        .filter(origin::Column::RootConversationId.eq(owner_root))
         .filter(origin::Column::AcceptedInputSeq.eq(super::signed(group.owner_input_seq())?))
         .filter(origin::Column::Kind.eq("input"))
         .limit(2)
@@ -833,12 +840,19 @@ async fn control_owner_input_on(
         return Err(AssistantStoreError::Inaccessible);
     }
     let input = rows.pop().unwrap();
-    let message = session
-        .conversation
-        .iter()
-        .find(|message| message.message_id == input.native_id)
-        .ok_or(AssistantStoreError::Inaccessible)?;
-    if input.conversation_id != session.conversation_id
+    let message = if session.agent_role.binding().is_some() {
+        session
+            .delegated_owner_requirement
+            .as_deref()
+            .filter(|message| message.message_id == input.native_id)
+    } else {
+        session
+            .conversation
+            .iter()
+            .find(|message| message.message_id == input.native_id)
+    }
+    .ok_or(AssistantStoreError::Inaccessible)?;
+    if input.conversation_id != owner_root
         || input.deleted_at_ms.is_some()
         || input.device_ref != data.source_device_ref
         || unsigned(input.created_at_ms)? != data.current_input_recorded_at_unix_ms

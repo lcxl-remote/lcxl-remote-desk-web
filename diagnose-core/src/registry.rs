@@ -241,6 +241,8 @@ pub fn exposure_block_reason(
         tool.effect,
         ToolEffect::MemoryQuery | ToolEffect::MemoryWrite | ToolEffect::AssistantHistory
     ) {
+        // A child request uses the owner data frozen for it; the session's
+        // own scope decides whether it has any.
         return (!matches!(
             origin,
             TriggerOrigin::User
@@ -250,6 +252,7 @@ pub fn exposure_block_reason(
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::ScheduledContinuation
                 | TriggerOrigin::SubAgentCompletion
+                | TriggerOrigin::DelegatedTask
         ))
         .then_some("trigger_origin_has_no_assistant_data_scope");
     }

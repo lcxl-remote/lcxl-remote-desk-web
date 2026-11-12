@@ -155,10 +155,18 @@ async fn write_on(
     else {
         return Ok(skipped("source_out_of_scope"));
     };
+    // A child writes for the owner input its main conversation delegated.
+    let owner_root = context
+        .session
+        .agent_role
+        .binding()
+        .map_or(context.session.conversation_id.as_str(), |binding| {
+            binding.root_conversation_id.as_str()
+        });
     let personal_root = context
         .session
         .has_admitted_personal_input()
-        .then_some(context.session.conversation_id.as_str());
+        .then_some(owner_root);
     let mut refs = draft.source_refs.clone();
     // Earlier owner inputs are named `input:<n>` relative to the model call;
     // resolve them before binding the current input so duplicates collapse.
@@ -169,15 +177,21 @@ async fn write_on(
         {
             continue;
         }
-        let message = desk_diagnose_core::ai_assistant::data_tools::owner_input_message(
-            context.session,
-            &context.producer_message.message_id,
-            &reference.id,
-        )
+        // A child has no owner input of its own; it can cite only the one
+        // its main conversation delegated.
+        let message = if context.session.agent_role.binding().is_some() {
+            context.session.delegated_owner_requirement.as_deref()
+        } else {
+            desk_diagnose_core::ai_assistant::data_tools::owner_input_message(
+                context.session,
+                &context.producer_message.message_id,
+                &reference.id,
+            )
+        }
         .ok_or(AssistantStoreError::SourceUnavailable)?;
         reference.id = history::Entity::find()
             .filter(history::Column::ActorId.eq(&context.session.actor_id))
-            .filter(history::Column::ConversationId.eq(&context.session.conversation_id))
+            .filter(history::Column::ConversationId.eq(owner_root))
             .filter(history::Column::NativeId.eq(&message.message_id))
             .filter(history::Column::Kind.eq("input"))
             .filter(history::Column::FragmentIndex.eq(0))
@@ -189,7 +203,7 @@ async fn write_on(
     if data.current_actor_input_seq > 0 {
         let input = origin::Entity::find()
             .filter(origin::Column::ActorId.eq(&context.session.actor_id))
-            .filter(origin::Column::RootConversationId.eq(&context.session.conversation_id))
+            .filter(origin::Column::RootConversationId.eq(owner_root))
             .filter(origin::Column::AcceptedInputSeq.eq(signed(data.current_actor_input_seq)?))
             .filter(origin::Column::Kind.eq("input"))
             .one(db)

@@ -399,6 +399,11 @@ async fn create_request_on(
             child
                 .bind_delegated_owner_requirement(&context.source)
                 .map_err(|_| invalid())?;
+            desk_diagnose_core::ai_assistant::delegated_retrieval::DelegatedAssistantSeed::bind(
+                context.source.assistant_seed.as_deref(),
+                &mut child,
+            )
+            .map_err(|_| invalid())?;
             child.response_locale = context.response_locale.clone();
             child.trigger_origin = TriggerOrigin::DelegatedTask;
             child.chain_id = child_id.clone();

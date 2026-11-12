@@ -1057,7 +1057,12 @@ impl PersistedAgentSession {
         }
         if let Some(data) = &session.assistant_data {
             if session.surface != AgentSessionSurface::AiAssistant
-                || session.agent_role.binding().is_some()
+                // A child uses its request's frozen owner data only.
+                || session.agent_role.binding().is_some_and(|binding| {
+                    data.temporary
+                        || data.current_actor_input_seq == 0
+                        || data.retrieval_task_id.as_deref() != Some(binding.task_id.as_str())
+                })
                 || (data.source_device_ref.is_empty() != session.device_id.is_empty()
                     && session.trigger_origin != TriggerOrigin::ScheduledTask)
                 || (data.source_device_ref.is_empty()
@@ -1937,6 +1942,11 @@ impl PersistedAgentSession {
     }
 
     /// A personal input retains the account subject even when it selects devices.
+    /// The main conversation, or a child carrying its request's frozen owner data.
+    pub fn uses_owner_assistant_data(&self) -> bool {
+        self.agent_role.is_main() || self.assistant_data.is_some()
+    }
+
     pub fn has_admitted_personal_input(&self) -> bool {
         self.surface == AgentSessionSurface::AiAssistant
             && self.device_id.is_empty()

@@ -309,13 +309,22 @@ impl AssistantModelDataManifest {
         {
             return Err("assistant model manifest does not match its source session");
         }
-        // A main assistant can share the delegation ledger. Bind that budget
-        // to this exact planner; the host still validates its durable grant.
+        // A main assistant can share the delegation ledger, and a child always
+        // spends its own request's. Bind that budget to this exact planner; the
+        // host still validates its durable grant.
         if let Some(call) = &request.delegation_call {
             call.validate()?;
-            if !session.agent_role.is_main()
-                || call.task_id.is_some()
-                || call.root_conversation_id != session.conversation_id
+            let planner = match session.agent_role.binding() {
+                None => {
+                    call.task_id.is_none() && call.root_conversation_id == session.conversation_id
+                }
+                Some(binding) => {
+                    call.task_id.as_deref() == Some(binding.task_id.as_str())
+                        && call.root_conversation_id == binding.root_conversation_id
+                        && call.group_id == binding.group_id
+                }
+            };
+            if !planner
                 || call.conversation_id != session.conversation_id
                 || session.delegation_group_id.as_ref() != Some(&call.group_id)
                 || call.input_revision != session.input_revision

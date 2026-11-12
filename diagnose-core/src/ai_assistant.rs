@@ -6,6 +6,7 @@ pub mod current_memory;
 pub mod data_access;
 pub mod data_control;
 pub mod data_tools;
+pub mod delegated_retrieval;
 pub mod history;
 pub mod linux;
 pub mod memory_access;
