@@ -926,3 +926,183 @@ async fn live_project_model_subagent_corpus() {
         "see synthetic result evidence"
     );
 }
+
+/// A personal Worker has no bound device; its central web request is saved
+/// against its current delegated request like the main conversation's.
+#[actix_web::test]
+async fn personal_worker_requests_a_central_web_read() {
+    desk_diagnose_core::future::boxed(personal_worker_web_request_scenario).await;
+}
+
+async fn personal_worker_web_request_scenario() {
+    use desk_diagnose_core::dynamic_run::{
+        AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind, PermissionRequestState,
+        PermissionRequestedEvent,
+    };
+    use desk_diagnose_core::seam::{ClaimTurnParams, SessionSeam};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let args = json!({
+        "task":"Read the public release notes", "required_for_completion":false,
+        "name":"reader","acceptance_criteria":["Report the release date"]
+    });
+    let delta = json!({"choices":[{"delta":{"role":"assistant","tool_calls":[{
+        "index":0,"id":"spawn-0","type":"function",
+        "function":{"name":"send_subagent_request","arguments":args.to_string()}
+    }]}}]});
+    let reply = format!(
+        "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}],\"usage\":{{\"prompt_tokens\":4,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n"
+    );
+    let capture = actix_web::rt::spawn(async move {
+        capture_one_openai_request_with_sse(&listener, &reply).await;
+        let ending = json!({"choices":[{"delta":{"content":"child-created"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}});
+        capture_openai_answer_with_title(&listener, &format!("data: {ending}\n\ndata: [DONE]\n\n"))
+            .await;
+    });
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
+    crate::model_provider::save(
+        &db,
+        crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("synthetic".into()),
+            base_url: Some(format!("http://{address}")),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131072),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    crate::device_code_store::get_or_create(&db, "worker-mac")
+        .await
+        .unwrap();
+    let connections = web::Data::new(SharedConnectionMap::new());
+    run_turn_inner(
+        connections,
+        db.clone(),
+        "web-turn".into(),
+        "controller".into(),
+        String::new(),
+        1,
+        String::new(),
+        AiAssistantAsk {
+            target_refs: vec!["worker-mac".into()],
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
+            question: "Delegate reading the release notes".into(),
+            client_message_id: "original-message".into(),
+            conversation_id: Some("worker-web".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
+        .await
+        .unwrap()
+        .unwrap();
+    let row = crate::entity::agent_subagent_run::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+    let Some(desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. }) =
+        store.child_runtime_candidate(&row.task_id).await.unwrap()
+    else {
+        panic!("queued personal worker");
+    };
+    let destination = crate::model_provider::load(&db)
+        .await
+        .unwrap()
+        .destination_identity()
+        .unwrap();
+    let claim = ClaimTurnParams {
+        conversation_id: run.child_conversation_id.clone(),
+        actor_id: "1".into(),
+        device_id: String::new(),
+        policy_revision: desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        current_pdp_scope: desk_agent_protocol::AgentScope {
+            granted: vec![desk_agent_protocol::Capability::WebResearchFetch],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        turn_id: "worker-turn".into(),
+        request_id: Some("worker-request".into()),
+        connection_id: None,
+        trigger_origin: desk_diagnose_core::session::TriggerOrigin::DelegatedTask,
+        now: chrono::Utc::now().to_rfc3339(),
+    };
+    let crate::agent_subagent_store::SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(&claim, &run.binding.task_id, run.fence(), &destination)
+        .await
+        .unwrap()
+    else {
+        panic!("worker claim");
+    };
+    let mut child = claimed.session;
+    assert!(child.device_id.is_empty());
+    let request = desk_diagnose_core::permission_tools::build_permission_request(
+        &desk_diagnose_core::chat::ToolCall {
+            id: "worker-web-plan".into(),
+            name: desk_diagnose_core::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: json!({"items":[{
+                "item_id": "web", "tool_name": "fetch_public_web_page",
+                "exact_input": {"url": "https://example.com/releases"},
+                "suggested_ttl_seconds": 300, "suggested_max_uses": 1,
+                "reason": "Read the release notes",
+            }]})
+            .to_string(),
+        },
+        &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+        "worker-web-permission".into(),
+        child.input_revision,
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .unwrap();
+    assert!(desk_diagnose_core::assistant_policy::is_targetless_permission(&child, &request));
+    child.add_permission_request(request.clone()).unwrap();
+    child.last_event_seq += 1;
+    let event = PermissionRequestedEvent {
+        approval_mode_revision: None,
+        event: AgentRunEvent {
+            schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
+            event_id: "worker-web-request-event".into(),
+            run_id: child.conversation_id.clone(),
+            event_seq: child.last_event_seq,
+            input_revision: child.input_revision,
+            kind: AgentRunEventKind::PermissionRequested,
+            correlation_id: Some(request.request_id.clone()),
+            source_envelope_ids: vec![],
+            result_envelope_ids: vec![],
+            created_at: request.created_at.clone(),
+        },
+        request,
+    };
+    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .save_permission_request(&mut child, &event)
+        .await
+        .unwrap();
+    let stored = PersistedAgentSession::decode_json(
+        &crate::entity::agent_session::Entity::find()
+            .filter(crate::entity::agent_session::Column::ConversationId.eq(&child.conversation_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .state_json,
+    )
+    .unwrap();
+    assert_eq!(
+        stored.permission_requests.last().unwrap().state,
+        PermissionRequestState::Pending
+    );
+    db.close().await.unwrap();
+}

@@ -42,20 +42,29 @@ pub(super) async fn match_current_on(
             crate::agent_subagent_store::lock_child_source_on(txn, session).await
         })
         .await?;
-        let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
-            session,
-            call.target_device_id,
-        )
-        .map_err(|_| invalid())?
-        .ok_or_else(invalid)?;
         let now_ms = i64::try_from(call.now_unix_ms)
             .map_err(|_| invalid())?
             .max(chrono::Utc::now().timestamp_millis());
-        if !desk_diagnose_core::future::boxed(|| async {
-            crate::agent_subagent_store::check_child_action_on(txn, session, &fence, now_ms).await
-        })
-        .await?
-        {
+        let current = if call.target_device_id.is_empty() {
+            // A central web read has no device to fence.
+            desk_diagnose_core::future::boxed(|| async {
+                crate::agent_subagent_store::check_child_central_on(txn, session, now_ms).await
+            })
+            .await?
+        } else {
+            let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+                session,
+                call.target_device_id,
+            )
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+            desk_diagnose_core::future::boxed(|| async {
+                crate::agent_subagent_store::check_child_action_on(txn, session, &fence, now_ms)
+                    .await
+            })
+            .await?
+        };
+        if !current {
             return Err(invalid());
         }
     }

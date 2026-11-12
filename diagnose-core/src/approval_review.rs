@@ -3042,7 +3042,7 @@ mod tests {
         let mut not_web = candidate;
         not_web.tool_name = "read_file".into();
         assert!(not_web.validate().is_err());
-        // A child conversation is not a targetless owner request.
+        // A child conversation's central web request is reviewed like its main one.
         let mut child = pending.clone();
         child.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(crate::subagent::DelegatedTaskBinding {
@@ -3059,10 +3059,10 @@ mod tests {
                 deadline_ms: 1,
             }),
         };
-        assert!(!crate::assistant_policy::is_targetless_permission(
+        assert!(crate::assistant_policy::is_targetless_permission(
             &child, &request
         ));
-        assert!(pending_default_device_review(&child, &request.request_id, now).is_none());
+        assert!(pending_default_device_review(&child, &request.request_id, now).is_some());
         // A device conversation still builds and fits the AI review candidate.
         preflight_review_capacity(
             &session("device"),

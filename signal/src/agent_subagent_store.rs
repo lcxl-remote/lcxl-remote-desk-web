@@ -553,6 +553,38 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
     {
         return Ok(false);
     }
+    let Some(expected) = desk_diagnose_core::subagent::control::request_fence(session, fence)
+    else {
+        return Ok(false);
+    };
+    check_child_planning_on(db, session, expected, now_ms).await
+}
+
+/// A central action, such as a web read, has no device to fence; the held
+/// session's current request revisions stand in for the device fence.
+pub(crate) async fn check_child_central_on<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+    session: &PersistedAgentSession,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    if session.agent_role.binding().is_none() {
+        return Ok(true);
+    }
+    let Some(expected) = desk_diagnose_core::subagent::control::session_fence(session) else {
+        return Ok(false);
+    };
+    check_child_planning_on(db, session, expected, now_ms).await
+}
+
+async fn check_child_planning_on<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+    session: &PersistedAgentSession,
+    expected: desk_diagnose_core::subagent::state::PlanningFence,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    let Some(binding) = session.agent_role.binding() else {
+        return Ok(false);
+    };
     let Some(row) = run_row::Entity::find()
         .filter(run_row::Column::TaskId.eq(&binding.task_id))
         .filter(run_row::Column::RootConversationId.eq(&binding.root_conversation_id))
@@ -578,7 +610,7 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
     if group.source_admission != SourceAdmission::Open
         || now_ms >= group.limits.deadline_ms
         || now_ms >= run.binding.deadline_ms
-        || group.source_epoch != delegation.source_epoch
+        || group.source_epoch != expected.source_epoch
         || group.source != run.binding.source
         || run.validate_session(session).is_err()
         || !group
@@ -596,10 +628,6 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
     {
         return Ok(false);
     }
-    let Some(expected) = desk_diagnose_core::subagent::control::request_fence(session, fence)
-    else {
-        return Ok(false);
-    };
     Ok(run.require_current(expected).is_ok())
 }
 

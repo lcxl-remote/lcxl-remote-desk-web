@@ -266,7 +266,7 @@ pub fn permits_permission_request(
                 && command.actor_id == session.actor_id
                 && command.input_revision == request.input_revision
                 && command.policy_revision == session.policy_revision
-        }) || (session.agent_role.is_main()
+        }) || (!request.items.is_empty()
             && request.items.iter().all(|item| {
                 crate::web_research::is_web_tool(&item.tool_name)
                     && registry
@@ -283,14 +283,13 @@ pub fn permits_permission_request(
 }
 
 /// A permission request with no device target: a central web read or search
-/// asked by the main conversation of a personal assistant session. Owner and
-/// AI review decide it alike; it carries no device authority.
+/// asked by a personal assistant conversation, main or child. Owner and AI
+/// review decide it alike; it carries no device authority.
 pub fn is_targetless_permission(
     session: &PersistedAgentSession,
     request: &crate::dynamic_run::PermissionRequest,
 ) -> bool {
     crate::permission_grant::permission_device_id(session, request).is_empty()
-        && session.agent_role.is_main()
         && !request.items.is_empty()
         && request
             .items
@@ -426,7 +425,7 @@ pub fn resume_decision_authorized(
     };
     session.has_admitted_personal_input()
         && (session.agent_role.is_main()
-            || (session.agent_role.binding().is_some() && selected_request.is_some()))
+            || (session.agent_role.binding().is_some() && reviewed_request.is_some()))
         && session.input_revision == decision.request_input_revision
         && authorized_decision
 }
@@ -809,7 +808,7 @@ mod tests {
             &decision(PermissionDecisionSource::UserDecision),
         )
         .unwrap();
-        // A child conversation is not the owner's central web request.
+        // A child conversation requests central web reads like its main one.
         let mut child = session.clone();
         child.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(crate::subagent::DelegatedTaskBinding {
@@ -826,8 +825,10 @@ mod tests {
                 deadline_ms: 1,
             }),
         };
-        assert!(validate_permission_resume_claim(&child, &params, &reviewed).is_err());
-        assert!(!resume_decision_authorized(&child, &reviewed));
+        assert!(is_targetless_permission(&child, &request));
+        assert!(permits_permission_request(&child, &request));
+        validate_permission_resume_claim(&child, &params, &reviewed).unwrap();
+        assert!(resume_decision_authorized(&child, &reviewed));
         // Caller parameters do not change whether the stored decision authorizes.
         assert!(resume_decision_authorized(&session, &reviewed));
         let mut forged = params.clone();

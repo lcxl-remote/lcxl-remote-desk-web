@@ -135,6 +135,10 @@ pub async fn permits_current_target(
     session: &desk_diagnose_core::session::PersistedAgentSession,
     device_id: &str,
 ) -> Result<bool, AssistantStoreError> {
+    // A central request, such as a web read, targets no device.
+    if device_id.is_empty() {
+        return Ok(true);
+    }
     if let Some(owner) = owner_current_devices(db, session).await?
         && !owner.iter().any(|current| current == device_id)
     {

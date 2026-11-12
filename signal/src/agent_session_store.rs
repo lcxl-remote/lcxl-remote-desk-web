@@ -2758,19 +2758,19 @@ impl SessionSeam for SignalAgentSessionStore {
 
         if !session.agent_role.is_main() {
             let target = permission_device_id(session, &update.request);
-            let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
-                session, target,
-            )?
-            .ok_or_else(|| internal("missing delegated planning fence"))?;
-            if !crate::agent_subagent_store::check_child_action_on(
-                &txn,
-                session,
-                &fence,
-                Utc::now().timestamp_millis(),
-            )
-            .await
-            .map_err(|_| internal("delegated planning source is unavailable"))?
-            {
+            let now_ms = Utc::now().timestamp_millis();
+            let current = if target.is_empty() {
+                // A central web request has no device to fence.
+                crate::agent_subagent_store::check_child_central_on(&txn, session, now_ms).await
+            } else {
+                let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+                    session, target,
+                )?
+                .ok_or_else(|| internal("missing delegated planning fence"))?;
+                crate::agent_subagent_store::check_child_action_on(&txn, session, &fence, now_ms)
+                    .await
+            };
+            if !current.map_err(|_| internal("delegated planning source is unavailable"))? {
                 return Err(internal(
                     "delegated planning source is paused or no longer current",
                 ));

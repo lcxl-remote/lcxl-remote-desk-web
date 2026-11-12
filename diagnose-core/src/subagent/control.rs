@@ -118,6 +118,16 @@ pub fn request_fence(
     })
 }
 
+/// The planning fence of the request the session currently works on, for a
+/// central action that has no device fence.
+pub fn session_fence(session: &PersistedAgentSession) -> Option<super::state::PlanningFence> {
+    Some(super::state::PlanningFence {
+        input_revision: session.bound_input_revision()?,
+        control_revision: session.bound_control_revision()?,
+        source_epoch: session.agent_role.binding()?.source_epoch,
+    })
+}
+
 /// The host holds source/task/session control and writes the task and session in
 /// one transaction. Unclosed calls and execution identities remain available to
 /// the existing receipt reconciliation before the next planning claim.

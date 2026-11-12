@@ -309,6 +309,12 @@ async fn a_delegated_child_follows_its_owner_conversation_devices() {
             .await
             .unwrap()
     );
+    // A central request, such as a web read, has no device target to check.
+    assert!(
+        device_roster::permits_current_target(&store.db, &child, "")
+            .await
+            .unwrap()
+    );
     assert_eq!(
         device_roster::current_request_devices(&store.db, &child)
             .await
