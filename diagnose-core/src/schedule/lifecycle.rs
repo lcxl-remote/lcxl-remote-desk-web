@@ -109,8 +109,33 @@ impl FailureState {
     }
 }
 
+/// Task status after an occurrence settles. Deleted, expired and pending
+/// tasks keep their status; otherwise failures pause, a later occurrence
+/// stays active, and a task without one completes.
+pub fn settled_task_status(current: &str, paused: bool, has_next_run: bool) -> &str {
+    match current {
+        "deleted" | "expired" | "pending_review" => current,
+        _ if paused => "paused",
+        _ if has_next_run => "active",
+        _ => "completed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settled_status_keeps_terminal_and_pending_tasks() {
+        for current in ["deleted", "expired", "pending_review"] {
+            assert_eq!(super::settled_task_status(current, true, true), current);
+        }
+        assert_eq!(super::settled_task_status("active", true, true), "paused");
+        assert_eq!(super::settled_task_status("active", false, true), "active");
+        assert_eq!(
+            super::settled_task_status("paused", false, false),
+            "completed"
+        );
+    }
+
     use super::*;
     #[test]
     fn failure_threshold_survives_skips_and_success_resets_only_count() {

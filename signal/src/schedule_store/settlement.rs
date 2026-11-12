@@ -174,18 +174,11 @@ pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStore
         return Err(ScheduleStoreError::Conflict);
     }
     let paused = !failures.pause_reasons.is_empty();
-    let task_status = if matches!(
-        task.status.as_str(),
-        "deleted" | "expired" | "pending_review"
-    ) {
-        &task.status
-    } else if paused {
-        "paused"
-    } else if task.next_run_at.is_some() {
-        "active"
-    } else {
-        "completed"
-    };
+    let task_status = desk_diagnose_core::schedule::lifecycle::settled_task_status(
+        &task.status,
+        paused,
+        task.next_run_at.is_some(),
+    );
     let changed = entity::Entity::update_many()
         .set(entity::ActiveModel {
             status: Set(task_status.into()),
