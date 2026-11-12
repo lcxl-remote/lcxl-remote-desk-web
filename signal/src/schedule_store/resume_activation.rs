@@ -163,7 +163,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        Self::retrieval_consent(task)?;
+        desk_assistant_data_store::schedule::retrieval_consent(task)?;
         let mut failures: FailureState = serde_json::from_str(&task.failure_state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if resume {
@@ -277,7 +277,7 @@ pub(super) async fn lock_original_requirement(
     owner: i32,
     task: &entity::Model,
 ) -> Result<(), ScheduleStoreError> {
-    let subject = super::ScheduleStore::continuation_subject(task)?;
+    let subject = desk_assistant_data_store::schedule::continuation_subject(task)?;
     let source = task
         .source_conversation_id
         .as_deref()

@@ -819,23 +819,7 @@ async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnec
         crate::entity::agent_task_budget_reservation::Entity,
     )
     .await?;
-    let index = Index::create()
-        .name("idx_agent_schedule_due")
-        .table(agent_schedule::Entity)
-        .col(agent_schedule::Column::Status)
-        .col(agent_schedule::Column::NextRunAt)
-        .col(agent_schedule::Column::Id)
-        .to_owned();
-    db.execute(&index).await?;
-    use crate::entity::agent_task_budget_reservation as budget;
-    let budget_index = Index::create()
-        .name("idx_task_budget_schedule_day")
-        .table(budget::Entity)
-        .col(budget::Column::ScheduleId)
-        .col(budget::Column::Kind)
-        .col(budget::Column::UtcDay)
-        .to_owned();
-    db.execute(&budget_index).await?;
+    desk_assistant_data_store::schedule::ensure_indexes(db).await?;
     Ok(())
 }
 

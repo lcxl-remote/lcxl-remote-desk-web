@@ -9,8 +9,8 @@ pub mod agent_goal_run;
 pub mod agent_grant_reservation;
 pub mod agent_permission_resume;
 pub mod agent_run_event;
-pub mod agent_schedule;
-pub mod agent_schedule_run;
+pub use desk_assistant_data_store::entity::agent_schedule;
+pub use desk_assistant_data_store::entity::agent_schedule_run;
 pub mod agent_session;
 pub mod approval_model_probe_observation;
 pub mod device_code;
@@ -19,7 +19,7 @@ pub mod model_egress_receipt;
 pub mod model_probe_observation;
 pub mod turn_usage;
 
-pub mod agent_task_budget_reservation;
+pub use desk_assistant_data_store::entity::agent_task_budget_reservation;
 
 pub mod agent_file_recovery_cleanup;
 pub mod agent_file_recovery_scope;

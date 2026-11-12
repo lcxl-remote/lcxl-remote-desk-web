@@ -327,7 +327,8 @@ impl ScheduleStore {
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let failure: FailureState = serde_json::from_str(&task.failure_state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let consent = Self::retrieval_consent(&task)?.ok_or(ScheduleStoreError::Conflict)?;
+        let consent = desk_assistant_data_store::schedule::retrieval_consent(&task)?
+            .ok_or(ScheduleStoreError::Conflict)?;
         let source = task
             .source_conversation_id
             .as_deref()

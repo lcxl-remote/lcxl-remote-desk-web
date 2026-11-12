@@ -186,7 +186,7 @@ impl ScheduleStore {
         let subject = if fresh {
             snapshot.target_device_id.clone()
         } else {
-            Self::continuation_subject(&snapshot)?
+            desk_assistant_data_store::schedule::continuation_subject(&snapshot)?
         };
         let actor = lease.owner.to_string();
         let Some(row) = session_row::Entity::find()

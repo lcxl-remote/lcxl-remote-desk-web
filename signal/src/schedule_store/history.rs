@@ -48,7 +48,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::NotFound);
         }
         let subject = if frozen.kind == "conversation_resume" {
-            Self::continuation_subject(&frozen)?
+            desk_assistant_data_store::schedule::continuation_subject(&frozen)?
         } else {
             frozen.target_device_id
         };

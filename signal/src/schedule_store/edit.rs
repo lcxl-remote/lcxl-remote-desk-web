@@ -277,7 +277,8 @@ impl ScheduleStore {
                 .checked_add(1)
                 .ok_or(ScheduleStoreError::Invalid)?;
             patch.task_revision = Set(task_revision);
-            if let Some(mut consent) = Self::retrieval_consent(&row)? {
+            if let Some(mut consent) = desk_assistant_data_store::schedule::retrieval_consent(&row)?
+            {
                 // Editing a requirement keeps its original narrower consent.
                 // It cannot pick up scopes enabled after task creation.
                 consent.task_revision = task_revision

@@ -152,7 +152,8 @@ async fn validate_continuation_action_on(
             .scheduled_request
             .as_ref()
             .is_none_or(|binding| binding.execution_target.device_id != task.target_device_id)
-        || super::ScheduleStore::continuation_subject(&task).map_err(|_| invalid())?
+        || desk_assistant_data_store::schedule::continuation_subject(&task)
+            .map_err(|_| invalid())?
             != session.device_id
         || task.source_conversation_id.as_deref() != Some(conversation_id)
         || task.requirement_revision != i64::try_from(session.input_revision).ok()
@@ -275,7 +276,7 @@ impl super::ScheduleStore {
             .ok_or_else(invalid)?;
         let snapshot: entity::Model =
             serde_json::from_str(&work.task_snapshot_json).map_err(|_| invalid())?;
-        let consent = Self::retrieval_consent(&task)
+        let consent = desk_assistant_data_store::schedule::retrieval_consent(&task)
             .map_err(|_| invalid())?
             .ok_or_else(invalid)?;
         if work.owner_user_id.to_string() != session.actor_id
@@ -359,7 +360,7 @@ impl super::ScheduleStore {
                 "scheduled retrieval task snapshot changed".into(),
             ));
         }
-        let consent = Self::retrieval_consent(&task)
+        let consent = desk_assistant_data_store::schedule::retrieval_consent(&task)
             .map_err(|_| invalid())?
             .ok_or_else(invalid)?;
         let fresh = expected.trigger_origin == TriggerOrigin::ScheduledTask;

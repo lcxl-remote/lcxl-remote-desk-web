@@ -6,10 +6,8 @@ use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
 use sea_orm::{
-    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    sea_query::OnConflict,
+    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, sea_query::OnConflict,
 };
-use sha2::{Digest, Sha256};
 
 mod authority;
 mod history;
@@ -54,7 +52,6 @@ mod subject;
 pub use resume_activation::ProposalDecider;
 pub use subject::{SignalTaskSubjectVerifier, TaskSubjectVerifier};
 mod queue;
-mod recovery;
 mod resume_admission;
 pub(crate) use resume_admission::{fresh_action_authority_on, lock_action_session};
 mod continuation_candidates;
@@ -63,30 +60,13 @@ mod resume_activation;
 mod resume_claim;
 mod resume_lease;
 pub use continuation_heartbeat::ScheduleHeartbeat;
-pub use recovery::ScheduleAuthorizer;
+pub use desk_assistant_data_store::schedule::ScheduleStoreError;
+use desk_assistant_data_store::schedule::{digest, json, key, valid_digest};
 pub use resume_claim::{ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim};
 pub use resume_lease::{ContinuationLease, FreshTaskLease};
 mod resume_result;
 mod settlement;
 
-#[derive(Debug)]
-pub enum ScheduleStoreError {
-    Invalid,
-    ToolInput(&'static str),
-    NotFound,
-    Conflict,
-    BudgetExceeded,
-    /// A conversation timer would run after its source session expires.
-    ExceedsSessionRetention {
-        max_delay_seconds: u64,
-    },
-    Backend(DbErr),
-}
-impl From<DbErr> for ScheduleStoreError {
-    fn from(error: DbErr) -> Self {
-        Self::Backend(error)
-    }
-}
 /// A conversation timer must run before its source session can be reclaimed.
 /// Checked under the caller's transaction against the current window.
 pub(super) async fn check_resume_retention(
@@ -103,32 +83,6 @@ pub(super) async fn check_resume_retention(
     .map_err(|exceeded| ScheduleStoreError::ExceedsSessionRetention {
         max_delay_seconds: exceeded.max_delay_seconds,
     })
-}
-
-/// A bounded, trimmed identifier without control characters.
-fn key(value: &str) -> Result<(), ScheduleStoreError> {
-    if value.is_empty()
-        || value.len() > 256
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        return Err(ScheduleStoreError::Invalid);
-    }
-    Ok(())
-}
-
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-fn json<T: serde::Serialize>(value: &T) -> Result<String, ScheduleStoreError> {
-    serde_json::to_string(value).map_err(|_| ScheduleStoreError::Invalid)
-}
-fn digest(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 #[derive(Clone)]
@@ -577,42 +531,6 @@ impl ScheduleStore {
         seed.memory_state_generation = data::unsigned(runtime.memory_state_generation)?;
         seed.control_generation = data::unsigned(runtime.control_generation)?;
         consent.encode().map_err(data::AssistantStoreError::Invalid)
-    }
-
-    pub(super) fn continuation_subject(task: &entity::Model) -> Result<String, ScheduleStoreError> {
-        Self::retrieval_consent(task)?
-            .map(|consent| consent.source_session_device_id)
-            .ok_or(ScheduleStoreError::Invalid)
-    }
-
-    pub(super) fn retrieval_consent(
-        task: &entity::Model,
-    ) -> Result<
-        Option<desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent>,
-        ScheduleStoreError,
-    > {
-        use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
-        let Some(raw) = task.retrieval_consent_json.as_deref() else {
-            return Ok(None);
-        };
-        let consent = TaskRetrievalConsent::decode(raw).map_err(|_| ScheduleStoreError::Invalid)?;
-        consent
-            .validate_definition(
-                &task.schedule_id,
-                task.task_revision
-                    .try_into()
-                    .map_err(|_| ScheduleStoreError::Invalid)?,
-                &task.owner_user_id.to_string(),
-                &task.target_device_id,
-                consent.source_conversation_id.as_deref(),
-            )
-            .map_err(|_| ScheduleStoreError::Conflict)?;
-        if task.kind == "conversation_resume"
-            && task.source_conversation_id.as_deref() != consent.source_conversation_id.as_deref()
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        Ok(Some(consent))
     }
 
     pub async fn read(
@@ -1067,7 +985,7 @@ pub(crate) mod tests {
         let mut revised = consent;
         revised.task_revision += 1;
         assert_eq!(
-            ScheduleStore::retrieval_consent(&edited).unwrap(),
+            desk_assistant_data_store::schedule::retrieval_consent(&edited).unwrap(),
             Some(revised)
         );
     }

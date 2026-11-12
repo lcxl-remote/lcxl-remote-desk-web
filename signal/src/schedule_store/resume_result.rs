@@ -306,7 +306,7 @@ impl ScheduleStore {
             || session.actor_id != lease.owner.to_string()
             || row.actor_id != session.actor_id
             || session.device_id
-                != super::ScheduleStore::continuation_subject(&task)
+                != desk_assistant_data_store::schedule::continuation_subject(&task)
                     .map_err(|_| ScheduleStoreError::Invalid)?
             || row.device_id != session.device_id
             || session.conversation_id != work.conversation_id

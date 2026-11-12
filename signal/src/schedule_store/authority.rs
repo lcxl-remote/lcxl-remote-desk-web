@@ -294,7 +294,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        Self::retrieval_consent(&task)?;
+        desk_assistant_data_store::schedule::retrieval_consent(&task)?;
         let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if snapshot.schedule_id != task.schedule_id

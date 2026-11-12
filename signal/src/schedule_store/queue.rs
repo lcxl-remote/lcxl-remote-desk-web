@@ -389,7 +389,7 @@ impl ScheduleStore {
         if work.conversation_id != work.run_id || work.turn_id != format!("{}-turn", work.run_id) {
             return Err(ScheduleStoreError::Conflict);
         }
-        Self::retrieval_consent(&schedule)?;
+        desk_assistant_data_store::schedule::retrieval_consent(&schedule)?;
         let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if work.owner_user_id != schedule.owner_user_id

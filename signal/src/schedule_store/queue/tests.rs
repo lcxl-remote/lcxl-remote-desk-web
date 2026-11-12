@@ -1,20 +1,10 @@
 use super::*;
 
-struct Allow;
-#[async_trait::async_trait(?Send)]
-impl super::super::ScheduleAuthorizer for Allow {
-    async fn authorize(
-        &self,
-        _: &crate::config::connection::DatabaseTransaction,
-        _: &entity::Model,
-    ) -> Result<(), ScheduleStoreError> {
-        Ok(())
-    }
-}
-struct Deny;
-#[async_trait::async_trait(?Send)]
-impl super::super::ScheduleAuthorizer for Deny {
-    async fn authorize(
+use super::super::tests::AcceptSubject;
+struct DenySubject;
+#[async_trait::async_trait]
+impl super::super::TaskSubjectVerifier for DenySubject {
+    async fn lock_subject(
         &self,
         _: &crate::config::connection::DatabaseTransaction,
         _: &entity::Model,
@@ -24,7 +14,7 @@ impl super::super::ScheduleAuthorizer for Deny {
 }
 
 #[tokio::test]
-async fn resume_requires_current_authority_and_starts_a_fresh_future_epoch() {
+async fn resume_requires_the_current_subject_and_starts_a_fresh_future_epoch() {
     use desk_agent_protocol::schedule::SchedulePauseReason;
     let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
@@ -40,13 +30,13 @@ async fn resume_requires_current_authority_and_starts_a_fresh_future_epoch() {
     let paused = store.pause(1, &task.schedule_id, 1, now).await.unwrap();
     assert!(matches!(
         store
-            .resume(1, &task.schedule_id, paused.revision, &Deny)
+            .resume_task(1, &task.schedule_id, paused.revision, &DenySubject)
             .await,
         Err(ScheduleStoreError::Invalid)
     ));
     assert_eq!(store.read(1, &task.schedule_id).await.unwrap(), paused);
     let resumed = store
-        .resume(1, &task.schedule_id, paused.revision, &Allow)
+        .resume_task(1, &task.schedule_id, paused.revision, &AcceptSubject)
         .await
         .unwrap();
     assert_eq!(resumed.status, "active");
@@ -71,7 +61,7 @@ async fn resume_requires_current_authority_and_starts_a_fresh_future_epoch() {
         .unwrap();
     assert!(matches!(
         store
-            .resume(1, &task.schedule_id, resumed.revision, &Allow)
+            .resume_task(1, &task.schedule_id, resumed.revision, &AcceptSubject)
             .await,
         Err(ScheduleStoreError::Conflict)
     ));
@@ -97,9 +87,11 @@ async fn past_once_cannot_resume_until_explicitly_rescheduled() {
     let paused = store.pause(1, &task.schedule_id, 1, now).await.unwrap();
     assert!(matches!(
         store
-            .resume(1, &task.schedule_id, paused.revision, &Allow)
+            .resume_task(1, &task.schedule_id, paused.revision, &AcceptSubject)
             .await,
-        Err(ScheduleStoreError::Invalid)
+        Err(ScheduleStoreError::ToolInput(
+            desk_diagnose_core::schedule::proposal::NO_FUTURE_OCCURRENCE
+        ))
     ));
     let spec = ScheduleSpec {
         schema_version: 1,
@@ -114,7 +106,7 @@ async fn past_once_cannot_resume_until_explicitly_rescheduled() {
         .await
         .unwrap();
     let resumed = store
-        .resume(1, &task.schedule_id, edited.revision, &Allow)
+        .resume_task(1, &task.schedule_id, edited.revision, &AcceptSubject)
         .await
         .unwrap();
     assert_eq!(resumed.next_run_at, Some(now + 600_000));

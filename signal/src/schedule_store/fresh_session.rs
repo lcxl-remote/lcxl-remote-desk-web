@@ -137,7 +137,8 @@ impl ScheduleStore {
                 &(&config.metadata.instance, &task.target_device_id),
             )
         };
-        let consent = Self::retrieval_consent(&task)?.ok_or(ScheduleStoreError::Invalid)?;
+        let consent = desk_assistant_data_store::schedule::retrieval_consent(&task)?
+            .ok_or(ScheduleStoreError::Invalid)?;
         if consent
             .source_device_ref
             .as_deref()
@@ -338,7 +339,8 @@ impl ScheduleStore {
             ai_assistant::scheduled_retrieval::{RetrievalOccurrence, ScheduledRetrievalKind},
             native_ids::{self, Kind},
         };
-        let consent = Self::retrieval_consent(task)?.ok_or(ScheduleStoreError::Conflict)?;
+        let consent = desk_assistant_data_store::schedule::retrieval_consent(task)?
+            .ok_or(ScheduleStoreError::Conflict)?;
         let Some(_) = &consent.assistant_seed else {
             return Ok(());
         };
