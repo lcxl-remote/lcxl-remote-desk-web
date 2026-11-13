@@ -158,6 +158,28 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     {
         unreachable!()
     }
+    async fn lock_child_source(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<(), DbErr> {
+        unreachable!()
+    }
+    async fn owns_device(&self, _: &DatabaseConnection, _: i32, _: &str) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn has_open_actions(&self, _: &DatabaseConnection, _: &str) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn close_wait_decision(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &str,
+        _: i64,
+    ) -> Result<(), ScheduleStoreError> {
+        unreachable!()
+    }
     async fn check_resume_retention(
         &self,
         _: &DatabaseConnection,

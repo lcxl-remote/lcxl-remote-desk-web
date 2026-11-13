@@ -7,10 +7,13 @@ use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
 use sea_orm::{ConnectionTrait, DbErr, sea_query::Index};
 use sha2::{Digest, Sha256};
 
+mod approval_admission;
+mod approval_request;
 mod authority;
 mod budget;
 mod cancellation;
 mod candidates;
+mod continuation_wait;
 mod device_wait;
 mod directory_receipt;
 mod edit;
@@ -20,11 +23,14 @@ mod proposal_review;
 mod queue;
 mod receipt_context;
 mod resume_activation;
+mod resume_admission;
 mod resume_lease;
 mod review_wait;
 mod search;
 pub mod session;
 mod task;
+pub use approval_admission::{TaskApprovalReview, lock_fresh_approval_on};
+pub use approval_request::{validate_task_directory_on, validate_task_permission_on};
 pub use authority::{
     CurrentDelegationSourceAuthority, CurrentTaskAuthority, PendingTaskApproval, authority_now,
     lock_delegation_source_authority, lock_run_authority, lock_waiting_approval,
@@ -37,6 +43,7 @@ pub use cancellation::{expired_pending, record_run_cancellation_on};
 pub use candidates::{
     continuation_candidates, expired_continuation_candidates, fresh_task_candidates,
 };
+pub use continuation_wait::{cancel_continuation_wait_on, lock_approval_on};
 pub use device_wait::wait_for_device_on;
 pub use directory_receipt::verify_directory_receipt_on;
 pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};
@@ -54,6 +61,10 @@ pub use receipt_context::TaskReceiptContext;
 pub use resume_activation::{
     ProposalDecider, activate_on, decide_proposal_on, find_task, lock_original_requirement,
     record_decision_on,
+};
+pub use resume_admission::{
+    assistant_retrieval_deadline_on, fresh_action_authority_on, lock_action_session,
+    same_retrieval_definition, scheduled_context_on,
 };
 pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
 pub use review_wait::{ReviewPoll, poll_review_decision_on};

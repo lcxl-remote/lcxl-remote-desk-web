@@ -2,7 +2,7 @@
 //! transaction serializes writers, so the lock hooks are no-ops.
 use super::{ScheduleStore, ScheduleStoreError};
 use crate::config::connection::DatabaseTransaction;
-use crate::entity::{agent_run_event, agent_session};
+use crate::entity::{agent_action_item, agent_exec_task, agent_run_event, agent_session};
 use desk_assistant_data_store::schedule::session::{
     OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch, SessionRow,
     SessionRows, TouchColumn,
@@ -186,6 +186,65 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
             return Err(ScheduleStoreError::Conflict);
         }
         Ok(receipt)
+    }
+
+    async fn lock_child_source(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<(), DbErr> {
+        crate::agent_subagent_store::lock_child_source_on(txn, session).await
+    }
+
+    async fn owns_device(&self, _: &DatabaseTransaction, _: i32, _: &str) -> Result<bool, DbErr> {
+        Ok(true)
+    }
+
+    /// Settled actions and finished exec tasks only; unresolved effects block.
+    async fn has_open_actions(
+        &self,
+        txn: &DatabaseTransaction,
+        conversation: &str,
+    ) -> Result<bool, DbErr> {
+        let actions = agent_action_item::Entity::find()
+            .filter(agent_action_item::Column::ConversationId.eq(conversation))
+            .lock_exclusive()
+            .all(txn)
+            .await?;
+        Ok(actions.iter().any(|action| {
+            !matches!(
+                action.status.as_str(),
+                "done"
+                    | "rejected"
+                    | "expired"
+                    | "cancelled"
+                    | "capability_succeeded"
+                    | "capability_failed"
+                    | "capability_superseded_before_intent"
+                    | "capability_revoked_before_intent"
+            )
+        }) || agent_exec_task::Entity::find()
+            .filter(agent_exec_task::Column::ConversationId.eq(conversation))
+            .filter(agent_exec_task::Column::Status.ne("done"))
+            .lock_exclusive()
+            .one(txn)
+            .await?
+            .is_some())
+    }
+
+    async fn close_wait_decision(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), ScheduleStoreError> {
+        let timestamp = desk_assistant_data_store::schedule::session::timestamp(now_ms)?;
+        crate::agent_session_store::permission_resume::close_wait_decision_on(
+            txn, session, request_id, timestamp,
+        )
+        .await
+        .map_err(|_| ScheduleStoreError::Conflict)
     }
 
     async fn check_resume_retention(

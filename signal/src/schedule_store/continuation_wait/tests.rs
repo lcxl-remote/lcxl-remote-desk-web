@@ -1,9 +1,12 @@
 use super::*;
+use crate::entity::{agent_action_item, agent_exec_task, agent_schedule_run as run, agent_session};
 use desk_agent_protocol::{AgentScope, ExecutionMode};
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
+use desk_diagnose_core::session::PersistedAgentSession;
 use desk_diagnose_core::session::TurnState;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
+use sea_orm::{EntityTrait, Set};
 
 async fn fixture() -> (ScheduleStore, run::Model, PersistedAgentSession) {
     let (store, queued, _, _) = super::super::resume_claim::tests::fixture().await;
@@ -84,7 +87,14 @@ async fn cancellation_withdraws_wait_and_releases_slot_once() {
     let txn = crate::db::begin_write(&store.db, entity::Entity)
         .await
         .unwrap();
-    lock_approval_on(&txn, &session, "wait").await.unwrap();
+    desk_assistant_data_store::schedule::lock_approval_on(
+        &super::super::SignalScheduleHost,
+        &txn,
+        &session,
+        "wait",
+    )
+    .await
+    .unwrap();
     txn.commit().await.unwrap();
     let cancelled = store.cancel_run(1, &work.run_id).await.unwrap();
     assert_eq!(cancelled.status, "cancelled");
@@ -107,7 +117,16 @@ async fn cancellation_withdraws_wait_and_releases_slot_once() {
     let txn = crate::db::begin_write(&store.db, entity::Entity)
         .await
         .unwrap();
-    assert!(lock_approval_on(&txn, &session, "wait").await.is_err());
+    assert!(
+        desk_assistant_data_store::schedule::lock_approval_on(
+            &super::super::SignalScheduleHost,
+            &txn,
+            &session,
+            "wait"
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -119,7 +138,16 @@ async fn durable_cancel_intent_blocks_late_approval_before_cleanup() {
     let txn = crate::db::begin_write(&store.db, entity::Entity)
         .await
         .unwrap();
-    assert!(lock_approval_on(&txn, &session, "wait").await.is_err());
+    assert!(
+        desk_assistant_data_store::schedule::lock_approval_on(
+            &super::super::SignalScheduleHost,
+            &txn,
+            &session,
+            "wait"
+        )
+        .await
+        .is_err()
+    );
     txn.rollback().await.unwrap();
     assert_eq!(store.scan_wait_expiry_once(0).await.unwrap().expired, 1);
     assert_eq!(store.scan_wait_expiry_once(0).await.unwrap().expired, 0);

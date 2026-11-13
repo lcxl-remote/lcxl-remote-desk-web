@@ -153,6 +153,26 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         spec: &desk_agent_protocol::schedule::ScheduleSpec,
         now_ms: i64,
     ) -> Result<(), ScheduleStoreError>;
+    /// Locks a delegated child's scheduled source before its session fence.
+    async fn lock_child_source(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<(), DbErr>;
+    /// Manager: the device row's owner is `owner` (an unparsable id is not).
+    /// OSS has a single account and always returns true.
+    async fn owns_device(&self, txn: &C, owner: i32, device: &str) -> Result<bool, DbErr>;
+    /// Unfinished device actions on the conversation, locked for the caller.
+    async fn has_open_actions(&self, txn: &C, conversation: &str) -> Result<bool, DbErr>;
+    /// Closes the owner's pending permission decision for a cancelled wait.
+    /// Every refusal, including a backend error, is a Conflict.
+    async fn close_wait_decision(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), ScheduleStoreError>;
     /// The owner's prompt retention record for a fresh task's requirement.
     async fn owner_prompt_retention(
         &self,
