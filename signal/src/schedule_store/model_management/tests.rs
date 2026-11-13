@@ -1,7 +1,16 @@
+use super::super::entity;
 use super::*;
+use crate::entity::agent_schedule_run as run;
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
+use desk_assistant_data_store::schedule::managed_task_view as view;
+use desk_diagnose_core::{
+    model_observability::tool::ToolObservation, schedule::management_tools::Action,
+    session::PersistedAgentSession,
+};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, TransactionTrait};
+use sea_orm::{EntityTrait, Set};
+use serde_json::{Value, json};
 
 async fn fixture(
     ai: bool,

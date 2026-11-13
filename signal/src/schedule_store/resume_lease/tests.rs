@@ -1,7 +1,9 @@
 use super::super::{ClaimedContinuation, ContinuationClaim};
 use super::*;
+use crate::entity::{agent_schedule_run as run, agent_session as session_row};
 use desk_agent_protocol::{AgentScope, ExecutionMode};
 use sea_orm::{ActiveModelTrait, ConnectionTrait};
+use sea_orm::{EntityTrait, Set};
 
 async fn fixture() -> (ScheduleStore, ClaimedContinuation, session_row::Model) {
     let (store, queued, row, _) = super::super::resume_claim::tests::fixture().await;

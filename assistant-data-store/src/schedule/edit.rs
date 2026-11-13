@@ -1,0 +1,326 @@
+//! Versioned task edits and tombstones preserve immutable running snapshots.
+use super::{
+    ScheduleStoreError, json,
+    queue::database_now,
+    resume_activation::{ProposalDecider, lock_original_requirement, record_decision_on},
+    session::ScheduleHostStores,
+    task::read,
+};
+use crate::entity::{agent_schedule as entity, agent_schedule_run as run};
+use desk_agent_protocol::schedule::ScheduleSpec;
+use desk_diagnose_core::schedule::{normalize, validate_publication};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
+
+/// Called only while the task's version CAS owns the transaction.
+pub async fn stop_pending<C: ConnectionTrait>(
+    txn: &C,
+    work: &run::Model,
+    now: i64,
+    request_running_cancel: bool,
+) -> Result<bool, ScheduleStoreError> {
+    let unstarted = matches!(work.status.as_str(), "queued" | "waiting_device");
+    if !unstarted && !request_running_cancel {
+        return Ok(false);
+    }
+    if work.failure_accounted {
+        return Ok(false);
+    }
+    let changed = run::Entity::update_many()
+        .set(run::ActiveModel {
+            status: Set(if unstarted {
+                "cancelled".into()
+            } else {
+                work.status.clone()
+            }),
+            cancel_requested_at: Set(Some(now)),
+            failure_accounted: Set(unstarted),
+            finished_at: Set(if unstarted {
+                Some(now)
+            } else {
+                work.finished_at
+            }),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .filter(run::Column::Id.eq(work.id))
+        .filter(run::Column::LeaseEpoch.eq(work.lease_epoch))
+        .filter(run::Column::Status.eq(&work.status))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    Ok(unstarted)
+}
+
+/// Change failure policy only between runs. This never clears pauses or
+/// changes the recovery epoch, and it cannot revive a completed occurrence.
+pub async fn set_failure_threshold_on<C: ConnectionTrait>(
+    txn: &C,
+    owner: i32,
+    id: &str,
+    expected: i64,
+    threshold: u32,
+) -> Result<entity::Model, ScheduleStoreError> {
+    let task = entity::Entity::find()
+        .filter(entity::Column::OwnerUserId.eq(owner))
+        .filter(entity::Column::ScheduleId.eq(id))
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    if task.revision != expected
+        || task.active_run_id.is_some()
+        || matches!(
+            task.status.as_str(),
+            "deleted" | "completed" | "expired" | "pending_review"
+        )
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let mut failures: desk_diagnose_core::schedule::lifecycle::FailureState =
+        serde_json::from_str(&task.failure_state_json).map_err(|_| ScheduleStoreError::Invalid)?;
+    failures
+        .set_threshold(threshold)
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+    let paused = !failures.pause_reasons.is_empty();
+    let now = database_now(txn).await?;
+    let changed = entity::Entity::update_many()
+        .set(entity::ActiveModel {
+            failure_state_json: Set(json(&failures)?),
+            revision: Set(expected.checked_add(1).ok_or(ScheduleStoreError::Invalid)?),
+            next_run_at: Set(if paused { None } else { task.next_run_at }),
+            status: Set(
+                if paused && matches!(task.status.as_str(), "active" | "triggered" | "paused") {
+                    "paused".into()
+                } else {
+                    task.status
+                },
+            ),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .filter(entity::Column::Id.eq(task.id))
+        .filter(entity::Column::Revision.eq(expected))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let result = entity::Entity::find_by_id(task.id)
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    Ok(result)
+}
+
+pub async fn rename<C: ConnectionTrait>(
+    db: &C,
+    owner: i32,
+    id: &str,
+    expected: i64,
+    title: &str,
+) -> Result<entity::Model, ScheduleStoreError> {
+    if title.trim().is_empty() || title.len() > 240 {
+        return Err(ScheduleStoreError::Invalid);
+    }
+    let revision = expected.checked_add(1).ok_or(ScheduleStoreError::Invalid)?;
+    let now = database_now(db).await?;
+    let changed = entity::Entity::update_many()
+        .set(entity::ActiveModel {
+            title: Set(title.into()),
+            revision: Set(revision),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .filter(entity::Column::OwnerUserId.eq(owner))
+        .filter(entity::Column::ScheduleId.eq(id))
+        .filter(entity::Column::Revision.eq(expected))
+        .filter(entity::Column::Status.is_not_in(["deleted", "pending_review"]))
+        .exec(db)
+        .await?;
+    if changed.rows_affected != 1 {
+        read(db, owner, id).await?;
+        return Err(ScheduleStoreError::Conflict);
+    }
+    read(db, owner, id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn edit_on<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
+    owner: i32,
+    id: &str,
+    expected: i64,
+    new_spec: Option<&ScheduleSpec>,
+    prompt: Option<&str>,
+    delete: bool,
+) -> Result<entity::Model, ScheduleStoreError> {
+    let now = database_now(txn).await?;
+    let row = entity::Entity::find()
+        .filter(entity::Column::OwnerUserId.eq(owner))
+        .filter(entity::Column::ScheduleId.eq(id))
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    if row.revision != expected {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if row.status == "deleted" {
+        if delete {
+            return Ok(row);
+        }
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if matches!(
+        row.status.as_str(),
+        "completed" | "expired" | "pending_review"
+    ) && !delete
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if prompt == Some(row.prompt.as_str()) {
+        return Ok(row);
+    }
+    // A conversation timer's row is written under its conversation lock,
+    // taken before the revision CAS below.
+    if row.kind == "conversation_resume"
+        && let Some(source) = row.source_conversation_id.as_deref()
+    {
+        host.lock_conversation(txn, source).await?;
+    }
+    // Deleting a pending proposal writes the decision to its proposing turn.
+    if delete
+        && row.status == "pending_review"
+        && let Some(conversation) = row.proposal_conversation_id.as_deref()
+    {
+        host.lock_conversation(txn, conversation).await?;
+    }
+    if let Some(spec) = new_spec {
+        let normalized = normalize(spec).map_err(|_| ScheduleStoreError::Invalid)?;
+        if json(&normalized)? == row.spec_json {
+            return Ok(row);
+        }
+    }
+    let work = if let Some(run_id) = row.active_run_id.as_deref() {
+        run::Entity::find()
+            .filter(run::Column::RunId.eq(run_id))
+            .one(txn)
+            .await?
+    } else {
+        None
+    };
+    let unstarted = work
+        .as_ref()
+        .is_some_and(|w| matches!(w.status.as_str(), "queued" | "waiting_device"));
+    if prompt.is_some()
+        && row.kind == "conversation_resume"
+        && row.active_run_id.is_some()
+        && !unstarted
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if row.status == "triggered" && new_spec.is_some() && !unstarted {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let mut patch = entity::ActiveModel {
+        revision: Set(expected.checked_add(1).ok_or(ScheduleStoreError::Invalid)?),
+        updated_at: Set(now),
+        active_run_id: Set(if unstarted {
+            None
+        } else {
+            row.active_run_id.clone()
+        }),
+        ..Default::default()
+    };
+    if delete {
+        patch.status = Set("deleted".into());
+        patch.next_run_at = Set(None);
+    }
+    if let Some(prompt) = prompt {
+        let prompt_actor = owner.to_string();
+        patch.prompt = Set(prompt.into());
+        patch.prompt_retention_json = Set(if row.kind == "fresh_task" {
+            Some(
+                desk_diagnose_core::future::send_phase(|| {
+                    host.owner_prompt_retention(txn, &prompt_actor, &row.target_device_id)
+                })
+                .await?,
+            )
+        } else {
+            None
+        });
+        let task_revision = row
+            .task_revision
+            .checked_add(1)
+            .ok_or(ScheduleStoreError::Invalid)?;
+        patch.task_revision = Set(task_revision);
+        if let Some(mut consent) = super::retrieval_consent(&row)? {
+            // Editing a requirement keeps its original narrower consent.
+            // It cannot pick up scopes enabled after task creation.
+            consent.task_revision = task_revision
+                .try_into()
+                .map_err(|_| ScheduleStoreError::Invalid)?;
+            patch.retrieval_consent_json = Set(Some(
+                consent.encode().map_err(|_| ScheduleStoreError::Invalid)?,
+            ));
+        }
+    }
+    if let Some(spec) = new_spec {
+        let normalized = normalize(spec).map_err(|_| ScheduleStoreError::Invalid)?;
+        if row.kind == "conversation_resume"
+            && !matches!(
+                normalized.rule,
+                desk_agent_protocol::schedule::ScheduleRule::Once { .. }
+                    | desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
+            )
+        {
+            return Err(ScheduleStoreError::Invalid);
+        }
+        if row.kind != "conversation_resume"
+            && matches!(
+                normalized.rule,
+                desk_agent_protocol::schedule::ScheduleRule::AfterConfirmation { .. }
+            )
+        {
+            return Err(ScheduleStoreError::Invalid);
+        }
+        if row.kind == "conversation_resume" {
+            host.check_resume_retention(txn, &normalized, now).await?;
+        }
+        patch.spec_json = Set(json(&normalized)?);
+        if matches!(row.status.as_str(), "active" | "triggered") {
+            let normalized =
+                validate_publication(&normalized, now, row.kind == "conversation_resume")
+                    .map_err(|_| ScheduleStoreError::Invalid)?;
+            patch.spec_json = Set(json(&normalized)?);
+            patch.next_run_at = Set(desk_diagnose_core::schedule::next_after(&normalized, now)
+                .map_err(|_| ScheduleStoreError::Invalid)?);
+            patch.status = Set("active".into());
+            patch.recurrence_cursor_at = Set(Some(now));
+        }
+    }
+    let changed = entity::Entity::update_many()
+        .set(patch)
+        .filter(entity::Column::Id.eq(row.id))
+        .filter(entity::Column::Revision.eq(expected))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if prompt.is_some() && row.kind == "conversation_resume" {
+        lock_original_requirement(host, txn, owner, &row).await?;
+    }
+    if let Some(work) = work {
+        stop_pending(txn, &work, now, delete).await?;
+    }
+    let result = entity::Entity::find_by_id(row.id)
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    if delete && row.status == "pending_review" && result.proposal_conversation_id.is_some() {
+        record_decision_on(host, txn, &result, Some(&ProposalDecider::Owner)).await?;
+    }
+    Ok(result)
+}

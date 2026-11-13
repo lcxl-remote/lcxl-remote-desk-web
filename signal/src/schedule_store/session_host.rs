@@ -1,0 +1,208 @@
+//! OSS session rows and stores for the shared schedule rules. One write
+//! transaction serializes writers, so the lock hooks are no-ops.
+use super::{ScheduleStore, ScheduleStoreError};
+use crate::config::connection::DatabaseTransaction;
+use crate::entity::{agent_run_event, agent_session};
+use desk_assistant_data_store::schedule::session::{
+    OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch, SessionRow,
+    SessionRows, TouchColumn,
+};
+use desk_diagnose_core::{
+    file_scope::transaction::{self, FileScopeReceipt},
+    session::PersistedAgentSession,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Select,
+    sea_query::Expr,
+};
+
+/// The OSS host for shared schedule rules.
+pub(crate) struct SignalScheduleHost;
+
+fn row(model: agent_session::Model) -> SessionRow<agent_session::Model> {
+    SessionRow {
+        id: model.id,
+        conversation_id: model.conversation_id.clone(),
+        actor_id: model.actor_id.clone(),
+        device_id: model.device_id.clone(),
+        state_json: model.state_json.clone(),
+        version: model.version,
+        lease_token: model.lease_token,
+        lease_deadline_ms: model.lease_deadline.map(|at| at.timestamp_millis()),
+        personal: true,
+        turn_state: None,
+        raw: model,
+    }
+}
+
+fn guarded<Q: QueryFilter>(mut query: Q, guard: &SessionGuard<'_>) -> Q {
+    if let Some(id) = guard.id {
+        query = query.filter(agent_session::Column::Id.eq(id));
+    }
+    if let Some(conversation) = guard.conversation {
+        query = query.filter(agent_session::Column::ConversationId.eq(conversation));
+    }
+    if let Some(actor) = guard.actor {
+        query = query.filter(agent_session::Column::ActorId.eq(actor));
+    }
+    if let Some(device) = guard.device {
+        query = query.filter(agent_session::Column::DeviceId.eq(device));
+    }
+    if let Some(version) = guard.version {
+        query = query.filter(agent_session::Column::Version.eq(version));
+    }
+    if let Some(token) = guard.lease_token {
+        query = query.filter(agent_session::Column::LeaseToken.eq(token));
+    }
+    if let Some(state) = guard.state_json {
+        query = query.filter(agent_session::Column::StateJson.eq(state));
+    }
+    query
+}
+
+#[async_trait::async_trait]
+impl<C: ConnectionTrait> ScheduleLocks<C> for SignalScheduleHost {
+    async fn lock_conversation(&self, _: &C, _: &str) -> Result<(), DbErr> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<C: ConnectionTrait> SessionRows<C> for SignalScheduleHost {
+    type Row = agent_session::Model;
+
+    async fn find_session(
+        &self,
+        txn: &C,
+        key: SessionKey<'_>,
+        _: OrgMode,
+        exclusive: bool,
+    ) -> Result<Option<SessionRow<agent_session::Model>>, DbErr> {
+        let mut query: Select<agent_session::Entity> = match key {
+            SessionKey::Id(id) => agent_session::Entity::find_by_id(id),
+            SessionKey::Conversation {
+                conversation,
+                actor,
+                device,
+            } => {
+                let mut query = agent_session::Entity::find()
+                    .filter(agent_session::Column::ConversationId.eq(conversation));
+                if let Some(actor) = actor {
+                    query = query.filter(agent_session::Column::ActorId.eq(actor));
+                }
+                if let Some(device) = device {
+                    query = query.filter(agent_session::Column::DeviceId.eq(device));
+                }
+                query
+            }
+        };
+        if exclusive {
+            query = query.lock_exclusive();
+        }
+        Ok(query.one(txn).await?.map(row))
+    }
+
+    async fn touch_session(
+        &self,
+        txn: &C,
+        column: TouchColumn,
+        guard: SessionGuard<'_>,
+    ) -> Result<u64, DbErr> {
+        let column = match column {
+            TouchColumn::Version => agent_session::Column::Version,
+            TouchColumn::LeaseToken => agent_session::Column::LeaseToken,
+        };
+        let update = agent_session::Entity::update_many().col_expr(column, Expr::col(column));
+        Ok(guarded(update, &guard).exec(txn).await?.rows_affected)
+    }
+
+    async fn write_session(
+        &self,
+        txn: &C,
+        guard: SessionGuard<'_>,
+        patch: SessionPatch<'_>,
+    ) -> Result<u64, DbErr> {
+        let mut update = agent_session::Entity::update_many();
+        if let Some(state) = patch.state_json {
+            update = update.col_expr(agent_session::Column::StateJson, Expr::value(state));
+        }
+        if let Some(version) = patch.version {
+            update = update.col_expr(agent_session::Column::Version, Expr::value(version));
+        }
+        if let Some(token) = patch.lease_token {
+            update = update.col_expr(agent_session::Column::LeaseToken, Expr::value(token));
+        }
+        if let Some(deadline) = patch.lease_deadline_ms {
+            let deadline = deadline
+                .map(chrono::DateTime::from_timestamp_millis)
+                .map(|at| at.ok_or_else(|| DbErr::Custom("invalid lease deadline".into())))
+                .transpose()?;
+            update = update.col_expr(agent_session::Column::LeaseDeadline, Expr::value(deadline));
+        }
+        if let Some(at) = patch.updated_at_ms {
+            let at = chrono::DateTime::from_timestamp_millis(at)
+                .ok_or_else(|| DbErr::Custom("invalid update time".into()))?;
+            update = update.col_expr(agent_session::Column::UpdatedAt, Expr::value(at));
+        }
+        Ok(guarded(update, &guard).exec(txn).await?.rows_affected)
+    }
+}
+
+#[async_trait::async_trait]
+impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
+    async fn directory_receipt(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<FileScopeReceipt, ScheduleStoreError> {
+        let subject = session
+            .file_scope_subject(
+                &session.actor_id,
+                &session.device_id,
+                &session.conversation_id,
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let stored = agent_run_event::Entity::find()
+            .filter(
+                agent_run_event::Column::EventId
+                    .eq(transaction::receipt_event_id(&subject, request_id)),
+            )
+            .one(txn)
+            .await?
+            .ok_or(ScheduleStoreError::NotFound)?;
+        let receipt: FileScopeReceipt =
+            serde_json::from_str(&stored.payload_json).map_err(|_| ScheduleStoreError::Invalid)?;
+        if stored.kind != transaction::FILE_SCOPE_EVENT_KIND
+            || stored.payload_schema_version != 1
+            || stored.run_id != session.conversation_id
+            || stored.event_id != receipt.event_id
+            || i64::try_from(receipt.event_seq).ok() != Some(stored.event_seq)
+            || receipt.update.subject != subject
+            || receipt.update.client_request_id != request_id
+            || stored.actor_id.as_deref() != Some(session.actor_id.as_str())
+            || stored.correlation_id.as_deref() != Some(request_id)
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(receipt)
+    }
+
+    async fn check_resume_retention(
+        &self,
+        txn: &DatabaseTransaction,
+        spec: &desk_agent_protocol::schedule::ScheduleSpec,
+        now_ms: i64,
+    ) -> Result<(), ScheduleStoreError> {
+        super::check_resume_retention(txn, spec, now_ms).await
+    }
+
+    async fn owner_prompt_retention(
+        &self,
+        txn: &DatabaseTransaction,
+        actor: &str,
+        device: &str,
+    ) -> Result<String, ScheduleStoreError> {
+        ScheduleStore::owner_prompt_retention_on(txn, actor, device).await
+    }
+}

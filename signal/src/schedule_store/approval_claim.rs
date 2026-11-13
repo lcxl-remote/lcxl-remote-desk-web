@@ -62,7 +62,13 @@ impl ScheduleStore {
         let deadline =
             chrono::DateTime::from_timestamp_millis(until).ok_or(ScheduleStoreError::Invalid)?;
         if reference.starts_with("directory:") {
-            super::directory_receipt::verify(txn, &session, request_id).await?;
+            desk_assistant_data_store::schedule::verify_directory_receipt_on(
+                &super::SignalScheduleHost,
+                txn,
+                &session,
+                request_id,
+            )
+            .await?;
         } else {
             let grants =
                 crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(

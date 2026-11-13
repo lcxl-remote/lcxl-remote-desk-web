@@ -67,7 +67,13 @@ pub(super) async fn recover(
         .await
         .map_err(|_| ScheduleStoreError::Conflict)?;
     } else {
-        super::directory_receipt::verify(&txn, &session, &request_id).await?;
+        desk_assistant_data_store::schedule::verify_directory_receipt_on(
+            &super::SignalScheduleHost,
+            &txn,
+            &session,
+            &request_id,
+        )
+        .await?;
     }
     // The same decision must not be recovered as a second pause segment.
     if work.result_ref.as_deref() == Some(reference.as_str()) {

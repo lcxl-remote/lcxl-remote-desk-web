@@ -1,11 +1,14 @@
 use super::*;
+use crate::entity::agent_session as session_row;
 use desk_agent_protocol::{
     AgentScope, ExecutionMode,
     schedule::{ScheduleRule, ScheduledTaskKind},
 };
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
+use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 async fn fixture() -> (
     ScheduleStore,
@@ -84,7 +87,7 @@ async fn activate(
     let txn = crate::db::begin_write(&store.db, entity::Entity).await?;
     let task = find_task(&txn, owner, schedule_id, expected_revision).await?;
     let result = ScheduleStore::activate_on(&txn, owner, &task, false).await?;
-    record_decision_on(&txn, &result, None).await?;
+    record_decision_on(&super::super::SignalScheduleHost, &txn, &result, None).await?;
     txn.commit().await?;
     Ok(result)
 }

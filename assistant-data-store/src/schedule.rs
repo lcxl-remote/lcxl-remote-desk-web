@@ -12,10 +12,18 @@ mod budget;
 mod cancellation;
 mod candidates;
 mod device_wait;
+mod directory_receipt;
+mod edit;
 mod history;
+mod model_management;
+mod proposal_review;
 mod queue;
 mod receipt_context;
+mod resume_activation;
+mod resume_lease;
+mod review_wait;
 mod search;
+pub mod session;
 mod task;
 pub use authority::{
     CurrentDelegationSourceAuthority, CurrentTaskAuthority, PendingTaskApproval, authority_now,
@@ -30,12 +38,25 @@ pub use candidates::{
     continuation_candidates, expired_continuation_candidates, fresh_task_candidates,
 };
 pub use device_wait::wait_for_device_on;
+pub use directory_receipt::verify_directory_receipt_on;
+pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};
 pub use history::{RunHistoryPage, resolve_run_session, run_history};
+pub use model_management::{
+    cancel as cancel_managed_task, list as list_managed_tasks, lock_target,
+    view as managed_task_view,
+};
+pub use proposal_review::{decide_by_ai_on, review_proposal_on};
 pub use queue::{
     BudgetPolicySource, claim_queued_on, database_now, due_candidates, enqueue_manual_on,
     materialize_due_on,
 };
 pub use receipt_context::TaskReceiptContext;
+pub use resume_activation::{
+    ProposalDecider, activate_on, decide_proposal_on, find_task, lock_original_requirement,
+    record_decision_on,
+};
+pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
+pub use review_wait::{ReviewPoll, poll_review_decision_on};
 pub use search::search;
 pub use task::{list, pause_on, read};
 
