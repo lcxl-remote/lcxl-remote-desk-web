@@ -1,4 +1,6 @@
 //! Delegated input, owner approval and command dispatch share the same fence.
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod completion;
 use super::*;
 use crate::{
@@ -84,8 +86,8 @@ async fn approved_child_with_source_on(
     super::input_sources::add_input_tables(&db).await;
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(agent_capability_grant::Entity),
-        schema.create_table_from_entity(agent_grant_reservation::Entity),
+        schema.entity_table(agent_capability_grant::Entity),
+        schema.entity_table(agent_grant_reservation::Entity),
     ] {
         db.execute(table.if_not_exists()).await.unwrap();
     }

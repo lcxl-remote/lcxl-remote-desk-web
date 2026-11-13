@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "run_id")]
     pub run_id: String,
     #[sea_orm(indexed)]
     pub schedule_id: String,
     pub owner_user_id: i32,
     /// Canonical source identity encodes schedule + calendar instant or manual key.
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "occurrence_identity")]
     pub occurrence_identity: String,
     pub source: String,
     pub scheduled_at: Option<i64>,

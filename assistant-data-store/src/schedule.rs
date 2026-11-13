@@ -1,6 +1,8 @@
 //! Scheduled-task storage rules shared by Manager and standalone Signal.
 //! Callers own transactions, locks taken before a rule, and policy sources.
 use crate::entity::{agent_schedule, agent_task_budget_reservation as budget};
+#[cfg(test)]
+use crate::entity_table::EntityTableExt;
 use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
 use sea_orm::{ConnectionTrait, DbErr, sea_query::Index};
 use sha2::{Digest, Sha256};
@@ -135,10 +137,10 @@ mod tests {
         use sea_orm::{ConnectionTrait, Database, Schema};
         let db = Database::connect("sqlite::memory:").await.unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(agent_schedule::Entity))
+        db.execute(&schema.entity_table(agent_schedule::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(budget::Entity))
+        db.execute(&schema.entity_table(budget::Entity))
             .await
             .unwrap();
         ensure_indexes(&db).await.unwrap();

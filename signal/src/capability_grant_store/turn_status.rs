@@ -1,6 +1,8 @@
 //! OSS reads the durable session, using the authenticated host's audience.
 use super::*;
 use desk_agent_protocol::computer_turn::{ComputerActionTurnQuery, ComputerActionTurnState};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::QuerySelect;
 use sea_orm::sea_query::ExprTrait;
 
@@ -98,7 +100,7 @@ mod tests {
             .unwrap();
         let backend = db.get_database_backend();
         let schema = Schema::new(backend);
-        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+        db.execute(&schema.entity_table(agent_session::Entity))
             .await
             .unwrap();
         let now = Utc::now();

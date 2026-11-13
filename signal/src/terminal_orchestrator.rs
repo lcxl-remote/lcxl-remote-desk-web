@@ -23,6 +23,8 @@ use desk_agent_protocol::terminal_ai_assistant::{
 };
 use desk_agent_protocol::terminal_complete::{TerminalCompleteAsk, TerminalCompleteResult};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::chat::{ChatMessage, ModelTurn};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::redaction::{Redactor, RegexRedactor};
@@ -394,11 +396,9 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
-        )
-        .await
-        .unwrap();
+        db.execute(&schema.entity_table(crate::entity::model_probe_observation::Entity))
+            .await
+            .unwrap();
         db
     }
 

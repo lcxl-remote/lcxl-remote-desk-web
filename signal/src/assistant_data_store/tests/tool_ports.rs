@@ -10,6 +10,8 @@ use desk_agent_protocol::ai_assistant::{
     history::{ConversationReadRequest, ConversationSearchRequest},
     user_instructions::AssistantDataSettingsUpdate,
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     ai_assistant::{data_tools, history::serialized_tool_response_bytes, seam::AssistantDataCall},
     seam::SessionSeam,
@@ -69,8 +71,8 @@ async fn owner_deletion_after_a_real_tool_result_blocks_cached_history_reuse() {
     .unwrap();
     let schema = sea_orm::Schema::new(frame.store.db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace_part::Entity),
     ] {
         frame
             .store

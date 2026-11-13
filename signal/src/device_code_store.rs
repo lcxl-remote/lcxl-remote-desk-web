@@ -1,5 +1,7 @@
 //! Device-code allocation; unique indexes arbitrate concurrent registrations.
 use crate::{config::ConfigConnection, entity::device_code};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_signal_facade::device_code::MAX_ATTEMPTS;
 use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set, SqlErr};
 
@@ -164,11 +166,9 @@ mod tests {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
-        db.execute(
-            &Schema::new(db.get_database_backend()).create_table_from_entity(device_code::Entity),
-        )
-        .await
-        .unwrap();
+        db.execute(&Schema::new(db.get_database_backend()).entity_table(device_code::Entity))
+            .await
+            .unwrap();
         db
     }
     #[tokio::test]

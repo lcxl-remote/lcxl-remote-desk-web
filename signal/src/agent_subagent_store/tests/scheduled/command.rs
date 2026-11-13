@@ -11,6 +11,8 @@ use desk_agent_protocol::{
     capability_grant::CapabilityRiskTier, capability_provider::ProductSurface,
     edge_exec::EdgeExecDisposition,
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     action_result::ActionResultOrigin,
     capability_grant::CapabilityGrantCall,
@@ -31,8 +33,8 @@ async fn fixture() -> (
     let (db, schedule, store, mut parent, _) = published_parent_with_command(true).await;
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(agent_capability_grant::Entity),
-        schema.create_table_from_entity(agent_grant_reservation::Entity),
+        schema.entity_table(agent_capability_grant::Entity),
+        schema.entity_table(agent_grant_reservation::Entity),
     ] {
         db.execute(table.if_not_exists()).await.unwrap();
     }

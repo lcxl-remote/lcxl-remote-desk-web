@@ -1,6 +1,8 @@
 //! Consume the original approval and link it to the exact task allocation.
 use super::*;
 use crate::entity::agent_capability_grant as grant_row;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{QueryOrder, QuerySelect, Set};
 
 pub(super) async fn consume(
@@ -104,7 +106,7 @@ mod tests {
         let txn = db.begin().await.unwrap();
         assert!(consume(&txn, &session, &call, 1000).await.is_err());
         txn.rollback().await.unwrap();
-        let table = Schema::new(DbBackend::Sqlite).create_table_from_entity(grant_row::Entity);
+        let table = Schema::new(DbBackend::Sqlite).entity_table(grant_row::Entity);
         db.execute(&table).await.unwrap();
         let txn = db.begin().await.unwrap();
         assert_eq!(consume(&txn, &session, &call, 1000).await.unwrap(), None);

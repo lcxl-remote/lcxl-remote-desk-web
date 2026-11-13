@@ -9,6 +9,8 @@ use desk_agent_protocol::ai_assistant::{
     user_instructions::AssistantDataSettingsUpdate,
 };
 use desk_agent_protocol::data_lineage::DataEnvelope;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 
 const TEXT: &str = "Independent answer without retrieved memory";
@@ -657,7 +659,7 @@ async fn ai_task_prompt_keeps_original_copy_policy_and_rolls_back_on_small_stack
                 .db
                 .execute(
                     schema
-                        .create_table_from_entity(crate::entity::agent_schedule::Entity)
+                        .entity_table(crate::entity::agent_schedule::Entity)
                         .if_not_exists(),
                 )
                 .await

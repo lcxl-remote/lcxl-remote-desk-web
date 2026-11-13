@@ -3,6 +3,8 @@ use desk_agent_protocol::{
     AgentScope, ExecutionMode,
     schedule::{ScheduleRule, ScheduledTaskKind},
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
 
 async fn fixture() -> (
@@ -15,15 +17,15 @@ async fn fixture() -> (
     let schema = Schema::new(store.db.get_database_backend());
     store
         .db
-        .execute(&schema.create_table_from_entity(session_row::Entity))
+        .execute(&schema.entity_table(session_row::Entity))
         .await
         .unwrap();
     crate::db::ensure_lifecycle_tables(&store.db).await;
     // A proposal may open the default AI review when a reviewer is configured.
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_approval_delegation::Entity),
-        schema.create_table_from_entity(crate::entity::approval_model_probe_observation::Entity),
-        schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
+        schema.entity_table(crate::entity::agent_approval_delegation::Entity),
+        schema.entity_table(crate::entity::approval_model_probe_observation::Entity),
+        schema.entity_table(crate::entity::model_probe_observation::Entity),
     ] {
         store.db.execute(table.if_not_exists()).await.unwrap();
     }

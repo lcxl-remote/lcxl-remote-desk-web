@@ -2,6 +2,8 @@ use super::*;
 use crate::config::connection::DatabaseConnection;
 use crate::entity::agent_schedule_run as run;
 use desk_agent_protocol::schedule::{ScheduledRunStatus, policy::TaskBudget};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ConnectionTrait, TransactionTrait};
 
 /// Small platform limits pinned by the claimed occurrence: one run a day,
@@ -441,8 +443,7 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
         store
             .db
             .execute(
-                &sea_orm::Schema::new(store.db.get_database_backend())
-                    .create_table_from_entity(grants::Entity),
+                &sea_orm::Schema::new(store.db.get_database_backend()).entity_table(grants::Entity),
             )
             .await
             .unwrap();

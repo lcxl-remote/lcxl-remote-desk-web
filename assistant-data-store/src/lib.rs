@@ -5,6 +5,7 @@
 pub mod citations;
 pub mod device_roster;
 pub mod entity;
+pub mod entity_table;
 pub mod evidence;
 pub mod history_native;
 pub mod history_query;

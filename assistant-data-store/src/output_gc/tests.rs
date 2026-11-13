@@ -1,10 +1,12 @@
 use super::*;
+#[cfg(test)]
+use crate::entity_table::EntityTableExt;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, EntityTrait, Schema};
 use std::time::{Duration, Instant};
 
 async fn db() -> sea_orm::DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute(&Schema::new(db.get_database_backend()).create_table_from_entity(quota::Entity))
+    db.execute(&Schema::new(db.get_database_backend()).entity_table(quota::Entity))
         .await
         .unwrap();
     db

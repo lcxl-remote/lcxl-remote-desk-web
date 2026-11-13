@@ -1,6 +1,8 @@
 //! Durable retry queue. Every update is fenced by the exact lease token.
 use crate::config::connection::DatabaseConnection;
 use crate::entity::agent_file_recovery_cleanup as cleanup;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::Expr,
 };
@@ -221,7 +223,7 @@ mod tests {
             .unwrap();
         db.execute(
             &sea_orm::Schema::new(db.get_database_backend())
-                .create_table_from_entity(cleanup::Entity)
+                .entity_table(cleanup::Entity)
                 .to_owned(),
         )
         .await

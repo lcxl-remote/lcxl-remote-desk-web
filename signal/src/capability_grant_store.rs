@@ -1,6 +1,8 @@
 //! OSS SQLite CapabilityGrant issuance and atomic Prepare/DispatchIntent transactions.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod concrete_review;
 mod task_authority;
 pub(crate) mod task_grant;
@@ -2440,7 +2442,7 @@ mod tests {
         let db = file_db(&path).await;
         db.execute(
             Schema::new(db.get_database_backend())
-                .create_table_from_entity(crate::entity::agent_exec_task::Entity)
+                .entity_table(crate::entity::agent_exec_task::Entity)
                 .if_not_exists(),
         )
         .await

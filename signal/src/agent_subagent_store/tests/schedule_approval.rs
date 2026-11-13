@@ -2,6 +2,8 @@
 use super::*;
 use crate::agent_approval_store as approval;
 use crate::config::ConfigConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     approval_review::{ApprovalReviewDecision, ApprovalVerdict, PendingRequestKind},
     chat::{ChatMessage, ToolCall, ToolCallRef},
@@ -20,9 +22,9 @@ async fn proposal_fixture_with(
     let db = database().await;
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::approval_model_probe_observation::Entity),
-        schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_capability_grant::Entity),
+        schema.entity_table(crate::entity::approval_model_probe_observation::Entity),
+        schema.entity_table(crate::entity::model_probe_observation::Entity),
+        schema.entity_table(crate::entity::agent_capability_grant::Entity),
     ] {
         db.execute(table.if_not_exists()).await.unwrap();
     }

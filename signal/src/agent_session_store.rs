@@ -1,6 +1,8 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod assistant_memory;
 mod assistant_search;
 mod assistant_snapshot;
@@ -3512,7 +3514,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_schedule::Entity)
+                    .entity_table(crate::entity::agent_schedule::Entity)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -3522,7 +3524,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_attachment::Entity)
+                    .entity_table(crate::entity::agent_attachment::Entity)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -3532,7 +3534,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_assistant_runtime::Entity)
+                    .entity_table(crate::entity::agent_assistant_runtime::Entity)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -3542,7 +3544,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_file_recovery_cleanup::Entity)
+                    .entity_table(crate::entity::agent_file_recovery_cleanup::Entity)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -3553,7 +3555,7 @@ mod tests {
             .db
             .execute(
                 &schema
-                    .create_table_from_entity(crate::entity::agent_grant_reservation::Entity)
+                    .entity_table(crate::entity::agent_grant_reservation::Entity)
                     .if_not_exists()
                     .to_owned(),
             )
@@ -3873,32 +3875,28 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity))
+        db.execute(&schema.entity_table(crate::entity::model_egress_receipt::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+        db.execute(&schema.entity_table(agent_session::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_goal_run::Entity))
+        db.execute(&schema.entity_table(agent_goal_run::Entity))
             .await
             .unwrap();
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_goal_open_request::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
+        db.execute(&schema.entity_table(agent_exec_task::Entity))
             .await
             .unwrap();
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
+        db.execute(&schema.entity_table(agent_run_event::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(crate::entity::agent_permission_resume::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(agent_capability_grant::Entity))
             .await
             .unwrap();
         crate::db::ensure_lifecycle_tables(&db).await;
@@ -4158,21 +4156,19 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+        db.execute(&schema.entity_table(agent_session::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        db.execute(&schema.entity_table(agent_exec_task::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
+        db.execute(&schema.entity_table(agent_run_event::Entity))
             .await
             .unwrap();
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_permission_resume::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(agent_capability_grant::Entity))
             .await
             .unwrap();
         crate::db::ensure_lifecycle_tables(&db).await;
@@ -4286,21 +4282,19 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+        db.execute(&schema.entity_table(agent_session::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        db.execute(&schema.entity_table(agent_exec_task::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_run_event::Entity))
+        db.execute(&schema.entity_table(agent_run_event::Entity))
             .await
             .unwrap();
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_permission_resume::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(agent_capability_grant::Entity))
             .await
             .unwrap();
         crate::db::ensure_lifecycle_tables(&db).await;
@@ -5038,10 +5032,10 @@ mod tests {
         .await
         .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(agent_session::Entity))
+        db.execute(&schema.entity_table(agent_session::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        db.execute(&schema.entity_table(agent_exec_task::Entity))
             .await
             .unwrap();
         crate::db::ensure_lifecycle_tables(&db).await;

@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod candidates;
 mod commands;
 mod compaction_races;
@@ -519,8 +521,8 @@ async fn source_isolation_database() -> DatabaseConnection {
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for statement in [
-        schema.create_table_from_entity(session_row::Entity),
-        schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity),
+        schema.entity_table(session_row::Entity),
+        schema.entity_table(crate::entity::model_egress_receipt::Entity),
     ] {
         db.execute(&statement).await.unwrap();
     }

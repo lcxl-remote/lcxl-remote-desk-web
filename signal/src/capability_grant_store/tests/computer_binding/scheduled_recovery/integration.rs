@@ -6,6 +6,8 @@ use crate::{
 use desk_agent_protocol::schedule::{
     ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     seam::SessionSeam,
     session::{TurnState, WorkKind},
@@ -74,9 +76,9 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
 ) {
     let schema = Schema::new(db.get_database_backend());
     for mut statement in [
-        schema.create_table_from_entity(agent_schedule::Entity),
-        schema.create_table_from_entity(agent_schedule_run::Entity),
-        schema.create_table_from_entity(agent_exec_task::Entity),
+        schema.entity_table(agent_schedule::Entity),
+        schema.entity_table(agent_schedule_run::Entity),
+        schema.entity_table(agent_exec_task::Entity),
     ] {
         db.execute(statement.if_not_exists()).await.unwrap();
     }

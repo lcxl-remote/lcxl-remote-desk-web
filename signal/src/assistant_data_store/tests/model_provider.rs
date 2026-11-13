@@ -1,5 +1,7 @@
 use super::*;
 use crate::entity::agent_session as session_row;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::model_profile::WireProtocol;
 use sea_orm::sea_query::Expr;
 
@@ -11,7 +13,7 @@ pub(super) async fn configure_model(
     let schema = Schema::new(db.get_database_backend());
     db.execute(
         schema
-            .create_table_from_entity(crate::entity::model_probe_observation::Entity)
+            .entity_table(crate::entity::model_probe_observation::Entity)
             .if_not_exists(),
     )
     .await
@@ -35,8 +37,8 @@ pub(super) async fn reserve_main_budget(
     session.delegation_group_id = None;
     let schema = sea_orm::Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_delegation_group::Entity),
-        schema.create_table_from_entity(crate::entity::agent_delegation_reservation::Entity),
+        schema.entity_table(crate::entity::agent_delegation_group::Entity),
+        schema.entity_table(crate::entity::agent_delegation_reservation::Entity),
     ] {
         db.execute(table.if_not_exists()).await.unwrap();
     }

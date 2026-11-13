@@ -1,5 +1,7 @@
 use super::*;
 use desk_agent_protocol::{AgentScope, ExecutionMode};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::chat::ChatMessage;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
 
@@ -8,12 +10,12 @@ async fn fixture(failed: bool) -> (ScheduleStore, run::Model, PersistedAgentSess
     let schema = Schema::new(store.db.get_database_backend());
     store
         .db
-        .execute(&schema.create_table_from_entity(agent_action_item::Entity))
+        .execute(&schema.entity_table(agent_action_item::Entity))
         .await
         .unwrap();
     store
         .db
-        .execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        .execute(&schema.entity_table(agent_exec_task::Entity))
         .await
         .unwrap();
     let claimed = store

@@ -1,5 +1,7 @@
 //! Trusted edge registration must be acknowledged before a file mutation starts.
 use crate::entity::{agent_file_recovery_scope as vault, agent_session};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{
     ActiveValue::Set,
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
@@ -190,14 +192,10 @@ mod tests {
             .await
             .unwrap();
         let schema = sea_orm::Schema::new(db.get_database_backend());
-        db.execute(
-            &schema
-                .create_table_from_entity(agent_session::Entity)
-                .to_owned(),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(vault::Entity).to_owned())
+        db.execute(&schema.entity_table(agent_session::Entity).to_owned())
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(vault::Entity).to_owned())
             .await
             .unwrap();
         let now = chrono::Utc::now();

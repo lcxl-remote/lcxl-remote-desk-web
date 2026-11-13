@@ -16,6 +16,8 @@
 //!   explicit leave / clear / set semantics.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use std::fmt;
 
 use desk_agent_protocol::ExecutionMode;
@@ -731,7 +733,7 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        let stmt = schema.create_table_from_entity(model_probe_observation::Entity);
+        let stmt = schema.entity_table(model_probe_observation::Entity);
         db.execute(&stmt).await.unwrap();
         db
     }

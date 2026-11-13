@@ -2,6 +2,8 @@
 use super::{DeviceCodeLifecycle, fixtures::publish};
 use crate::{config::connection::DatabaseConnection, entity::device_code};
 use actix_web::web;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_signal_facade::model::connection::SharedConnectionMap;
 use desk_utils::error::DeskErrorCode;
 use futures_util::{StreamExt, stream};
@@ -57,11 +59,9 @@ async fn directory_cost() -> Vec<serde_json::Value> {
             observed.fetch_add(1, Ordering::Relaxed);
         });
         let db = DatabaseConnection::new(raw, crate::config::test_support::context().await);
-        db.execute(
-            &Schema::new(db.get_database_backend()).create_table_from_entity(device_code::Entity),
-        )
-        .await
-        .unwrap();
+        db.execute(&Schema::new(db.get_database_backend()).entity_table(device_code::Entity))
+            .await
+            .unwrap();
         let now = chrono::Utc::now();
         for start in (0..count).step_by(100) {
             device_code::Entity::insert_many((start..(start + 100).min(count)).map(|i| {
@@ -189,12 +189,9 @@ async fn registration_and_cleanup_performance() {
                 t.fetch_add(info.elapsed.as_nanos() as u64, Ordering::Relaxed);
             });
             let db = DatabaseConnection::new(raw, crate::config::test_support::context().await);
-            db.execute(
-                &Schema::new(db.get_database_backend())
-                    .create_table_from_entity(device_code::Entity),
-            )
-            .await
-            .unwrap();
+            db.execute(&Schema::new(db.get_database_backend()).entity_table(device_code::Entity))
+                .await
+                .unwrap();
             let now = chrono::Utc::now();
             for batch in 0..10 {
                 device_code::Entity::insert_many((0..100).map(|i| {

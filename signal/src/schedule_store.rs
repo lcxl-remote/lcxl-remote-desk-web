@@ -2,6 +2,8 @@
 use crate::config::connection::DatabaseConnection;
 use crate::entity::agent_schedule as entity;
 use desk_agent_protocol::schedule::ScheduleDraft;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
@@ -661,15 +663,15 @@ pub(crate) mod tests {
         let schema = Schema::new(db.get_database_backend());
         db.execute(
             schema
-                .create_table_from_entity(crate::entity::agent_assistant_runtime::Entity)
+                .entity_table(crate::entity::agent_assistant_runtime::Entity)
                 .if_not_exists(),
         )
         .await
         .unwrap();
         for mut table in [
-            schema.create_table_from_entity(entity::Entity),
-            schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity),
-            schema.create_table_from_entity(crate::entity::agent_task_budget_reservation::Entity),
+            schema.entity_table(entity::Entity),
+            schema.entity_table(crate::entity::agent_schedule_run::Entity),
+            schema.entity_table(crate::entity::agent_task_budget_reservation::Entity),
         ] {
             db.execute(table.if_not_exists()).await.unwrap();
         }
@@ -735,18 +737,16 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_assistant_runtime::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(entity::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_goal_run::Entity))
+            .await
+            .unwrap();
+        db.execute(&schema.entity_table(entity::Entity))
             .await
             .unwrap();
         for index in schema.create_index_from_entity(entity::Entity) {
@@ -773,7 +773,7 @@ pub(crate) mod tests {
             .db
             .execute(
                 &Schema::new(store.db.get_database_backend())
-                    .create_table_from_entity(agent_session::Entity)
+                    .entity_table(agent_session::Entity)
                     .if_not_exists()
                     .to_owned(),
             )

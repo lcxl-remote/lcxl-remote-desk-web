@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "schedule_id")]
     pub schedule_id: String,
     #[sea_orm(indexed)]
     pub owner_user_id: i32,
@@ -29,7 +29,7 @@ pub struct Model {
     pub recurrence_cursor_at: Option<i64>,
     pub grace_seconds: i32,
     pub creation_source: String,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "creation_identity")]
     pub creation_identity: String,
     pub creation_payload_sha256: String,
     pub source_conversation_id: Option<String>,

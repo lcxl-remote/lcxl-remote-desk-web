@@ -1,14 +1,16 @@
 use super::*;
 use crate::entity::{agent_exec_task, agent_run_event, turn_usage};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::session::TurnState;
 
 async fn add_cleanup_tables(db: &DatabaseConnection) {
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(turn_usage::Entity),
-        schema.create_table_from_entity(agent_exec_task::Entity),
-        schema.create_table_from_entity(agent_run_event::Entity),
-        schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
+        schema.entity_table(turn_usage::Entity),
+        schema.entity_table(agent_exec_task::Entity),
+        schema.entity_table(agent_run_event::Entity),
+        schema.entity_table(crate::entity::agent_permission_resume::Entity),
     ] {
         db.execute(table.if_not_exists()).await.unwrap();
     }

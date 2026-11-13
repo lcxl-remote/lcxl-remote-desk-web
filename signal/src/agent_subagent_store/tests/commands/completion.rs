@@ -1,4 +1,6 @@
 //! Exercise original command export after a real delegated approval and dispatch.
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod live;
 use super::*;
 use crate::agent_exec_store::SignalAgentExecStore;
@@ -232,7 +234,7 @@ async fn completed_fixture_with_delivery(
     let schema = Schema::new(db.get_database_backend());
     db.execute(
         schema
-            .create_table_from_entity(crate::entity::model_probe_observation::Entity)
+            .entity_table(crate::entity::model_probe_observation::Entity)
             .if_not_exists(),
     )
     .await

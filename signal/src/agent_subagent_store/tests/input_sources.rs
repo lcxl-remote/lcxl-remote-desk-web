@@ -1,5 +1,7 @@
 use super::*;
 use crate::agent_goal_store as goals;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     chat::{ChatMessage, ToolCall, ToolCallRef},
     goal::{GoalModelBinding, GoalOwnerAction, GoalRun, GoalUsage},
@@ -13,8 +15,8 @@ use desk_diagnose_core::{
 pub(super) async fn add_input_tables(db: &DatabaseConnection) {
     let schema = Schema::new(db.get_database_backend());
     for mut statement in [
-        schema.create_table_from_entity(crate::entity::agent_run_event::Entity),
-        schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
+        schema.entity_table(crate::entity::agent_run_event::Entity),
+        schema.entity_table(crate::entity::agent_goal_open_request::Entity),
     ] {
         db.execute(statement.if_not_exists()).await.unwrap();
     }

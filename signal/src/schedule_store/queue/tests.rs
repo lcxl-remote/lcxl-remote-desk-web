@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 
 use super::super::tests::AcceptSubject;
 struct DenySubject;
@@ -507,16 +509,14 @@ async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model
         .await
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
-    db.execute(&schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity))
+    db.execute(&schema.entity_table(crate::entity::agent_assistant_runtime::Entity))
         .await
         .unwrap();
-    db.execute(&schema.create_table_from_entity(entity::Entity))
+    db.execute(&schema.entity_table(entity::Entity))
         .await
         .unwrap();
-    db.execute(&schema.create_table_from_entity(run::Entity))
-        .await
-        .unwrap();
-    db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+    db.execute(&schema.entity_table(run::Entity)).await.unwrap();
+    db.execute(&schema.entity_table(crate::entity::agent_goal_run::Entity))
         .await
         .unwrap();
     for index in schema

@@ -2,6 +2,8 @@
 //! Cookie validation and device reference issuance use synthetic fixture inputs.
 
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_signal_facade::model::peer::{
     HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
 };
@@ -25,7 +27,7 @@ use std::sync::Arc;
 async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() {
     let store = memory().await;
     let schema = Schema::new(store.db.get_database_backend());
-    for table in [schema.create_table_from_entity(model_probe_observation::Entity)] {
+    for table in [schema.entity_table(model_probe_observation::Entity)] {
         store.db.execute(&table).await.unwrap();
     }
     crate::model_provider::save(

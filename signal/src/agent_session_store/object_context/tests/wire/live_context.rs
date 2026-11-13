@@ -1,6 +1,8 @@
 //! Real OSS 638/639 loopback; authentication and desktop readiness are synthetic.
 use super::*;
 use desk_agent_protocol::ai_assistant::{AiAssistantContextUpdate, AiAssistantContextUpdated};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_signal_facade::model::peer::{
     HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
 };
@@ -8,7 +10,7 @@ use desk_signal_facade::model::peer::{
 async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     let store = memory().await;
     let schema = Schema::new(store.db.get_database_backend());
-    for table in [schema.create_table_from_entity(model_probe_observation::Entity)] {
+    for table in [schema.entity_table(model_probe_observation::Entity)] {
         store.db.execute(&table).await.unwrap();
     }
     crate::model_provider::save(

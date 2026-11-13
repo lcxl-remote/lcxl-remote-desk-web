@@ -1,6 +1,8 @@
 //! SQLite durable-action lifecycle for the single-node OSS signal runtime.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -747,7 +749,7 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(agent_action_item::Entity))
+        db.execute(&schema.entity_table(agent_action_item::Entity))
             .await
             .unwrap();
         SignalActionStore::new(db)

@@ -1,5 +1,7 @@
 use super::*;
 use desk_agent_protocol::{AgentScope, ExecutionMode};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     conversation_attachment::batch::{DeliveryIdentity, OutputPart, PartContent, prepare_delivery},
     session::AgentSessionSurface,
@@ -16,13 +18,13 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
         .await
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
-    db.execute(&schema.create_table_from_entity(agent_session::Entity))
+    db.execute(&schema.entity_table(agent_session::Entity))
         .await
         .unwrap();
-    db.execute(&schema.create_table_from_entity(crate::entity::agent_goal_run::Entity))
+    db.execute(&schema.entity_table(crate::entity::agent_goal_run::Entity))
         .await
         .unwrap();
-    db.execute(&schema.create_table_from_entity(attachment::Entity))
+    db.execute(&schema.entity_table(attachment::Entity))
         .await
         .unwrap();
     let scope = AgentScope {

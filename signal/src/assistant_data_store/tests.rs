@@ -8,6 +8,8 @@ use desk_agent_protocol::ai_assistant::{
     },
     user_instructions::{AssistantDataPolicy, AssistantDataSettings, AssistantDataSettingsUpdate},
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ColumnTrait, QueryFilter, Schema, TransactionTrait};
 use sha2::{Digest, Sha256};
 
@@ -159,33 +161,33 @@ pub(crate) async fn ensure_tables(db: &crate::config::connection::DatabaseConnec
     .await
     .unwrap();
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_assistant_device_binding::Entity),
-        schema.create_table_from_entity(crate::entity::agent_action_item::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_delegation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
-        schema.create_table_from_entity(crate::entity::agent_capability_dispatch_outbox::Entity),
-        schema.create_table_from_entity(crate::entity::agent_capability_grant::Entity),
-        schema.create_table_from_entity(crate::entity::agent_exec_task::Entity),
-        schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
-        schema.create_table_from_entity(crate::entity::agent_goal_run::Entity),
-        schema.create_table_from_entity(crate::entity::agent_grant_reservation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
-        schema.create_table_from_entity(crate::entity::agent_run_event::Entity),
-        schema.create_table_from_entity(crate::entity::agent_schedule::Entity),
-        schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity),
-        schema.create_table_from_entity(crate::entity::agent_session::Entity),
-        schema.create_table_from_entity(crate::entity::agent_task_budget_reservation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_file_recovery_cleanup::Entity),
-        schema.create_table_from_entity(crate::entity::agent_file_recovery_scope::Entity),
-        schema.create_table_from_entity(crate::entity::agent_attachment::Entity),
-        schema.create_table_from_entity(crate::entity::agent_delegation_group::Entity),
-        schema.create_table_from_entity(crate::entity::agent_subagent_run::Entity),
-        schema.create_table_from_entity(crate::entity::agent_subagent_inbox::Entity),
-        schema.create_table_from_entity(crate::entity::agent_delegation_reservation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
-        schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity),
+        schema.entity_table(crate::entity::agent_assistant_device_binding::Entity),
+        schema.entity_table(crate::entity::agent_action_item::Entity),
+        schema.entity_table(crate::entity::agent_approval_delegation::Entity),
+        schema.entity_table(crate::entity::agent_approval_review::Entity),
+        schema.entity_table(crate::entity::agent_capability_dispatch_outbox::Entity),
+        schema.entity_table(crate::entity::agent_capability_grant::Entity),
+        schema.entity_table(crate::entity::agent_exec_task::Entity),
+        schema.entity_table(crate::entity::agent_goal_open_request::Entity),
+        schema.entity_table(crate::entity::agent_goal_run::Entity),
+        schema.entity_table(crate::entity::agent_grant_reservation::Entity),
+        schema.entity_table(crate::entity::agent_permission_resume::Entity),
+        schema.entity_table(crate::entity::agent_run_event::Entity),
+        schema.entity_table(crate::entity::agent_schedule::Entity),
+        schema.entity_table(crate::entity::agent_schedule_run::Entity),
+        schema.entity_table(crate::entity::agent_session::Entity),
+        schema.entity_table(crate::entity::agent_task_budget_reservation::Entity),
+        schema.entity_table(crate::entity::agent_file_recovery_cleanup::Entity),
+        schema.entity_table(crate::entity::agent_file_recovery_scope::Entity),
+        schema.entity_table(crate::entity::agent_attachment::Entity),
+        schema.entity_table(crate::entity::agent_delegation_group::Entity),
+        schema.entity_table(crate::entity::agent_subagent_run::Entity),
+        schema.entity_table(crate::entity::agent_subagent_inbox::Entity),
+        schema.entity_table(crate::entity::agent_delegation_reservation::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace_part::Entity),
+        schema.entity_table(crate::entity::agent_approval_attempt::Entity),
+        schema.entity_table(crate::entity::model_egress_receipt::Entity),
     ] {
         table.if_not_exists();
         db.execute(&table).await.unwrap();

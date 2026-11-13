@@ -1,3 +1,5 @@
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod goal_snapshot;
 use super::*;
 use crate::{agent_session_store::SignalAgentSessionStore, entity::agent_exec_task};
@@ -27,11 +29,7 @@ async fn prepare_delivery(f: &Fixture) {
     let schema = Schema::new(f.store.db.get_database_backend());
     f.store
         .db
-        .execute(
-            schema
-                .create_table_from_entity(agent_exec_task::Entity)
-                .if_not_exists(),
-        )
+        .execute(schema.entity_table(agent_exec_task::Entity).if_not_exists())
         .await
         .unwrap();
     let row = agent_session::Entity::find()

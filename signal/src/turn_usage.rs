@@ -5,6 +5,8 @@
 //! that cannot be resolved to a device fall back to the raw `connection_id`.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use std::collections::HashMap;
 
 use chrono::{NaiveDateTime, Timelike};
@@ -233,7 +235,7 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        let stmt = schema.create_table_from_entity(turn_usage::Entity);
+        let stmt = schema.entity_table(turn_usage::Entity);
         db.execute(&stmt).await.unwrap();
         db
     }

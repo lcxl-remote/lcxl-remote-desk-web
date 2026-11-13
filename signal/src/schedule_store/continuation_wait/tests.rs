@@ -1,5 +1,7 @@
 use super::*;
 use desk_agent_protocol::{AgentScope, ExecutionMode};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::session::TurnState;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema};
 
@@ -8,17 +10,17 @@ async fn fixture() -> (ScheduleStore, run::Model, PersistedAgentSession) {
     let schema = Schema::new(store.db.get_database_backend());
     store
         .db
-        .execute(&schema.create_table_from_entity(agent_action_item::Entity))
+        .execute(&schema.entity_table(agent_action_item::Entity))
         .await
         .unwrap();
     store
         .db
-        .execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        .execute(&schema.entity_table(agent_exec_task::Entity))
         .await
         .unwrap();
     store
         .db
-        .execute(&schema.create_table_from_entity(crate::entity::agent_run_event::Entity))
+        .execute(&schema.entity_table(crate::entity::agent_run_event::Entity))
         .await
         .unwrap();
     let claimed = store

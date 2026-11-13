@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ActiveModelTrait, Schema};
 async fn database() -> DatabaseConnection {
     let db = crate::config::test_support::Database::connect("sqlite::memory:")
@@ -6,15 +8,15 @@ async fn database() -> DatabaseConnection {
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for statement in [
-        schema.create_table_from_entity(crate::entity::agent_session::Entity),
-        schema.create_table_from_entity(crate::entity::agent_subagent_run::Entity),
-        schema.create_table_from_entity(crate::entity::agent_run_event::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
-        schema.create_table_from_entity(crate::entity::agent_capability_grant::Entity),
-        schema.create_table_from_entity(crate::entity::agent_action_item::Entity),
+        schema.entity_table(crate::entity::agent_session::Entity),
+        schema.entity_table(crate::entity::agent_subagent_run::Entity),
+        schema.entity_table(crate::entity::agent_run_event::Entity),
+        schema.entity_table(crate::entity::agent_approval_review::Entity),
+        schema.entity_table(crate::entity::agent_approval_attempt::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace_part::Entity),
+        schema.entity_table(crate::entity::agent_capability_grant::Entity),
+        schema.entity_table(crate::entity::agent_action_item::Entity),
     ] {
         db.execute(&statement).await.unwrap();
     }

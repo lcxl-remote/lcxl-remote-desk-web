@@ -1,5 +1,7 @@
 use super::*;
 use actix_web::{FromRequest, HttpResponse, body::MessageBody, test::TestRequest};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::peer::{
     HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
@@ -135,7 +137,7 @@ async fn real_handler_scopes_enumeration_and_rechecks_live_grants() {
         .await
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
-    db.execute(&schema.create_table_from_entity(crate::entity::device_code::Entity))
+    db.execute(&schema.entity_table(crate::entity::device_code::Entity))
         .await
         .unwrap();
     crate::entity::device_code::ActiveModel {

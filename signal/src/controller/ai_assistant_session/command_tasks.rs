@@ -1,6 +1,8 @@
 //! Owner snapshot projection; command records never grant authority to execute.
 use super::*;
 use crate::entity::agent_exec_task as task;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 pub(super) async fn list(
@@ -66,7 +68,7 @@ mod tests {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
-        db.execute(&Schema::new(db.get_database_backend()).create_table_from_entity(task::Entity))
+        db.execute(&Schema::new(db.get_database_backend()).entity_table(task::Entity))
             .await
             .unwrap();
         let store = crate::agent_exec_store::SignalAgentExecStore::new(db.clone());

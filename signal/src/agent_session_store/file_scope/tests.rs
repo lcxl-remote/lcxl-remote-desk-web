@@ -1,5 +1,7 @@
 use super::*;
 use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::file_scope::{DirectoryConsentSource, DirectoryProposal, FileScopeSubject};
 use sea_orm::{ConnectionTrait, Schema};
 
@@ -9,8 +11,8 @@ async fn setup() -> SignalAgentSessionStore {
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for table in [
-        schema.create_table_from_entity(agent_session::Entity),
-        schema.create_table_from_entity(agent_run_event::Entity),
+        schema.entity_table(agent_session::Entity),
+        schema.entity_table(agent_run_event::Entity),
     ] {
         db.execute(&table).await.unwrap();
     }

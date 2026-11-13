@@ -1,5 +1,7 @@
 //! Owner-authenticated task management; no direct tool dispatch.
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 mod resume_sources;
 use crate::entity::agent_schedule as row;
 use crate::schedule_store::{ScheduleStore, ScheduleStoreError};
@@ -711,15 +713,11 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(
-            &schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity),
-        )
-        .await
-        .unwrap();
-        db.execute(&schema.create_table_from_entity(row::Entity))
+        db.execute(&schema.entity_table(crate::entity::agent_assistant_runtime::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
+        db.execute(&schema.entity_table(row::Entity)).await.unwrap();
+        db.execute(&schema.entity_table(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();
         crate::db::ensure_lifecycle_tables(&db).await;
@@ -736,7 +734,7 @@ mod tests {
         use sea_orm::{ActiveModelTrait, Set};
         let db = fixture().await;
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(session_row::Entity))
+        db.execute(&schema.entity_table(session_row::Entity))
             .await
             .unwrap();
         let key = derive_conversation_key("1", "public-device-1", Some("chat-1"), "");

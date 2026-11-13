@@ -2,6 +2,8 @@
 use super::*;
 use crate::agent_exec_store::SignalAgentExecStore;
 use crate::agent_session_store::{EventAppend, SignalAgentSessionStore};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     action_result::ActionResultOrigin,
     action_turn_fence::AssistantTurnFence,
@@ -215,7 +217,7 @@ async fn seed_origin(
     use desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority;
     db.execute(
         Schema::new(db.get_database_backend())
-            .create_table_from_entity(outbox::Entity)
+            .entity_table(outbox::Entity)
             .if_not_exists(),
     )
     .await

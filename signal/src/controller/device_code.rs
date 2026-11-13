@@ -1,5 +1,7 @@
 #[cfg(test)]
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 
 use actix_web::{HttpResponse, delete, get, post, put, web};
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
@@ -638,7 +640,7 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(device_code::Entity))
+        db.execute(&schema.entity_table(device_code::Entity))
             .await
             .unwrap();
         db

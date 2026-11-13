@@ -1,6 +1,8 @@
 //! Owner approval is durable while its original goal source is paused.
 use super::*;
 use desk_agent_protocol::capability_provider::{CapabilityEffect, ProductSurface};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     capability_availability::CapabilityAvailability,
     dynamic_run::*,
@@ -103,7 +105,7 @@ async fn approval_during_goal_pause_is_retained_without_resume_or_budget_reset()
     super::input_sources::add_input_tables(&db).await;
     db.execute(
         Schema::new(db.get_database_backend())
-            .create_table_from_entity(grant_row::Entity)
+            .entity_table(grant_row::Entity)
             .if_not_exists(),
     )
     .await
@@ -335,7 +337,7 @@ async fn new_parent_input_preserves_running_child_and_original_permission_select
     super::input_sources::add_input_tables(&db).await;
     db.execute(
         Schema::new(db.get_database_backend())
-            .create_table_from_entity(grant_row::Entity)
+            .entity_table(grant_row::Entity)
             .if_not_exists(),
     )
     .await

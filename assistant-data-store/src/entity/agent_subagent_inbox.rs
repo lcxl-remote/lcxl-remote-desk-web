@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "event_id")]
     pub event_id: String,
     #[sea_orm(indexed)]
     pub root_conversation_id: String,

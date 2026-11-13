@@ -5,6 +5,8 @@ use crate::{
     entity::agent_schedule_run,
 };
 use desk_agent_protocol::AgentScope;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::session::PersistedAgentSession;
 #[cfg(test)]
 use desk_signal_facade::model::peer::{
@@ -222,8 +224,7 @@ mod tests {
         store
             .db
             .execute(
-                &Schema::new(store.db.get_database_backend())
-                    .create_table_from_entity(agent_session::Entity),
+                &Schema::new(store.db.get_database_backend()).entity_table(agent_session::Entity),
             )
             .await
             .unwrap();

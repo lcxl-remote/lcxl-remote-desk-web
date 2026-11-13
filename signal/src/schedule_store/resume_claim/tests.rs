@@ -3,6 +3,8 @@ use desk_agent_protocol::{
     AgentScope, ExecutionMode,
     schedule::{ScheduleRule, ScheduledTaskKind},
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema, TransactionTrait};
 async fn base_fixture() -> (
     ScheduleStore,
@@ -14,7 +16,7 @@ async fn base_fixture() -> (
     let schema = Schema::new(store.db.get_database_backend());
     store
         .db
-        .execute(&schema.create_table_from_entity(session_row::Entity))
+        .execute(&schema.entity_table(session_row::Entity))
         .await
         .unwrap();
     let mut session = PersistedAgentSession::new(

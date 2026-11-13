@@ -4,6 +4,8 @@ use crate::entity::{agent_assistant_history as history, agent_file_recovery_clea
 use desk_agent_protocol::ai_assistant::history::{
     ConversationSearchRequest, ConversationSearchResult,
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     ai_assistant::{history::serialized_tool_response_bytes, seam::AssistantDataRead},
     prompt::ResponseFormatSpec,
@@ -22,10 +24,10 @@ async fn fixture(label: &str) -> (Frame, AssistantDataRead<ConversationSearchRes
     .await;
     let schema = sea_orm::Schema::new(frame.store.db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
-        schema.create_table_from_entity(crate::entity::agent_subagent_run::Entity),
-        schema.create_table_from_entity(crate::entity::agent_schedule::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace_part::Entity),
+        schema.entity_table(crate::entity::agent_subagent_run::Entity),
+        schema.entity_table(crate::entity::agent_schedule::Entity),
     ] {
         frame
             .store

@@ -11,6 +11,8 @@
 //! no revision, no conflict semantics.
 
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -869,15 +871,15 @@ mod tests {
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
         for stmt in [
-            schema.create_table_from_entity(turn_usage::Entity),
-            schema.create_table_from_entity(agent_session::Entity),
-            schema.create_table_from_entity(agent_exec_task::Entity),
-            schema.create_table_from_entity(agent_action_item::Entity),
-            schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
-            schema.create_table_from_entity(agent_capability_grant::Entity),
-            schema.create_table_from_entity(agent_grant_reservation::Entity),
-            schema.create_table_from_entity(agent_run_event::Entity),
-            schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
+            schema.entity_table(turn_usage::Entity),
+            schema.entity_table(agent_session::Entity),
+            schema.entity_table(agent_exec_task::Entity),
+            schema.entity_table(agent_action_item::Entity),
+            schema.entity_table(agent_capability_dispatch_outbox::Entity),
+            schema.entity_table(agent_capability_grant::Entity),
+            schema.entity_table(agent_grant_reservation::Entity),
+            schema.entity_table(agent_run_event::Entity),
+            schema.entity_table(crate::entity::agent_permission_resume::Entity),
         ] {
             db.execute(&stmt).await.unwrap();
         }

@@ -1,4 +1,6 @@
 use crate::config::connection::DatabaseConnection;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -325,10 +327,10 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(device_code::Entity))
+        db.execute(&schema.entity_table(device_code::Entity))
             .await
             .unwrap();
-        db.execute(&schema.create_table_from_entity(host_remote_access_state::Entity))
+        db.execute(&schema.entity_table(host_remote_access_state::Entity))
             .await
             .unwrap();
         device_code::ActiveModel {

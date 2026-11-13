@@ -1,5 +1,7 @@
 //! Raw orchestration writes remain forbidden across actual checkpoint and recovery boundaries.
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     chat::ToolCall,
     session::{TriggerOrigin, TurnState},
@@ -111,8 +113,8 @@ async fn raw_child_writes_stay_forbidden_after_compaction_permission_resume_and_
     let db = database_at(&format!("sqlite://{}?mode=rwc", file.display())).await;
     super::input_sources::add_input_tables(&db).await;
     for mut statement in [
-        Schema::new(db.get_database_backend()).create_table_from_entity(grant_row::Entity),
-        Schema::new(db.get_database_backend()).create_table_from_entity(schedule_row::Entity),
+        Schema::new(db.get_database_backend()).entity_table(grant_row::Entity),
+        Schema::new(db.get_database_backend()).entity_table(schedule_row::Entity),
     ] {
         db.execute(statement.if_not_exists()).await.unwrap();
     }

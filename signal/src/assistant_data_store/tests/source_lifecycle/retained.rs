@@ -3,6 +3,8 @@ use super::*;
 use crate::entity::{
     agent_assistant_history_conversation as conversations, agent_session as execution,
 };
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 
 #[tokio::test]
 async fn the_existing_owner_delete_endpoint_accepts_a_retained_root_after_execution_reclamation() {
@@ -57,8 +59,8 @@ async fn the_existing_owner_delete_endpoint_accepts_a_retained_root_after_execut
 async fn prepare_endpoint_tables(store: &TestStore) {
     let schema = sea_orm::Schema::new(store.db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace::Entity),
+        schema.entity_table(crate::entity::agent_approval_trace_part::Entity),
     ] {
         store.db.execute(table.if_not_exists()).await.unwrap();
     }

@@ -2,6 +2,8 @@
 use super::{ContinuationLease, ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::{agent_action_item, agent_exec_task, agent_schedule_run as run, agent_session};
 use desk_agent_protocol::{AgentError, schedule::ScheduledRunStatus};
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     chat::ChatRole,
     dynamic_run::PermissionRequestState,
@@ -604,12 +606,12 @@ mod tests {
         let schema = Schema::new(store.db.get_database_backend());
         store
             .db
-            .execute(&schema.create_table_from_entity(agent_action_item::Entity))
+            .execute(&schema.entity_table(agent_action_item::Entity))
             .await
             .unwrap();
         store
             .db
-            .execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+            .execute(&schema.entity_table(agent_exec_task::Entity))
             .await
             .unwrap();
         let claimed = store

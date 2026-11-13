@@ -3,6 +3,8 @@ use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, entity};
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run, agent_session};
 use desk_agent_protocol::AgentScope;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::{
     schedule::fresh_session::{FreshSessionInput, initial_session},
     session::PersistedAgentSession,
@@ -806,8 +808,7 @@ pub(crate) mod tests {
         store
             .db
             .execute(
-                &Schema::new(store.db.get_database_backend())
-                    .create_table_from_entity(agent_session::Entity),
+                &Schema::new(store.db.get_database_backend()).entity_table(agent_session::Entity),
             )
             .await
             .unwrap();
@@ -1210,7 +1211,7 @@ pub(crate) mod tests {
             .db
             .execute(
                 &Schema::new(store.db.get_database_backend())
-                    .create_table_from_entity(model_egress_receipt::Entity),
+                    .entity_table(model_egress_receipt::Entity),
             )
             .await
             .unwrap();

@@ -1,5 +1,7 @@
 //! Independent WAL connections exercise writer admission, rollback and read concurrency.
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 
 mod counter {
     use sea_orm::entity::prelude::*;
@@ -110,7 +112,7 @@ async fn production_pool_queues_internal_writes_before_acquiring_a_sqlite_snapsh
         .await
         .unwrap();
     let backend = db.get_database_backend();
-    let schema = sea_orm::Schema::new(backend).create_table_from_entity(counter::Entity);
+    let schema = sea_orm::Schema::new(backend).entity_table(counter::Entity);
     db.execute_raw(backend.build(&schema)).await.unwrap();
     counter::Entity::insert(counter::ActiveModel {
         id: sea_orm::Set(1),

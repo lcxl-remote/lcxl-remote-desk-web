@@ -14,7 +14,7 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub conversation_id: String,
     pub device_ref: String,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "physical_call_id")]
     pub physical_call_id: String,
     pub output_envelope_id: String,
     pub output_digest_sha256: String,

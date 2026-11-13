@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use desk_assistant_data_store::entity_table::EntityTableExt;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, TransactionTrait};
 
 async fn fixture(
@@ -290,7 +292,7 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
         let schema = sea_orm::Schema::new(store.db.get_database_backend());
         store
             .db
-            .execute(&schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity))
+            .execute(&schema.entity_table(crate::entity::model_egress_receipt::Entity))
             .await
             .unwrap();
         let egress = crate::model_egress_store::SignalModelEgressStore::new(store.db.clone());

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(unique)]
+    #[sea_orm(unique_key = "task_id")]
     pub task_id: String,
     /// The requests of one Worker share its session.
     #[sea_orm(indexed)]
