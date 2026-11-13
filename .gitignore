@@ -46,3 +46,6 @@ logs/
 
 # Compose env file: holds LRD_BOOTSTRAP_TOKEN
 /.env
+
+# Python bytecode
+__pycache__/
