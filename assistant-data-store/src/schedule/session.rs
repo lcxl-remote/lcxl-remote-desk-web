@@ -306,6 +306,61 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         &self,
         row: &crate::entity::agent_delegation_group::Model,
     ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr>;
+    /// Decodes a delegation group's frozen creation envelope.
+    fn decode_creation(
+        &self,
+        row: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::creation::CreationEnvelope, DbErr>;
+    /// Prepares the root's ready child notification in its session.
+    async fn prepare_notification(
+        &self,
+        txn: &C,
+        session: &mut PersistedAgentSession,
+    ) -> Result<bool, DbErr>;
+    /// The group and source of the root's ready child notification.
+    async fn ready_notification_source(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    >;
+    /// The resolved wait, group and source of the root's child wait.
+    async fn ready_wait_source(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::wait::ParentWait,
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    >;
+    /// Records the root's notification delivery attempt.
+    async fn mark_notification_attempt(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<(), DbErr>;
+    /// Closes a scheduled group's planning and native stop intents.
+    async fn close_scheduled_group(
+        &self,
+        txn: &C,
+        row: &crate::entity::agent_delegation_group::Model,
+        now_ms: i64,
+    ) -> Result<
+        (
+            usize,
+            desk_diagnose_core::model_observability::permission::PendingEnds,
+        ),
+        DbErr,
+    >;
     /// Every child run of a delegation group.
     async fn group_children(
         &self,

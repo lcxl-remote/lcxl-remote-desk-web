@@ -16,10 +16,7 @@ pub async fn claim_fresh_children_on<C: ConnectionTrait, H: ScheduleHostStores<C
     txn: &C,
     input: FreshTaskClaim<'_>,
 ) -> Result<PersistedAgentSession, ScheduleStoreError> {
-    if input.owner <= 0
-        || input.node_id.is_empty()
-        || !(30..=300).contains(&input.lease_seconds)
-    {
+    if input.owner <= 0 || input.node_id.is_empty() || !(30..=300).contains(&input.lease_seconds) {
         return Err(ScheduleStoreError::Invalid);
     }
     let work = run::Entity::find()
@@ -81,8 +78,7 @@ pub async fn claim_fresh_children_on<C: ConnectionTrait, H: ScheduleHostStores<C
         || session.terminal_error.as_ref().is_some_and(|error| {
             error.kind != desk_agent_protocol::AgentErrorKind::ModelUnavailable
                 || !error.retryable
-                || (!session.subagent_result_only
-                    && session.ready_subagent_notification.is_none())
+                || (!session.subagent_result_only && session.ready_subagent_notification.is_none())
         })
         || session.terminal_permission_request_id.is_some()
         || !session.unclosed_tool_call_ids().is_empty()
@@ -124,13 +120,7 @@ pub async fn claim_fresh_children_on<C: ConnectionTrait, H: ScheduleHostStores<C
             .scheduled_source
             .as_ref()
             .ok_or(ScheduleStoreError::Invalid)?;
-        lock_delegation_source_authority(
-            txn,
-            input.owner,
-            &session.device_id,
-            frozen,
-        )
-        .await?;
+        lock_delegation_source_authority(txn, input.owner, &session.device_id, frozen).await?;
         host.prepare_notification(txn, &mut session).await?;
         row = host
             .find_session(txn, SessionKey::Id(row.id), OrgMode::Any, false)
@@ -144,11 +134,11 @@ pub async fn claim_fresh_children_on<C: ConnectionTrait, H: ScheduleHostStores<C
             .map_err(|_| ScheduleStoreError::Conflict)?
             .ok_or(ScheduleStoreError::Conflict)?
     } else {
-        let (wait, group, source) =
-            host.ready_wait_source(txn, &session)
-                .await
-                .map_err(|_| ScheduleStoreError::Conflict)?
-                .ok_or(ScheduleStoreError::Conflict)?;
+        let (wait, group, source) = host
+            .ready_wait_source(txn, &session)
+            .await
+            .map_err(|_| ScheduleStoreError::Conflict)?
+            .ok_or(ScheduleStoreError::Conflict)?;
         if work.result_ref.as_deref() != Some(format!("children:{}", wait.wait_id).as_str()) {
             return Err(ScheduleStoreError::Conflict);
         }
@@ -164,13 +154,8 @@ pub async fn claim_fresh_children_on<C: ConnectionTrait, H: ScheduleHostStores<C
         .scheduled_source
         .as_ref()
         .ok_or(ScheduleStoreError::Invalid)?;
-    let authority = lock_delegation_source_authority(
-        txn,
-        input.owner,
-        &session.device_id,
-        frozen,
-    )
-    .await?;
+    let authority =
+        lock_delegation_source_authority(txn, input.owner, &session.device_id, frozen).await?;
     // Task -> session lock order agrees with cancellation and native dispatch.
     let locked = host
         .find_session(txn, SessionKey::Id(row.id), OrgMode::Any, true)

@@ -17,16 +17,20 @@ impl ScheduleStore {
             return Ok(false);
         };
         let result_ref = work.result_ref.clone();
-        super::settlement::settle(super::settlement::Settlement {
-            txn,
-            work,
-            now,
-            outcome: desk_agent_protocol::schedule::ScheduledRunStatus::Cancelled,
-            offline_timeout: false,
-            error_kind: Some("cancelled".into()),
-            result_ref,
-        })
+        desk_assistant_data_store::schedule::settle_on(
+            &super::SignalScheduleHost,
+            &txn,
+            desk_assistant_data_store::schedule::Settlement {
+                work,
+                now,
+                outcome: desk_agent_protocol::schedule::ScheduledRunStatus::Cancelled,
+                offline_timeout: false,
+                error_kind: Some("cancelled".into()),
+                result_ref,
+            },
+        )
         .await?;
+        txn.commit().await?;
         Ok(true)
     }
 }

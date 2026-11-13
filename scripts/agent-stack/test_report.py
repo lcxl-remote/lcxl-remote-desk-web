@@ -381,6 +381,22 @@ class Reports(unittest.TestCase):
                 self.assertTrue(report.check_ceiling({'frames': {phase: 128}}, report.HARD_FRAME_LIMIT, phases))
                 self.assertEqual(report.check_ceiling({'frames': {phase + '::_{{closure}}': 65536}}, report.HARD_FRAME_LIMIT, phases), [])
 
+    def test_fresh_children_settlement_requires_each_shared_phase_poll(self):
+        shared = 'desk_assistant_data_store::schedule::fresh_children_settlement::'
+        for package in ['desk-signal', 'lcxl-remote-desk-manager']:
+            for name in ['settle_fresh_children_wait_on', 'load_fresh_children_wait',
+                         'prepare_fresh_children_close', 'close_fresh_children_source',
+                         'persist_fresh_children_close', 'reconcile_fresh_children_receipts_on',
+                         'load_fresh_children_receipts', 'load_fresh_receipt_root',
+                         'persist_fresh_children_receipts']:
+                with self.subTest(package=package, name=name):
+                    phases = [pattern for pattern in gate.REQUIRED[package] if '^' + shared + name + '.*' in pattern]
+                    self.assertEqual(len(phases), 1)
+                    phase = shared + name
+                    self.assertTrue(report.protected(phase))
+                    self.assertTrue(report.check_ceiling({'frames': {phase: 128}}, report.HARD_FRAME_LIMIT, phases))
+                    self.assertEqual(report.check_ceiling({'frames': {phase + '::_{{closure}}': 65536}}, report.HARD_FRAME_LIMIT, phases), [])
+
     def test_fresh_task_entry_requires_its_actual_shared_poll_in_each_host(self):
         for package in ['desk-signal', 'lcxl-remote-desk-manager']:
             patterns = [pattern for pattern in gate.REQUIRED[package]
@@ -420,7 +436,7 @@ class Reports(unittest.TestCase):
                         if 'closure' in pattern and any(name in pattern for name in [
                             'assistant_data_store::', 'schedule_store::', 'agent_goal_store::claim_slice',
                             'agent_run_event_store::', 'agent_subagent_store::observation::'])]
-            self.assertEqual(len(patterns), 74 if package == 'desk-signal' else 77)
+            self.assertEqual(len(patterns), 76 if package == 'desk-signal' else 79)
             for pattern in patterns:
                 constructor = pattern.removeprefix('^').split('.*', 1)[0].split(r'::_\{', 1)[0].rstrip(':')
                 depth = 2 if pattern.count('closure') == 2 else 1

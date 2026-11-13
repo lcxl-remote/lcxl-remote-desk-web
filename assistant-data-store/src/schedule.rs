@@ -19,6 +19,8 @@ mod continuation_wait;
 mod device_wait;
 mod directory_receipt;
 mod edit;
+mod fresh_children;
+mod fresh_children_settlement;
 mod fresh_recovery;
 mod fresh_result;
 mod history;
@@ -59,6 +61,10 @@ pub use continuation_wait::{cancel_continuation_wait_on, lock_approval_on};
 pub use device_wait::wait_for_device_on;
 pub use directory_receipt::verify_directory_receipt_on;
 pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};
+pub use fresh_children::claim_fresh_children_on;
+pub use fresh_children_settlement::{
+    ChildrenWaitClosed, reconcile_fresh_children_receipts_on, settle_fresh_children_wait_on,
+};
 pub use fresh_recovery::recover_action_free_fresh_task_on;
 pub use fresh_result::{FreshResult, finish_fresh_result_on};
 pub use history::{RunHistoryPage, resolve_run_session, run_history};

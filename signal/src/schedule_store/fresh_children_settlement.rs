@@ -1,38 +1,17 @@
 //! End original child waits without reclaiming planning or inventing native results.
 use super::{ScheduleStore, ScheduleStoreError, entity};
-use crate::agent_subagent_store as children;
 #[cfg(test)]
-use crate::entity::agent_subagent_run as child_row;
+use crate::agent_subagent_store as children;
+use crate::entity::agent_schedule_run as run;
+#[cfg(test)]
 use crate::entity::{
-    agent_delegation_group as group_row, agent_schedule_run as run, agent_session,
+    agent_delegation_group as group_row, agent_session, agent_subagent_run as child_row,
 };
-use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin, TurnState};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
-
-// The original transaction and decoded rows stay owned across sequential phases.
-struct FreshWait {
-    txn: crate::config::connection::DatabaseTransaction,
-    work: Box<run::Model>,
-    row: Box<agent_session::Model>,
-    session: Box<PersistedAgentSession>,
-    subject_withdrawn: bool,
-}
-
-struct ClosingFreshWait {
-    wait: Box<FreshWait>,
-    group: Box<group_row::Model>,
-    now: i64,
-    cancelled: bool,
-    expired: bool,
-}
-
-struct FreshReceipts {
-    txn: crate::config::connection::DatabaseTransaction,
-    work: Box<run::Model>,
-    row: Box<agent_session::Model>,
-    session: Box<PersistedAgentSession>,
-    now: i64,
-}
+#[cfg(test)]
+use desk_diagnose_core::session::{PersistedAgentSession, TurnState};
+#[cfg(test)]
+use sea_orm::Set;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 impl ScheduleStore {
     pub(super) async fn children_wait_candidates(
@@ -75,41 +54,6 @@ impl ScheduleStore {
         run_id: &str,
         mut submit: impl FnMut(desk_diagnose_core::model_observability::ObservationEvent),
     ) -> Result<bool, ScheduleStoreError> {
-        let Some(wait) =
-            desk_diagnose_core::future::send_phase(|| self.load_fresh_children_wait(run_id))
-                .await?
-        else {
-            return Ok(false);
-        };
-        let Some(closing) = desk_diagnose_core::future::send_phase(|| {
-            Self::prepare_fresh_children_close(wait, run_id)
-        })
-        .await?
-        else {
-            return Ok(false);
-        };
-        let now = closing.now;
-        let (native, permission_ends) =
-            desk_diagnose_core::future::send_phase(|| Self::close_fresh_children_source(&closing))
-                .await?;
-        if native == children::ScheduledNativeDisposition::Pending {
-            let FreshWait { txn, .. } = *closing.wait;
-            txn.commit().await?;
-            permission_ends.submit(now, &mut submit);
-            return Ok(false);
-        }
-        desk_diagnose_core::future::send_phase(|| {
-            Self::persist_fresh_children_close(closing, native)
-        })
-        .await?;
-        permission_ends.submit(now, &mut submit);
-        Ok(true)
-    }
-
-    async fn load_fresh_children_wait(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<Box<FreshWait>>, ScheduleStoreError> {
         let peek = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .one(&self.db)
@@ -119,379 +63,24 @@ impl ScheduleStore {
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let txn = crate::db::begin_write(&self.db, entity::Entity).await?;
         let subject_withdrawn = false;
-        let task = entity::Entity::find()
-            .filter(entity::Column::ScheduleId.eq(&peek.schedule_id))
-            .filter(entity::Column::OwnerUserId.eq(peek.owner_user_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if task.kind != "fresh_task" || task.active_run_id.as_deref() != Some(run_id) {
-            return Ok(None);
-        }
-        if snapshot.owner_user_id != peek.owner_user_id
-            || snapshot.schedule_id != task.schedule_id
-            || snapshot.target_device_id != task.target_device_id
-            || snapshot.kind != "fresh_task"
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let locked = entity::Entity::update_many()
-            .col_expr(
-                entity::Column::Revision,
-                sea_orm::sea_query::Expr::col(entity::Column::Revision),
+        let decision = desk_diagnose_core::future::send_phase(|| {
+            desk_assistant_data_store::schedule::settle_fresh_children_wait_on(
+                &super::SignalScheduleHost,
+                &txn,
+                peek,
+                snapshot,
+                subject_withdrawn,
+                run_id,
             )
-            .filter(entity::Column::Id.eq(task.id))
-            .filter(entity::Column::Revision.eq(task.revision))
-            .exec(&txn)
-            .await?;
-        if locked.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let work = Box::new(
-            run::Entity::find_by_id(peek.id)
-                .one(&txn)
-                .await?
-                .ok_or(ScheduleStoreError::NotFound)?,
-        );
-        if !matches!(work.status.as_str(), "awaiting_children")
-            || work.failure_accounted
-            || work.finished_at.is_some()
-            || work.lease_owner.is_some()
-            || work.lease_deadline.is_some()
-            || work.attempt != 1
-            || work.conversation_id != work.run_id
-            || work.started_at.is_none()
-        {
-            return Ok(None);
-        }
-        let row = Box::new(
-            agent_session::Entity::find()
-                .filter(agent_session::Column::ConversationId.eq(run_id))
-                .one(&txn)
-                .await?
-                .ok_or(ScheduleStoreError::NotFound)?,
-        );
-        let session = Box::new(
-            PersistedAgentSession::decode_json(&row.state_json)
-                .map_err(|_| ScheduleStoreError::Invalid)?,
-        );
-        if session.actor_id != work.owner_user_id.to_string()
-            || row.actor_id != session.actor_id
-            || session.device_id != snapshot.target_device_id
-            || row.device_id != session.device_id
-            || row.version != session.version
-            || row.lease_token != session.lease_token as i64
-            || row.lease_deadline.is_some()
-            || session.conversation_id != work.run_id
-            || !session.agent_role.is_main()
-            || session.trigger_origin != TriggerOrigin::ScheduledTask
-            || session.input_revision != 1
-            || session.current_request_id.as_deref() != Some(run_id)
-            || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
-            || !(matches!(session.turn_state, TurnState::Idle | TurnState::Cancelled)
-                || (session.turn_state == TurnState::Failed
-                    && session.is_subagent_result_turn()
-                    && (session
-                        .ready_subagent_notification
-                        .as_ref()
-                        .is_some_and(|notice| {
-                            notice.accepted_response_message_id.is_none()
-                                && notice.retry_after_ms.is_some()
-                        })
-                        || session
-                            .ready_subagent_wait
-                            .as_ref()
-                            .is_some_and(|wait| wait.retry_after_ms.is_some()))
-                    && session.terminal_error.as_ref().is_some_and(|error| {
-                        error.kind == desk_agent_protocol::AgentErrorKind::ModelUnavailable
-                            && error.retryable
-                    })))
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        Ok(Some(Box::new(FreshWait {
-            txn,
-            work,
-            row,
-            session,
-            subject_withdrawn,
-        })))
-    }
-
-    async fn prepare_fresh_children_close(
-        wait: Box<FreshWait>,
-        run_id: &str,
-    ) -> Result<Option<Box<ClosingFreshWait>>, ScheduleStoreError> {
-        let txn = &wait.txn;
-        let work = &wait.work;
-        let session = &wait.session;
-        let subject_withdrawn = wait.subject_withdrawn;
-
-        let reference = work
-            .result_ref
-            .as_deref()
-            .and_then(|value| {
-                value
-                    .strip_prefix("children:")
-                    .or_else(|| value.strip_prefix("answer-children:"))
-                    .or_else(|| {
-                        session
-                            .main_stopped
-                            .then(|| value.strip_prefix("stopped-children:"))
-                            .flatten()
-                    })
-            })
-            .filter(|value| desk_diagnose_core::subagent::valid_id(value))
-            .ok_or(ScheduleStoreError::Invalid)?;
-        if !session.main_stopped
-            && !work
-                .result_ref
-                .as_deref()
-                .is_some_and(|value| value.starts_with("answer-children:"))
-            && session
-                .subagent_wait
-                .as_ref()
-                .is_none_or(|wait| wait.wait_id != reference)
-            && session
-                .ready_subagent_wait
-                .as_ref()
-                .is_none_or(|wait| wait.wait_id != reference)
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let groups = group_row::Entity::find()
-            .filter(group_row::Column::RootConversationId.eq(run_id))
-            .filter(group_row::Column::SourceOccurrenceId.eq(run_id))
-            .filter(group_row::Column::SourceScheduleId.eq(&work.schedule_id))
-            .filter(group_row::Column::ActorId.eq(&session.actor_id))
-            .filter(group_row::Column::DeviceId.eq(&session.device_id))
-            .order_by_asc(group_row::Column::Id)
-            .limit(2)
-            .all(txn)
-            .await?;
-        let [group_row] = groups.as_slice() else {
-            return Err(ScheduleStoreError::Conflict);
-        };
-        if session.delegation_group_id.as_deref() != Some(group_row.group_id.as_str())
-            || (work
-                .result_ref
-                .as_deref()
-                .is_some_and(|value| value.starts_with("stopped-children:"))
-                && (!session.main_stopped || reference != group_row.group_id))
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let group = children::decode_group(group_row)?;
-
-        let source = children::decode_creation(group_row)?
-            .scheduled_source
-            .ok_or(ScheduleStoreError::Invalid)?;
-        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
-        let authority_withdrawn =
-            match desk_assistant_data_store::schedule::lock_delegation_source_authority(
-                txn,
-                work.owner_user_id,
-                &session.device_id,
-                &source,
-            )
-            .await
-            {
-                Ok(_) => false,
-                Err(
-                    ScheduleStoreError::Conflict
-                    | ScheduleStoreError::NotFound
-                    | ScheduleStoreError::BudgetExceeded,
-                ) => true,
-                Err(error) => return Err(error),
-            };
-        let tasks = children::group_children_on(txn, &group).await?;
-        let mut all_terminal = true;
-        for task in &tasks {
-            all_terminal &= children::decode_run(task)?.state.is_terminal();
-        }
-        let expired = now >= group.limits.deadline_ms;
-        let cancelled =
-            work.cancel_requested_at.is_some() || (session.main_stopped && all_terminal);
-        let withdrawn = authority_withdrawn
-            || subject_withdrawn
-            || expired
-            || group.source_admission
-                == desk_diagnose_core::subagent::group::SourceAdmission::Closed;
-        if !cancelled && !withdrawn {
-            return Ok(None);
-        }
-        let group = Box::new(group_row.clone());
-        Ok(Some(Box::new(ClosingFreshWait {
-            wait,
-            group,
-            now,
-            cancelled,
-            expired,
-        })))
-    }
-
-    async fn close_fresh_children_source(
-        closing: &ClosingFreshWait,
-    ) -> Result<
-        (
-            children::ScheduledNativeDisposition,
-            desk_diagnose_core::model_observability::permission::PendingEnds,
-        ),
-        ScheduleStoreError,
-    > {
-        let txn = &closing.wait.txn;
-        let session = &closing.wait.session;
-        let group_row = &closing.group;
-        let ClosingFreshWait {
-            now,
-            cancelled,
-            expired,
-            ..
-        } = *closing;
-        // Closing planning and native stop intents commit even while the real
-        // command is still running. Returning false never rolls these back.
-        let (_, mut permission_ends) =
-            children::close_scheduled_group_on(txn, group_row, now).await?;
-        permission_ends.extend(
-            desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
-                session,
-                if cancelled {
-                    desk_diagnose_core::model_observability::PermissionOutcome::Cancelled
-                } else if expired {
-                    desk_diagnose_core::model_observability::PermissionOutcome::Expired
-                } else {
-                    desk_diagnose_core::model_observability::PermissionOutcome::Revoked
-                },
-            ),
-        );
-        let current_group = group_row::Entity::find_by_id(group_row.id)
-            .one(txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let native = children::scheduled_native_on(txn, &current_group).await?;
-        Ok((native, permission_ends))
-    }
-
-    async fn persist_fresh_children_close(
-        closing: Box<ClosingFreshWait>,
-        native: children::ScheduledNativeDisposition,
-    ) -> Result<(), ScheduleStoreError> {
-        let ClosingFreshWait {
-            wait,
-            now,
-            cancelled,
-            expired,
-            ..
-        } = *closing;
-        let FreshWait {
-            txn,
-            work,
-            row,
-            mut session,
-            ..
-        } = *wait;
-        let unknown = native == children::ScheduledNativeDisposition::Unknown;
-        let outcome = if unknown {
-            desk_agent_protocol::schedule::ScheduledRunStatus::OutcomeUnknown
-        } else if cancelled {
-            desk_agent_protocol::schedule::ScheduledRunStatus::Cancelled
-        } else {
-            desk_agent_protocol::schedule::ScheduledRunStatus::Failed
-        };
-        let timestamp =
-            chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
-        if !session.main_stopped {
-            desk_diagnose_core::subagent::control::stop_main_session(
-                &mut session,
-                &timestamp.to_rfc3339(),
-            )
-            .map_err(|_| ScheduleStoreError::Conflict)?;
-        }
-        session.finish_turn(
-            if unknown || !cancelled {
-                TurnState::Failed
-            } else {
-                TurnState::Cancelled
-            },
-            timestamp.to_rfc3339(),
-        );
-        session.terminal_error = Some(desk_agent_protocol::AgentError {
-            kind: if unknown {
-                desk_agent_protocol::AgentErrorKind::TransportError
-            } else if cancelled {
-                desk_agent_protocol::AgentErrorKind::Cancelled
-            } else if expired {
-                desk_agent_protocol::AgentErrorKind::Timeout
-            } else {
-                desk_agent_protocol::AgentErrorKind::PermissionDenied
-            },
-            message: if unknown {
-                "An original delegated action has an unknown outcome; automatic retry is forbidden"
-            } else if cancelled {
-                "Scheduled task stopped; original child records were retained"
-            } else {
-                "The original scheduled source expired or its authority was withdrawn"
-            }
-            .into(),
-            retryable: false,
-            safe_for_model: true,
-            error_code: None,
-        });
-        session.version = row
-            .version
-            .checked_add(1)
-            .ok_or(ScheduleStoreError::Invalid)?;
-        session.updated_at = timestamp.to_rfc3339();
-        let changed = agent_session::Entity::update_many()
-            .set(agent_session::ActiveModel {
-                state_json: Set(session
-                    .encode_json_for_storage()
-                    .map_err(|_| ScheduleStoreError::Invalid)?),
-                version: Set(session.version),
-                lease_token: Set(session.lease_token as i64),
-                lease_deadline: Set(None),
-
-                updated_at: Set(timestamp),
-                ..Default::default()
-            })
-            .filter(agent_session::Column::Id.eq(row.id))
-            .filter(agent_session::Column::Version.eq(row.version))
-            .filter(agent_session::Column::LeaseToken.eq(row.lease_token))
-            .filter(agent_session::Column::LeaseDeadline.is_null())
-            .exec(&txn)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let result_ref = work.result_ref.clone();
-        desk_diagnose_core::future::send_phase(|| {
-            super::settlement::settle(super::settlement::Settlement {
-                txn,
-                work: *work,
-                now,
-                outcome,
-                offline_timeout: false,
-                result_ref,
-                error_kind: Some(
-                    if unknown {
-                        "outcome_unknown"
-                    } else if cancelled {
-                        "cancelled"
-                    } else if expired {
-                        "child_wait_timeout"
-                    } else {
-                        "source_withdrawn"
-                    }
-                    .into(),
-                ),
-            })
         })
         .await?;
-        Ok(())
+        let Some(closed) = super::session_host::finish(txn, decision).await? else {
+            return Ok(false);
+        };
+        closed.permission_ends.submit(closed.now, &mut submit);
+        Ok(closed.settled)
     }
-}
 
-impl ScheduleStore {
     /// Late original results backfill genuine root receipts and close the marker.
     /// The original outcome, failure policy and source admission stay unchanged.
     pub(super) fn reconcile_fresh_children_receipts<'a>(
@@ -509,19 +98,6 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        let Some(wait) =
-            desk_diagnose_core::future::send_phase(|| self.load_fresh_children_receipts(run_id))
-                .await?
-        else {
-            return Ok(false);
-        };
-        desk_diagnose_core::future::send_phase(|| Self::persist_fresh_children_receipts(wait)).await
-    }
-
-    async fn load_fresh_children_receipts(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<Box<FreshReceipts>>, ScheduleStoreError> {
         let peek = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .one(&self.db)
@@ -530,200 +106,17 @@ impl ScheduleStore {
         let snapshot: entity::Model = serde_json::from_str(&peek.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let txn = crate::db::begin_write(&self.db, entity::Entity).await?;
-
-        let task = entity::Entity::find()
-            .filter(entity::Column::ScheduleId.eq(&peek.schedule_id))
-            .filter(entity::Column::OwnerUserId.eq(peek.owner_user_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if task.kind != "fresh_task"
-            || snapshot.kind != "fresh_task"
-            || snapshot.schedule_id != task.schedule_id
-            || snapshot.owner_user_id != peek.owner_user_id
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let locked = entity::Entity::update_many()
-            .col_expr(
-                entity::Column::Revision,
-                sea_orm::sea_query::Expr::col(entity::Column::Revision),
+        let decision = desk_diagnose_core::future::send_phase(|| {
+            desk_assistant_data_store::schedule::reconcile_fresh_children_receipts_on(
+                &super::SignalScheduleHost,
+                &txn,
+                peek,
+                snapshot,
+                run_id,
             )
-            .filter(entity::Column::Id.eq(task.id))
-            .filter(entity::Column::Revision.eq(task.revision))
-            .exec(&txn)
-            .await?;
-        if locked.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let work = Box::new(
-            run::Entity::find_by_id(peek.id)
-                .one(&txn)
-                .await?
-                .ok_or(ScheduleStoreError::NotFound)?,
-        );
-        if work.status != "outcome_unknown"
-            || !work.failure_accounted
-            || work.finished_at.is_none()
-            || work.receipts_reconciled_at.is_some()
-            || work.lease_deadline.is_some()
-            || work.conversation_id != work.run_id
-            || !work.result_ref.as_deref().is_some_and(|value| {
-                value.starts_with("children:")
-                    || value.starts_with("stopped-children:")
-                    || value.starts_with("answer-children:")
-                    || value.starts_with("delegated-effects:")
-            })
-        {
-            return Ok(None);
-        }
-        let groups = group_row::Entity::find()
-            .filter(group_row::Column::RootConversationId.eq(run_id))
-            .filter(group_row::Column::SourceOccurrenceId.eq(run_id))
-            .filter(group_row::Column::SourceScheduleId.eq(&work.schedule_id))
-            .filter(group_row::Column::ActorId.eq(work.owner_user_id.to_string()))
-            .filter(group_row::Column::DeviceId.eq(&snapshot.target_device_id))
-            .limit(2)
-            .all(&txn)
-            .await?;
-        let [group] = groups.as_slice() else {
-            return Err(ScheduleStoreError::Conflict);
-        };
-        if group.source_admission != "closed"
-            || desk_diagnose_core::future::send_phase(|| children::scheduled_native_on(&txn, group))
-                .await?
-                != children::ScheduledNativeDisposition::Settled
-        {
-            return Ok(None);
-        }
-        desk_diagnose_core::future::send_phase(|| {
-            Self::load_fresh_receipt_root(txn, work, Box::new(snapshot), run_id)
         })
-        .await
-        .map(Some)
-    }
-
-    async fn load_fresh_receipt_root(
-        txn: crate::config::connection::DatabaseTransaction,
-        work: Box<run::Model>,
-        snapshot: Box<entity::Model>,
-        run_id: &str,
-    ) -> Result<Box<FreshReceipts>, ScheduleStoreError> {
-        let row = Box::new(
-            agent_session::Entity::find()
-                .filter(agent_session::Column::ConversationId.eq(run_id))
-                .one(&txn)
-                .await?
-                .ok_or(ScheduleStoreError::NotFound)?,
-        );
-        let session = Box::new(
-            PersistedAgentSession::decode_json(&row.state_json)
-                .map_err(|_| ScheduleStoreError::Invalid)?,
-        );
-        if row.actor_id != work.owner_user_id.to_string()
-            || row.actor_id != session.actor_id
-            || row.device_id != snapshot.target_device_id
-            || row.device_id != session.device_id
-            || row.version != session.version
-            || row.lease_token != session.lease_token as i64
-            || row.lease_deadline.is_some()
-            || !session.agent_role.is_main()
-            || session.trigger_origin != TriggerOrigin::ScheduledTask
-            || session.input_revision != 1
-            || session.current_request_id.as_deref() != Some(run_id)
-            || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
-            || !matches!(
-                session.turn_state,
-                TurnState::Idle | TurnState::Failed | TurnState::Cancelled
-            )
-            || !session.pending_auto_triggers.is_empty()
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
-        Ok(Box::new(FreshReceipts {
-            txn,
-            work,
-            row,
-            session,
-            now,
-        }))
-    }
-
-    async fn persist_fresh_children_receipts(
-        wait: Box<FreshReceipts>,
-    ) -> Result<bool, ScheduleStoreError> {
-        let FreshReceipts {
-            txn,
-            work,
-            row,
-            mut session,
-            now,
-        } = *wait;
-        let timestamp =
-            chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
-        if !session.execution_state.states().is_empty()
-            || !session.unclosed_tool_call_ids().is_empty()
-        {
-            let context = super::TaskReceiptContext::load(&txn, &work).await?;
-            let finished_at = timestamp.to_rfc3339();
-            let restored = desk_diagnose_core::future::send_phase(|| {
-                crate::capability_grant_store::fresh_recovery::restore_completed_calls(
-                    &txn,
-                    &mut session,
-                    &context,
-                    &finished_at,
-                )
-            })
-            .await?;
-            if !restored
-                || !session.execution_state.states().is_empty()
-                || !session.unclosed_tool_call_ids().is_empty()
-            {
-                return Ok(false);
-            }
-            session.version = row
-                .version
-                .checked_add(1)
-                .ok_or(ScheduleStoreError::Invalid)?;
-            session.updated_at = timestamp.to_rfc3339();
-            let saved = agent_session::Entity::update_many()
-                .set(agent_session::ActiveModel {
-                    state_json: Set(session
-                        .encode_json_for_storage()
-                        .map_err(|_| ScheduleStoreError::Invalid)?),
-                    version: Set(session.version),
-                    updated_at: Set(timestamp),
-                    ..Default::default()
-                })
-                .filter(agent_session::Column::Id.eq(row.id))
-                .filter(agent_session::Column::Version.eq(row.version))
-                .filter(agent_session::Column::LeaseToken.eq(row.lease_token))
-                .filter(agent_session::Column::LeaseDeadline.is_null())
-                .exec(&txn)
-                .await?;
-            if saved.rows_affected != 1 {
-                return Err(ScheduleStoreError::Conflict);
-            }
-        }
-        let changed = run::Entity::update_many()
-            .set(run::ActiveModel {
-                receipts_reconciled_at: Set(Some(now)),
-                updated_at: Set(now),
-                ..Default::default()
-            })
-            .filter(run::Column::Id.eq(work.id))
-            .filter(run::Column::LeaseEpoch.eq(work.lease_epoch))
-            .filter(run::Column::Status.eq("outcome_unknown"))
-            .filter(run::Column::FailureAccounted.eq(true))
-            .filter(run::Column::ReceiptsReconciledAt.is_null())
-            .exec(&txn)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        txn.commit().await?;
-        Ok(true)
+        .await?;
+        super::session_host::finish(txn, decision).await
     }
 }
 

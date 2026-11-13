@@ -320,6 +320,67 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr> {
         unreachable!()
     }
+    fn decode_creation(
+        &self,
+        _: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::creation::CreationEnvelope, DbErr> {
+        unreachable!()
+    }
+    async fn prepare_notification(
+        &self,
+        _: &DatabaseConnection,
+        _: &mut PersistedAgentSession,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn ready_notification_source(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    > {
+        unreachable!()
+    }
+    async fn ready_wait_source(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::wait::ParentWait,
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    > {
+        unreachable!()
+    }
+    async fn mark_notification_attempt(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<(), DbErr> {
+        unreachable!()
+    }
+    async fn close_scheduled_group(
+        &self,
+        _: &DatabaseConnection,
+        _: &crate::entity::agent_delegation_group::Model,
+        _: i64,
+    ) -> Result<
+        (
+            usize,
+            desk_diagnose_core::model_observability::permission::PendingEnds,
+        ),
+        DbErr,
+    > {
+        unreachable!()
+    }
     async fn directory_receipt(
         &self,
         _: &DatabaseConnection,

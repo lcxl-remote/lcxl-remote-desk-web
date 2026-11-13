@@ -1,20 +1,24 @@
 //! End original child waits without reclaiming planning or inventing native results.
 use super::{
-    Finish, ScheduleStoreError,
+    ScheduleStoreError,
     authority::authority_now,
     lock_delegation_source_authority,
     session::{
-        NativeDisposition, OrgMode, ScheduleHostStores, SessionGuard, SessionKey, SessionPatch,
-        SessionRow,
+        Finish, NativeDisposition, OrgMode, ScheduleHostStores, SessionGuard, SessionKey,
+        SessionPatch, SessionRow,
     },
     settlement::{Settlement, settle_on},
 };
-use crate::entity::{agent_delegation_group as group_row, agent_schedule as entity, agent_schedule_run as run};
+use crate::entity::{
+    agent_delegation_group as group_row, agent_schedule as entity, agent_schedule_run as run,
+};
 use desk_diagnose_core::{
     model_observability::permission::PendingEnds,
     session::{PersistedAgentSession, TriggerOrigin, TurnState},
 };
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 
 // The original rows stay owned across sequential phases of one transaction.
 struct FreshWait<R> {
@@ -74,10 +78,9 @@ pub async fn settle_fresh_children_wait_on<C: ConnectionTrait, H: ScheduleHostSt
         return Ok(Finish::Rollback(None));
     };
     let now = closing.now;
-    let (native, permission_ends) = desk_diagnose_core::future::send_phase(|| {
-        close_fresh_children_source(host, txn, &closing)
-    })
-    .await?;
+    let (native, permission_ends) =
+        desk_diagnose_core::future::send_phase(|| close_fresh_children_source(host, txn, &closing))
+            .await?;
     if native == NativeDisposition::Pending {
         return Ok(Finish::Commit(Some(ChildrenWaitClosed {
             settled: false,
@@ -112,10 +115,9 @@ pub async fn reconcile_fresh_children_receipts_on<C: ConnectionTrait, H: Schedul
     else {
         return Ok(Finish::Rollback(false));
     };
-    let done = desk_diagnose_core::future::send_phase(|| {
-        persist_fresh_children_receipts(host, txn, wait)
-    })
-    .await?;
+    let done =
+        desk_diagnose_core::future::send_phase(|| persist_fresh_children_receipts(host, txn, wait))
+            .await?;
     Ok(if done {
         Finish::Commit(true)
     } else {
@@ -308,36 +310,33 @@ async fn prepare_fresh_children_close<C: ConnectionTrait, H: ScheduleHostStores<
         .scheduled_source
         .ok_or(ScheduleStoreError::Invalid)?;
     let now = authority_now(txn).await?;
-    let authority_withdrawn =
-        match lock_delegation_source_authority(
-            txn,
-            work.owner_user_id,
-            &session.device_id,
-            &source,
-        )
-        .await
-        {
-            Ok(_) => false,
-            Err(
-                ScheduleStoreError::Conflict
-                | ScheduleStoreError::NotFound
-                | ScheduleStoreError::BudgetExceeded,
-            ) => true,
-            Err(error) => return Err(error),
-        };
+    let authority_withdrawn = match lock_delegation_source_authority(
+        txn,
+        work.owner_user_id,
+        &session.device_id,
+        &source,
+    )
+    .await
+    {
+        Ok(_) => false,
+        Err(
+            ScheduleStoreError::Conflict
+            | ScheduleStoreError::NotFound
+            | ScheduleStoreError::BudgetExceeded,
+        ) => true,
+        Err(error) => return Err(error),
+    };
     let tasks = host.group_children(txn, &group).await?;
     let mut all_terminal = true;
     for task in &tasks {
         all_terminal &= crate::worker_request::decode_run(task)?.state.is_terminal();
     }
     let expired = now >= group.limits.deadline_ms;
-    let cancelled =
-        work.cancel_requested_at.is_some() || (session.main_stopped && all_terminal);
+    let cancelled = work.cancel_requested_at.is_some() || (session.main_stopped && all_terminal);
     let withdrawn = authority_withdrawn
         || subject_withdrawn
         || expired
-        || group.source_admission
-            == desk_diagnose_core::subagent::group::SourceAdmission::Closed;
+        || group.source_admission == desk_diagnose_core::subagent::group::SourceAdmission::Closed;
     if !cancelled && !withdrawn {
         return Ok(None);
     }
@@ -372,8 +371,7 @@ async fn close_fresh_children_source<C: ConnectionTrait, H: ScheduleHostStores<C
     } = *closing;
     // Closing planning and native stop intents commit even while the real
     // command is still running. Returning false never rolls these back.
-    let (_, mut permission_ends) =
-        host.close_scheduled_group(txn, group_row, now).await?;
+    let (_, mut permission_ends) = host.close_scheduled_group(txn, group_row, now).await?;
     permission_ends.extend(
         desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
             session,
@@ -505,24 +503,24 @@ async fn persist_fresh_children_close<C: ConnectionTrait, H: ScheduleHostStores<
             host,
             txn,
             Settlement {
-            work: *work,
-            now,
-            outcome,
-            offline_timeout: false,
-            result_ref,
-            error_kind: Some(
-                if unknown {
-                    "outcome_unknown"
-                } else if cancelled {
-                    "cancelled"
-                } else if expired {
-                    "child_wait_timeout"
-                } else {
-                    "source_withdrawn"
-                }
-                .into(),
-            ),
-        },
+                work: *work,
+                now,
+                outcome,
+                offline_timeout: false,
+                result_ref,
+                error_kind: Some(
+                    if unknown {
+                        "outcome_unknown"
+                    } else if cancelled {
+                        "cancelled"
+                    } else if expired {
+                        "child_wait_timeout"
+                    } else {
+                        "source_withdrawn"
+                    }
+                    .into(),
+                ),
+            },
         )
     })
     .await?;
@@ -675,8 +673,7 @@ async fn persist_fresh_children_receipts<C: ConnectionTrait, H: ScheduleHostStor
     } = *wait;
     let timestamp =
         chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
-    if !session.execution_state.states().is_empty()
-        || !session.unclosed_tool_call_ids().is_empty()
+    if !session.execution_state.states().is_empty() || !session.unclosed_tool_call_ids().is_empty()
     {
         let restored = desk_diagnose_core::future::send_phase(|| {
             host.restore_completed_calls(txn, &work, &mut session, now)

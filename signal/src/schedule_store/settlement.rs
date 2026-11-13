@@ -1,6 +1,7 @@
 //! Fenced finalization atomically settles the active slot and failure policy.
 use super::{ScheduleStore, ScheduleStoreError};
 use crate::entity::agent_schedule_run as run;
+#[cfg(test)]
 use desk_agent_protocol::schedule::ScheduledRunStatus;
 #[cfg(test)]
 use desk_assistant_data_store::schedule::database_now;
@@ -46,16 +47,21 @@ impl ScheduleStore {
         if work.status != "running" || work.lease_deadline.is_none_or(|at| at <= now) {
             return Err(ScheduleStoreError::Conflict);
         }
-        settle(Settlement {
-            txn,
-            work,
-            now,
-            outcome,
-            offline_timeout: false,
-            error_kind,
-            result_ref,
-        })
-        .await
+        let settled = desk_assistant_data_store::schedule::settle_on(
+            &super::SignalScheduleHost,
+            &txn,
+            desk_assistant_data_store::schedule::Settlement {
+                work,
+                now,
+                outcome,
+                offline_timeout: false,
+                error_kind,
+                result_ref,
+            },
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(settled)
     }
 
     /// Unstarted work can expire safely; leased work must first be reconciled.
@@ -77,42 +83,4 @@ impl ScheduleStore {
     ) -> Result<Vec<run::Model>, ScheduleStoreError> {
         desk_assistant_data_store::schedule::expired_pending(&self.db, after_id, limit).await
     }
-}
-
-/// Settlement inside a host transaction that this call commits.
-pub(super) struct Settlement {
-    pub(super) txn: crate::config::connection::DatabaseTransaction,
-    pub(super) work: run::Model,
-    pub(super) now: i64,
-    pub(super) outcome: ScheduledRunStatus,
-    pub(super) offline_timeout: bool,
-    pub(super) error_kind: Option<String>,
-    pub(super) result_ref: Option<String>,
-}
-
-pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStoreError> {
-    let Settlement {
-        txn,
-        work,
-        now,
-        outcome,
-        offline_timeout,
-        error_kind,
-        result_ref,
-    } = args;
-    let result = desk_assistant_data_store::schedule::settle_on(
-        &super::SignalScheduleHost,
-        &txn,
-        desk_assistant_data_store::schedule::Settlement {
-            work,
-            now,
-            outcome,
-            offline_timeout,
-            error_kind,
-            result_ref,
-        },
-    )
-    .await?;
-    txn.commit().await?;
-    Ok(result)
 }

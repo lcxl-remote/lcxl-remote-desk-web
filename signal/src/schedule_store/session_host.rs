@@ -465,6 +465,73 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         crate::agent_subagent_store::group_children_on(txn, group).await
     }
 
+    fn decode_creation(
+        &self,
+        row: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::creation::CreationEnvelope, DbErr> {
+        crate::agent_subagent_store::decode_creation(row)
+    }
+
+    async fn prepare_notification(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &mut PersistedAgentSession,
+    ) -> Result<bool, DbErr> {
+        crate::agent_subagent_store::prepare_notification_on(txn, session).await
+    }
+
+    async fn ready_notification_source(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    > {
+        crate::agent_subagent_store::ready_notification_source_on(txn, session).await
+    }
+
+    async fn ready_wait_source(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            desk_diagnose_core::subagent::wait::ParentWait,
+            desk_diagnose_core::subagent::group::DelegationGroup,
+            desk_diagnose_core::subagent::creation::CreationEnvelope,
+        )>,
+        DbErr,
+    > {
+        crate::agent_subagent_store::ready_wait_source_on(txn, session).await
+    }
+
+    async fn mark_notification_attempt(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<(), DbErr> {
+        crate::agent_subagent_store::mark_notification_attempt_on(txn, session).await
+    }
+
+    async fn close_scheduled_group(
+        &self,
+        txn: &DatabaseTransaction,
+        row: &crate::entity::agent_delegation_group::Model,
+        now_ms: i64,
+    ) -> Result<
+        (
+            usize,
+            desk_diagnose_core::model_observability::permission::PendingEnds,
+        ),
+        DbErr,
+    > {
+        crate::agent_subagent_store::close_scheduled_group_on(txn, row, now_ms).await
+    }
+
     async fn directory_receipt(
         &self,
         txn: &DatabaseTransaction,
