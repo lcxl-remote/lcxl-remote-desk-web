@@ -60,7 +60,7 @@ def protected(symbol):
         'create_draft_on', 'capture_retrieval_consent_on', 'capture_definition_consent_on',
         'retrieval_consent', 'fresh_session', 'context_wait', 'fresh_children_settlement', 'fresh_recovery',
         'fresh_children_recovery', 'fresh_permission_recovery',
-        'cancel_run', 'record_run_cancellation', 'scan_wait_expiry_once', 'scan_children_wait_settlement_once',
+        'cancel_run', 'record_run_cancellation',
         'claim_continuation_on', 'assistant_retrieval_deadline_on', 'resume_admission',
         'prepare_continuation_task_on', 'bind_continuation_session_on',
         'ContinuationTaskClaim', 'ContinuationSessionClaim',

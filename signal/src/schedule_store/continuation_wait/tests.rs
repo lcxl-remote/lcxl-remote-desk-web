@@ -149,8 +149,20 @@ async fn durable_cancel_intent_blocks_late_approval_before_cleanup() {
         .is_err()
     );
     txn.rollback().await.unwrap();
-    assert_eq!(store.scan_wait_expiry_once(0).await.unwrap().expired, 1);
-    assert_eq!(store.scan_wait_expiry_once(0).await.unwrap().expired, 0);
+    assert_eq!(
+        desk_assistant_data_store::schedule::scan_wait_expiry_once(&store, 0)
+            .await
+            .unwrap()
+            .expired,
+        1
+    );
+    assert_eq!(
+        desk_assistant_data_store::schedule::scan_wait_expiry_once(&store, 0)
+            .await
+            .unwrap()
+            .expired,
+        0
+    );
 }
 
 #[tokio::test]
@@ -207,7 +219,13 @@ async fn cancellation_between_session_pause_and_occurrence_checkpoint_is_settled
         .unwrap();
     assert!(waiting.cancel_requested_at.is_some());
     assert_eq!(waiting.status, "awaiting_permission");
-    assert_eq!(store.scan_wait_expiry_once(0).await.unwrap().expired, 1);
+    assert_eq!(
+        desk_assistant_data_store::schedule::scan_wait_expiry_once(&store, 0)
+            .await
+            .unwrap()
+            .expired,
+        1
+    );
     let cancelled = run::Entity::find_by_id(work.id)
         .one(&store.db)
         .await

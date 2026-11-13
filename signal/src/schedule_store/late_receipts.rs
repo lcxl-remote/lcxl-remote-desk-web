@@ -4,14 +4,6 @@ use crate::entity::agent_schedule_run as run;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 impl ScheduleStore {
-    pub(super) async fn late_receipt_candidates(
-        &self,
-        after: i64,
-        limit: u64,
-    ) -> Result<Vec<run::Model>, ScheduleStoreError> {
-        desk_assistant_data_store::schedule::late_receipt_candidates(&self.db, after, limit).await
-    }
-
     pub async fn reconcile_late_task_receipts(
         &self,
         run_id: &str,

@@ -37,6 +37,7 @@ mod resume_claim;
 mod resume_lease;
 mod resume_result;
 mod review_wait;
+mod scan;
 mod search;
 pub mod session;
 mod settlement;
@@ -98,6 +99,12 @@ pub use resume_result::{
     CommittedResult, SettlementLease, committed_result, record_committed_continuation_on,
 };
 pub use review_wait::{ReviewPoll, poll_review_decision_on};
+pub use scan::{
+    ScanCursors, ScanWarning, ScheduleScanOps, ScheduleScanReport, scan_action_cancellations_once,
+    scan_calendar_once, scan_children_wait_settlement_once, scan_committed_recovery_once,
+    scan_fresh_recovery_once, scan_late_receipts_once, scan_pending_expiry_once, scan_tick,
+    scan_wait_expiry_once,
+};
 pub use search::search;
 pub use settlement::{Settlement, expire_pending_on, settle_on};
 pub use task::{list, pause_on, read};

@@ -2,23 +2,9 @@
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::{agent_action_item as action, agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 impl ScheduleStore {
-    pub(super) async fn action_cancel_candidates(
-        &self,
-        after: i64,
-        limit: u64,
-    ) -> Result<Vec<run::Model>, ScheduleStoreError> {
-        Ok(run::Entity::find()
-            .filter(run::Column::Id.gt(after))
-            .filter(run::Column::CancelRequestedAt.is_not_null())
-            .order_by_asc(run::Column::Id)
-            .limit(limit)
-            .all(&self.db)
-            .await?)
-    }
-
     /// Stop requests are monotonic and bound to original action identities. A
     /// completed action remains completed; no current execution grant is minted.
     pub async fn propagate_task_cancellation(

@@ -11,28 +11,9 @@ use crate::entity::{
 use desk_diagnose_core::session::{PersistedAgentSession, TurnState};
 #[cfg(test)]
 use sea_orm::Set;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 impl ScheduleStore {
-    pub(super) async fn children_wait_candidates(
-        &self,
-        after: i64,
-        limit: u64,
-    ) -> Result<Vec<run::Model>, ScheduleStoreError> {
-        if after < 0 || !(1..=32).contains(&limit) {
-            return Err(ScheduleStoreError::Invalid);
-        }
-        Ok(run::Entity::find()
-            .filter(run::Column::Id.gt(after))
-            .filter(run::Column::Status.eq("awaiting_children"))
-            .filter(run::Column::FailureAccounted.eq(false))
-            .filter(run::Column::FinishedAt.is_null())
-            .order_by_asc(run::Column::Id)
-            .limit(limit)
-            .all(&self.db)
-            .await?)
-    }
-
     /// Owner-only stop leaves finite children running until terminal or source
     /// expiry. Withdrawal closes child planning immediately; actual native work
     /// is then reconciled before releasing the original schedule's active slot.

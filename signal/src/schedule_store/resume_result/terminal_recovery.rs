@@ -165,7 +165,9 @@ async fn expired_terminal_results_are_recovered_once_without_another_attempt() {
                 .len(),
             1
         );
-        let report = store.scan_committed_recovery_once(0).await.unwrap();
+        let report = desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
+            .await
+            .unwrap();
         assert_eq!(report.recovered, 1);
         let recovered = store
             .recover_committed_continuation(1, &work.run_id)
@@ -188,7 +190,10 @@ async fn expired_terminal_results_are_recovered_once_without_another_attempt() {
                 .is_none()
         );
         assert_eq!(
-            store.scan_committed_recovery_once(0).await.unwrap().scanned,
+            desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
+                .await
+                .unwrap()
+                .scanned,
             0
         );
         let row = agent_session::Entity::find()
@@ -215,8 +220,7 @@ async fn old_answers_and_still_running_sessions_are_not_terminal_evidence() {
     session.conversation.last_mut().unwrap().turn_id = Some("another-turn".into());
     save_session(&store, &session).await;
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .deferred,
@@ -229,8 +233,7 @@ async fn old_answers_and_still_running_sessions_are_not_terminal_evidence() {
     });
     save_session(&store, &session).await;
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .deferred,
@@ -242,8 +245,7 @@ async fn old_answers_and_still_running_sessions_are_not_terminal_evidence() {
     });
     save_session(&store, &session).await;
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .deferred,
@@ -281,8 +283,7 @@ async fn failed_recovery_transaction_keeps_the_original_slot_and_can_be_retried(
     restored = restored.reset_all();
     restored.update(&store.db).await.unwrap();
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .recovered,
@@ -325,8 +326,7 @@ async fn uncertain_action_blocks_terminal_recovery_even_with_a_committed_answer(
     action.status = Set("done".into());
     action.update(&store.db).await.unwrap();
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .recovered,
@@ -372,8 +372,7 @@ async fn committed_permission_pause_recovers_original_wait_without_new_attempt()
             .unwrap();
         let task = store.read(1, &work.schedule_id).await.unwrap();
         assert_eq!(
-            store
-                .scan_committed_recovery_once(0)
+            desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
                 .await
                 .unwrap()
                 .recovered,
@@ -411,7 +410,10 @@ async fn committed_permission_pause_recovers_original_wait_without_new_attempt()
             before
         );
         assert_eq!(
-            store.scan_committed_recovery_once(0).await.unwrap().scanned,
+            desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
+                .await
+                .unwrap()
+                .scanned,
             0
         );
     }
@@ -441,7 +443,9 @@ async fn permission_recovery_requires_exact_current_durable_pause() {
             .await
             .unwrap()
             .unwrap();
-        let report = store.scan_committed_recovery_once(0).await.unwrap();
+        let report = desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
+            .await
+            .unwrap();
         assert_eq!(report.recovered, 0);
         assert_eq!(report.deferred, 1);
         assert_eq!(
@@ -485,8 +489,7 @@ async fn model_only_interruption_and_cancellation_settle_once_without_reclaim() 
     for cancelled in [false, true] {
         let (store, work, session) = interrupted_fixture(cancelled).await;
         assert_eq!(
-            store
-                .scan_committed_recovery_once(0)
+            desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
                 .await
                 .unwrap()
                 .recovered,
@@ -532,7 +535,10 @@ async fn model_only_interruption_and_cancellation_settle_once_without_reclaim() 
         assert_eq!(failures.consecutive_failures, if cancelled { 0 } else { 1 });
         assert!(task.active_run_id.is_none());
         assert_eq!(
-            store.scan_committed_recovery_once(0).await.unwrap().scanned,
+            desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
+                .await
+                .unwrap()
+                .scanned,
             0
         );
         assert_eq!(
@@ -589,8 +595,7 @@ async fn interruption_rolls_back_session_and_run_if_task_settlement_fails() {
     restored.revision = Set(2);
     restored.update(&store.db).await.unwrap();
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .recovered,
@@ -659,8 +664,7 @@ async fn interruption_preserves_live_lease_and_records_untracked_read_as_unavail
     let restored: entity::ActiveModel = task.into();
     restored.reset_all().update(&store.db).await.unwrap();
     assert_eq!(
-        store
-            .scan_committed_recovery_once(0)
+        desk_assistant_data_store::schedule::scan_committed_recovery_once(&store, 0)
             .await
             .unwrap()
             .recovered,
