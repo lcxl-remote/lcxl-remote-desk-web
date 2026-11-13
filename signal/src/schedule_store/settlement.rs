@@ -4,7 +4,7 @@ use crate::entity::{agent_goal_run as goal_row, agent_schedule_run as run};
 use desk_agent_protocol::schedule::ScheduledRunStatus;
 use desk_assistant_data_store::schedule::database_now;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     #[cfg(test)]
@@ -110,19 +110,7 @@ impl ScheduleStore {
         after_id: i64,
         limit: u64,
     ) -> Result<Vec<run::Model>, ScheduleStoreError> {
-        if after_id < 0 || limit == 0 || limit > 100 {
-            return Err(ScheduleStoreError::Invalid);
-        }
-        let now = database_now(&self.db).await?;
-        Ok(run::Entity::find()
-            .filter(run::Column::Id.gt(after_id))
-            .filter(run::Column::Status.is_in(["queued", "waiting_device"]))
-            .filter(run::Column::FailureAccounted.eq(false))
-            .filter(run::Column::StartDeadline.lte(now))
-            .order_by_asc(run::Column::Id)
-            .limit(limit)
-            .all(&self.db)
-            .await?)
+        desk_assistant_data_store::schedule::expired_pending(&self.db, after_id, limit).await
     }
 }
 

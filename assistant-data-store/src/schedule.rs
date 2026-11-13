@@ -9,9 +9,12 @@ use sha2::{Digest, Sha256};
 
 mod authority;
 mod budget;
+mod cancellation;
 mod candidates;
 mod device_wait;
+mod history;
 mod queue;
+mod receipt_context;
 mod search;
 mod task;
 pub use authority::{
@@ -22,14 +25,17 @@ pub use budget::{
     TaskBudgetKind, TaskBudgetRequest, authority_of, reserve_delegation_model_budget_on,
     reserve_run_budget, reserve_task_budget, settle_task_model_budget,
 };
+pub use cancellation::{expired_pending, record_run_cancellation_on};
 pub use candidates::{
     continuation_candidates, expired_continuation_candidates, fresh_task_candidates,
 };
 pub use device_wait::wait_for_device_on;
+pub use history::{RunHistoryPage, resolve_run_session, run_history};
 pub use queue::{
     BudgetPolicySource, claim_queued_on, database_now, due_candidates, enqueue_manual_on,
     materialize_due_on,
 };
+pub use receipt_context::TaskReceiptContext;
 pub use search::search;
 pub use task::{list, pause_on, read};
 

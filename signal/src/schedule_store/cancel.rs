@@ -1,8 +1,7 @@
 //! Owner cancellation persists intent without claiming to undo external effects.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
-use desk_assistant_data_store::schedule::database_now;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 impl ScheduleStore {
     /// The executor observes cancel_requested_at and cancels the matching run lease.
@@ -61,88 +60,11 @@ impl ScheduleStore {
         run_id: &str,
     ) -> Result<(Option<Box<entity::Model>>, Box<run::Model>), ScheduleStoreError> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
-        let now = database_now(&txn).await?;
-        let work = run::Entity::find()
-            .filter(run::Column::OwnerUserId.eq(owner))
-            .filter(run::Column::RunId.eq(run_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if work.failure_accounted {
-            return Ok((None, Box::new(work)));
-        }
-        let task = entity::Entity::find()
-            .filter(entity::Column::ScheduleId.eq(&work.schedule_id))
-            .filter(entity::Column::OwnerUserId.eq(owner))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if task.active_run_id.as_deref() != Some(run_id) {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let unstarted = matches!(work.status.as_str(), "queued" | "waiting_device");
-        let next_status = if unstarted
-            && task.next_run_at.is_none()
-            && matches!(task.status.as_str(), "triggered" | "active")
-        {
-            "completed"
-        } else {
-            &task.status
-        };
-        let touched = entity::Entity::update_many()
-            .set(entity::ActiveModel {
-                status: Set(next_status.into()),
-                revision: Set(task
-                    .revision
-                    .checked_add(1)
-                    .ok_or(ScheduleStoreError::Invalid)?),
-                active_run_id: Set(if unstarted {
-                    None
-                } else {
-                    task.active_run_id.clone()
-                }),
-                updated_at: Set(now),
-                ..Default::default()
-            })
-            .filter(entity::Column::Id.eq(task.id))
-            .filter(entity::Column::Revision.eq(task.revision))
-            .exec(&txn)
-            .await?;
-        if touched.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let changed = run::Entity::update_many()
-            .set(run::ActiveModel {
-                cancel_requested_at: Set(work.cancel_requested_at.or(Some(now))),
-                status: Set(if unstarted {
-                    "cancelled".into()
-                } else {
-                    work.status.clone()
-                }),
-                failure_accounted: Set(unstarted),
-                finished_at: Set(if unstarted {
-                    Some(now)
-                } else {
-                    work.finished_at
-                }),
-                updated_at: Set(now),
-                ..Default::default()
-            })
-            .filter(run::Column::Id.eq(work.id))
-            .filter(run::Column::LeaseEpoch.eq(work.lease_epoch))
-            .filter(run::Column::Status.eq(&work.status))
-            .filter(run::Column::FailureAccounted.eq(false))
-            .exec(&txn)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let result = run::Entity::find_by_id(work.id)
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
+        let result =
+            desk_assistant_data_store::schedule::record_run_cancellation_on(&txn, owner, run_id)
+                .await?;
         txn.commit().await?;
-        Ok((Some(Box::new(task)), Box::new(result)))
+        Ok(result)
     }
 
     pub async fn cancellation_requested(
