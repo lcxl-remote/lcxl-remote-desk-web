@@ -57,7 +57,7 @@ async fn agent_turns_are_normalized_before_the_loop_sees_them() {
         .call(request, &mut desk_diagnose_core::seam::NullTurnSink)
         .await
         .unwrap();
-    handle.stop(true).await;
+    crate::test_server::stop(&handle).await;
     let arguments: serde_json::Value =
         serde_json::from_str(&turn.tool_calls[0].arguments_json).unwrap();
     assert_eq!(arguments, serde_json::json!({"queries":["Calculator"]}));

@@ -313,6 +313,5 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
     drop(socket);
     drop(anonymous);
     map.write().await.clear();
-    handle.stop(true).await;
-    server_task.await.unwrap().unwrap();
+    crate::test_server::stop_and_join(&handle, server_task).await;
 }

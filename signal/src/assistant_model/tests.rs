@@ -277,7 +277,7 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
     assert!(!body.contains(&admitted.request_id));
     assert!(!body.contains("PRIVATE_OWNER_REQUIREMENT"));
     assert!(!body.contains("data_envelope"));
-    handle.stop(true).await;
+    crate::test_server::stop(&handle).await;
 }
 
 async fn seed_native_publication(

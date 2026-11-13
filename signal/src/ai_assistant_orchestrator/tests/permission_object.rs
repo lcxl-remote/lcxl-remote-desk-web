@@ -870,8 +870,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             socket.send(awc::ws::Message::Close(None)).await.unwrap();
             drop(socket);
             map.write().await.clear();
-            handle.stop(true).await;
-            task.await.unwrap().unwrap();
+            crate::test_server::stop_and_join(&handle, task).await;
             db.close().await.unwrap();
             return;
         }
@@ -902,8 +901,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
-        handle.stop(true).await;
-        task.await.unwrap().unwrap();
+        crate::test_server::stop_and_join(&handle, task).await;
         db.close().await.unwrap();
         return;
     }
@@ -936,8 +934,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
-        handle.stop(true).await;
-        task.await.unwrap().unwrap();
+        crate::test_server::stop_and_join(&handle, task).await;
         db.close().await.unwrap();
         return;
     }
@@ -1100,8 +1097,7 @@ tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec!
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
-        handle.stop(true).await;
-        task.await.unwrap().unwrap();
+        crate::test_server::stop_and_join(&handle, task).await;
         db.close().await.unwrap();
         return;
     }
@@ -1297,8 +1293,7 @@ tool_names:vec![], expires_at:None, object_attachments:vec![], live_targets:vec!
     socket.send(awc::ws::Message::Close(None)).await.unwrap();
     drop(socket);
     map.write().await.clear();
-    handle.stop(true).await;
-    task.await.unwrap().unwrap();
+    crate::test_server::stop_and_join(&handle, task).await;
     db.close().await.unwrap();
 }
 

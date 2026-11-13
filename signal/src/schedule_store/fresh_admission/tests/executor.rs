@@ -240,5 +240,5 @@ async fn exercise(model_budget: u64) {
     }
 
     cache.remove_connection(&connection_id);
-    handle.stop(true).await;
+    crate::test_server::stop(&handle).await;
 }

@@ -390,6 +390,5 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     drop(anonymous);
     map.write().await.clear();
     cache.remove_connection("live-context-host");
-    handle.stop(true).await;
-    server_task.await.unwrap().unwrap();
+    crate::test_server::stop_and_join(&handle, server_task).await;
 }

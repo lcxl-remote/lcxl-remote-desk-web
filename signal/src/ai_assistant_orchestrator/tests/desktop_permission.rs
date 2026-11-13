@@ -604,8 +604,7 @@ async fn run_desktop_history_case(
         socket.send(awc::ws::Message::Close(None)).await.unwrap();
         drop(socket);
         map.write().await.clear();
-        handle.stop(true).await;
-        task.await.unwrap().unwrap();
+        crate::test_server::stop_and_join(&handle, task).await;
         db.close().await.unwrap();
         return;
     }
@@ -956,8 +955,7 @@ async fn run_desktop_history_case(
     socket.send(awc::ws::Message::Close(None)).await.unwrap();
     drop(socket);
     map.write().await.clear();
-    handle.stop(true).await;
-    task.await.unwrap().unwrap();
+    crate::test_server::stop_and_join(&handle, task).await;
     db.close().await.unwrap();
 }
 
