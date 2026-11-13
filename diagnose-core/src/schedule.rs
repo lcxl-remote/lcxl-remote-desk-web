@@ -22,6 +22,7 @@ pub const MIN_INTERVAL_SECONDS: u32 = 60;
 pub const MAX_INTERVAL_SECONDS: u32 = 31_536_000;
 
 pub mod definition;
+pub mod dispatch;
 pub mod due;
 pub mod fresh_session;
 pub mod history;

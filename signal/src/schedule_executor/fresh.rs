@@ -1,52 +1,51 @@
 //! Dispatch isolated tasks with current local gates and Provider availability.
 use super::*;
-use desk_agent_protocol::{AgentScope, ExecutionMode};
+use crate::schedule_store::{ClaimedFreshTask, FreshTaskLease};
+use desk_agent_protocol::{AgentError, AgentScope, ExecutionMode};
 use desk_diagnose_core::{
-    capability_availability::callable_tools, model_capability::ModelCapabilities,
+    capability_availability::callable_tools,
+    model_capability::ModelCapabilities,
+    schedule::dispatch::{
+        DevicePresence, FreshDispatchHost, FreshSettled, LeaseIds, PersistedError, TurnRun,
+        dispatch_fresh,
+    },
 };
 
+/// One scan's view of the executor as a fresh-task dispatch host.
+struct FreshHost<'a>(&'a SignalScheduleExecutor);
+
+fn lease(candidate: &DispatchCandidate, ids: LeaseIds) -> FreshTaskLease<'_> {
+    FreshTaskLease {
+        owner: candidate.owner,
+        run_id: &candidate.run_id,
+        node_id: NODE,
+        run_epoch: ids.run_epoch,
+        session_token: ids.session_token,
+    }
+}
+
+fn settled(result: Result<run::Model, ScheduleStoreError>) -> Option<FreshSettled> {
+    match result.ok()?.status.as_str() {
+        "awaiting_children" => Some(FreshSettled::AwaitingChildren),
+        "outcome_unknown" => Some(FreshSettled::OutcomeUnknown),
+        _ => Some(FreshSettled::Other),
+    }
+}
+
 impl SignalScheduleExecutor {
-    pub(super) async fn process_fresh(&self, candidate: run::Model) -> DispatchResult {
-        match desk_diagnose_core::future::boxed(|| self.start_fresh(&candidate)).await {
-            Ok(result) => result,
-            Err(_) => DispatchResult::Deferred,
-        }
+    pub(super) async fn process_fresh(&self, candidate: &DispatchCandidate) -> DispatchResult {
+        dispatch_fresh(&FreshHost(self), candidate).await.result
     }
 
-    async fn start_fresh(
+    async fn claim_fresh(
         &self,
-        candidate: &run::Model,
-    ) -> Result<DispatchResult, ScheduleStoreError> {
+        candidate: &DispatchCandidate,
+        target: String,
+    ) -> Result<(LeaseIds, ClaimedFreshTask), ScheduleStoreError> {
         let store = ScheduleStore::new(self.db.clone());
-        let task = store
-            .read(candidate.owner_user_id, &candidate.schedule_id)
-            .await?;
-        let target = {
-            let peers = self.connections.read().await;
-            let mut matching = peers.values().filter(|peer| {
-                peer.auth_context.auth_kind == AuthKind::TokenAuth
-                    && peer.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && peer.client_id.as_deref() == Some(task.target_device_id.as_str())
-            });
-            let first = matching.next().map(|peer| peer.model.connection_id.clone());
-            if matching.next().is_some() {
-                return Err(ScheduleStoreError::Conflict);
-            }
-            first
-        };
-        let Some(target) = target else {
-            if !matches!(
-                candidate.status.as_str(),
-                "awaiting_permission" | "awaiting_children"
-            ) {
-                store.wait_for_device(&candidate.run_id).await?;
-            }
-            return Ok(DispatchResult::Deferred);
-        };
         let config = crate::model_provider::load(&self.db)
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
-
         let (providers, inventory, _, readiness) =
             crate::ai_assistant_orchestrator::current_capability_projection(
                 &self.db,
@@ -89,7 +88,7 @@ impl SignalScheduleExecutor {
                 self.connections.get_ref(),
                 &self.gate,
                 crate::schedule_store::FreshTaskClaim {
-                    owner: candidate.owner_user_id,
+                    owner: candidate.owner,
                     run_id: &candidate.run_id,
                     node_id: NODE,
                     lease_seconds: LEASE_SECONDS,
@@ -104,76 +103,123 @@ impl SignalScheduleExecutor {
             .one(&self.db)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        let token = claimed.session.lease_token;
-        let result = owned_task::run(crate::ai_assistant_orchestrator::resume_fresh_task(
-            self.connections.clone(),
-            self.db.clone(),
-            self.gate.clone(),
+        let ids = LeaseIds {
+            run_epoch: active.lease_epoch,
+            session_token: claimed.session.lease_token,
+        };
+        Ok((ids, claimed))
+    }
+
+    async fn fresh_persisted_error(
+        &self,
+        candidate: &DispatchCandidate,
+    ) -> Result<Option<AgentError>, ScheduleStoreError> {
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(&candidate.run_id))
+            .one(&self.db)
+            .await?
+            .ok_or(ScheduleStoreError::NotFound)?;
+        let session = PersistedAgentSession::decode_json(&row.state_json)
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        Ok(session.terminal_error)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl FreshDispatchHost for FreshHost<'_> {
+    type Target = String;
+    type Claimed = ClaimedFreshTask;
+
+    async fn device_presence(&self, device_id: &str) -> DevicePresence<String> {
+        self.0.device_route(device_id).await
+    }
+
+    async fn wait_for_device(&self, run_id: &str) {
+        let _ = ScheduleStore::new(self.0.db.clone())
+            .wait_for_device(run_id)
+            .await;
+    }
+
+    async fn claim(
+        &self,
+        candidate: &DispatchCandidate,
+        target: String,
+    ) -> Option<(LeaseIds, ClaimedFreshTask)> {
+        self.0.claim_fresh(candidate, target).await.ok()
+    }
+
+    async fn run_turn(&self, claimed: ClaimedFreshTask) -> TurnRun {
+        match owned_task::run(crate::ai_assistant_orchestrator::resume_fresh_task(
+            self.0.connections.clone(),
+            self.0.db.clone(),
+            self.0.gate.clone(),
             claimed.target_connection_id,
             NODE,
             claimed.session,
             LEASE_SECONDS,
         ))
-        .await;
-        let Ok(result) = result else {
-            return Ok(DispatchResult::Reconcile);
-        };
-        let lease = || crate::schedule_store::FreshTaskLease {
-            owner: candidate.owner_user_id,
-            run_id: &candidate.run_id,
-            node_id: NODE,
-            run_epoch: active.lease_epoch,
-            session_token: token,
-        };
-        let settled = match result {
-            Ok(LoopOutcome::Answered(answer)) => {
-                store.finish_answered_fresh_task(lease(), &answer).await
-            }
-            Ok(LoopOutcome::SubAgentsWaiting { wait_id }) => {
-                return Ok(
-                    if store
-                        .await_fresh_task_children(lease(), &wait_id)
-                        .await
-                        .is_ok()
-                    {
-                        DispatchResult::Waiting
-                    } else {
-                        DispatchResult::Reconcile
-                    },
-                );
-            }
-            Ok(LoopOutcome::PermissionRequested { request_id }) => {
-                return Ok(
-                    if store
-                        .await_fresh_task_permission(lease(), &request_id)
-                        .await
-                        .is_ok()
-                    {
-                        DispatchResult::Waiting
-                    } else {
-                        DispatchResult::Reconcile
-                    },
-                );
-            }
-            _ => {
-                let row = agent_session::Entity::find()
-                    .filter(agent_session::Column::ConversationId.eq(&candidate.run_id))
-                    .one(&self.db)
-                    .await?
-                    .ok_or(ScheduleStoreError::NotFound)?;
-                let session = PersistedAgentSession::decode_json(&row.state_json)
-                    .map_err(|_| ScheduleStoreError::Invalid)?;
-                let Some(error) = session.terminal_error.as_ref() else {
-                    return Ok(DispatchResult::Reconcile);
-                };
-                store.finish_failed_fresh_task(lease(), error).await
-            }
-        };
-        Ok(match settled {
-            Ok(run) if run.status == "awaiting_children" => DispatchResult::Waiting,
-            Ok(run) if run.status == "outcome_unknown" => DispatchResult::Reconcile,
-            Ok(_) => DispatchResult::Settled,
-            Err(_) => DispatchResult::Reconcile,
-        })
+        .await
+        {
+            Ok(result) => TurnRun::Finished(result),
+            Err(_) => TurnRun::Unaccounted,
+        }
+    }
+
+    async fn finish_answered(
+        &self,
+        candidate: &DispatchCandidate,
+        ids: LeaseIds,
+        answer: &str,
+    ) -> Option<FreshSettled> {
+        settled(
+            ScheduleStore::new(self.0.db.clone())
+                .finish_answered_fresh_task(lease(candidate, ids), answer)
+                .await,
+        )
+    }
+
+    async fn await_children(
+        &self,
+        candidate: &DispatchCandidate,
+        ids: LeaseIds,
+        wait_id: &str,
+    ) -> bool {
+        ScheduleStore::new(self.0.db.clone())
+            .await_fresh_task_children(lease(candidate, ids), wait_id)
+            .await
+            .is_ok()
+    }
+
+    async fn await_permission(
+        &self,
+        candidate: &DispatchCandidate,
+        ids: LeaseIds,
+        request_id: &str,
+    ) -> bool {
+        ScheduleStore::new(self.0.db.clone())
+            .await_fresh_task_permission(lease(candidate, ids), request_id)
+            .await
+            .is_ok()
+    }
+
+    async fn persisted_error(&self, candidate: &DispatchCandidate) -> PersistedError {
+        match self.0.fresh_persisted_error(candidate).await {
+            Ok(Some(error)) => PersistedError::Failed(error),
+            Ok(None) => PersistedError::Clean,
+            Err(_) => PersistedError::Unreadable,
+        }
+    }
+
+    async fn finish_failed(
+        &self,
+        candidate: &DispatchCandidate,
+        ids: LeaseIds,
+        error: &AgentError,
+    ) -> Option<FreshSettled> {
+        settled(
+            ScheduleStore::new(self.0.db.clone())
+                .finish_failed_fresh_task(lease(candidate, ids), error)
+                .await,
+        )
     }
 }

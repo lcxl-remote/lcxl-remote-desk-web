@@ -397,13 +397,35 @@ class Reports(unittest.TestCase):
             self.assertTrue(report.check_ceiling({'frames': {'core::ptr::drop_in_place<' + poll + '>': 64}}, report.HARD_FRAME_LIMIT, patterns))
             self.assertEqual(report.check_ceiling({'frames': {poll: 19632}}, report.HARD_FRAME_LIMIT, patterns), [])
 
+    def test_scheduled_dispatch_requires_shared_flows_and_host_turns_in_each_host(self):
+        hosts = {
+            'desk-signal': 'desk_signal::schedule_executor',
+            'lcxl-remote-desk-manager': 'lcxl_remote_desk_manager::service::schedule_executor',
+        }
+        for package, prefix in hosts.items():
+            patterns = [pattern for pattern in gate.REQUIRED[package]
+                        if 'schedule::dispatch' in pattern or 'DispatchHost' in pattern]
+            self.assertEqual(len(patterns), 4)
+            frames = {
+                'desk_diagnose_core::schedule::dispatch::dispatch_continuation::{{closure}}': 4096,
+                'desk_diagnose_core::schedule::dispatch::dispatch_fresh::{{closure}}': 4096,
+                f'<{prefix}::continuation::ContinuationHost as desk_diagnose_core::schedule::dispatch::ContinuationDispatchHost>::run_turn::{{{{closure}}}}': 8192,
+                f'<{prefix}::fresh::FreshHost as desk_diagnose_core::schedule::dispatch::FreshDispatchHost>::run_turn::{{{{closure}}}}': 8192,
+            }
+            for symbol in frames:
+                self.assertTrue(report.protected(symbol), symbol)
+            self.assertEqual(report.check_ceiling({'frames': frames}, report.HARD_FRAME_LIMIT, patterns), [])
+            missing = dict(frames)
+            missing.pop('desk_diagnose_core::schedule::dispatch::dispatch_fresh::{{closure}}')
+            self.assertTrue(report.check_ceiling({'frames': missing}, report.HARD_FRAME_LIMIT, patterns))
+
     def test_metadata_required_poll_frames_reject_constructors_and_drop(self):
         for package in ['desk-signal', 'lcxl-remote-desk-manager']:
             patterns = [pattern for pattern in gate.REQUIRED[package]
                         if 'closure' in pattern and any(name in pattern for name in [
                             'assistant_data_store::', 'schedule_store::', 'agent_goal_store::claim_slice',
                             'agent_run_event_store::', 'agent_subagent_store::observation::'])]
-            self.assertEqual(len(patterns), 72 if package == 'desk-signal' else 74)
+            self.assertEqual(len(patterns), 72 if package == 'desk-signal' else 75)
             for pattern in patterns:
                 constructor = pattern.removeprefix('^').split('.*', 1)[0].split(r'::_\{', 1)[0].rstrip(':')
                 depth = 2 if pattern.count('closure') == 2 else 1

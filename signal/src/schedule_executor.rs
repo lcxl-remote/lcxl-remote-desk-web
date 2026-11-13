@@ -1,5 +1,6 @@
 //! Single-node scheduled dispatch using durable paired claims.
 use crate::config::connection::DatabaseConnection;
+mod continuation;
 mod fresh;
 mod subagents;
 use crate::owned_task;
@@ -15,7 +16,11 @@ use crate::{
     },
 };
 use actix_web::web;
-use desk_diagnose_core::{agent_loop::LoopOutcome, session::PersistedAgentSession};
+use desk_diagnose_core::{
+    agent_loop::LoopOutcome,
+    schedule::dispatch::{DispatchCandidate, DispatchResult},
+    session::PersistedAgentSession,
+};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
@@ -60,13 +65,6 @@ pub struct SignalScheduleExecutor {
     goal_cursor: Arc<std::sync::Mutex<Option<crate::agent_goal_store::ContinuationCursor>>>,
     /// Paces subagent candidates that keep failing; a hint, not an authorization.
     subagent_backoff: Arc<desk_diagnose_core::retry_backoff::RetryBackoff>,
-}
-
-enum DispatchResult {
-    Settled,
-    Waiting,
-    Deferred,
-    Reconcile,
 }
 
 impl SignalScheduleExecutor {
@@ -320,183 +318,37 @@ impl SignalScheduleExecutor {
         }
     }
 
-    async fn claim_initial(&self, candidate: &run::Model) -> Option<(String, ClaimedContinuation)> {
-        let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
-        let row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(&candidate.conversation_id))
-            .filter(agent_session::Column::ActorId.eq(owner.to_string()))
-            .one(&self.db)
-            .await
-            .ok()??;
-        let session = PersistedAgentSession::decode_json(&row.state_json).ok()?;
-        let task: crate::entity::agent_schedule::Model =
-            serde_json::from_str(&candidate.task_snapshot_json).ok()?;
-        let target = {
-            let map = self.connections.read().await;
-            let mut targets = map.values().filter(|target| {
-                target.auth_context.auth_kind == AuthKind::TokenAuth
-                    && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && target.client_id.as_deref() == Some(task.target_device_id.as_str())
-            });
-            let first = targets
-                .next()
-                .map(|target| target.model.connection_id.clone());
-            if targets.next().is_some() {
-                return None;
-            }
-            first
-        };
-        let store = ScheduleStore::new(self.db.clone());
-        let Some(target) = target else {
-            let _ = store.wait_for_device(&candidate.run_id).await;
-
-            return None;
-        };
-        crate::computer_use_readiness::global_computer_use_readiness_cache()
-            .get_fresh(&target, chrono::Utc::now())?;
-        let config = crate::model_provider::load(&self.db).await.ok()?;
-        crate::model_dial::SignalModelSeam::from_config(&config).ok()?;
-        config.destination_identity().ok()?;
-
-        if !self.gate.is_enabled() {
-            return None;
-        }
-        // The persisted scope is only an upper bound. compose_turn independently
-        // projects current readiness, original input and grants before any call.
-        let mut scope = session.scope_snapshot;
-        scope.mode = scope
-            .mode
-            .restrict_to(config.execution_mode)
-            .restrict_to(desk_agent_protocol::ExecutionMode::ConfirmEachAction);
-        let input = ContinuationClaim {
-            owner,
-            run_id: &candidate.run_id,
-            node_id: NODE,
-            lease_seconds: LEASE_SECONDS,
-            policy_revision:
-                desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
-            scope,
-        };
-        let claimed = store
-            .claim_conversation_resume(input)
-            .await
-            .inspect_err(|error| {
-                log::debug!("[schedule-executor] continuation claim deferred: {error:?}");
-            })
-            .ok()?;
-        Some((target, claimed))
-    }
-
     async fn process(&self, candidate: run::Model) -> DispatchResult {
-        if serde_json::from_str::<crate::entity::agent_schedule::Model>(
+        let Ok(task) = serde_json::from_str::<crate::entity::agent_schedule::Model>(
             &candidate.task_snapshot_json,
-        )
-        .is_ok_and(|task| task.kind == "fresh_task")
-        {
-            return desk_diagnose_core::future::boxed(|| self.process_fresh(candidate)).await;
-        }
-        if !self.gate.is_enabled()
-            || candidate.owner_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
-        {
-            return DispatchResult::Deferred;
-        }
-        let claimed = if candidate.status == "awaiting_permission" {
-            claim_scheduled_permission(
-                self.connections.get_ref(),
-                &self.db,
-                &self.gate,
-                &candidate.run_id,
-                LEASE_SECONDS,
-            )
-            .await
-            .ok()
-            .map(|value| (value.target_connection_id, value.claimed))
-        } else {
-            self.claim_initial(&candidate).await
-        };
-        let Some((target, claimed)) = claimed else {
+        ) else {
             return DispatchResult::Deferred;
         };
-        let run_id = claimed.run.run_id.clone();
-        let conversation = claimed.session.conversation_id.clone();
-        let epoch = claimed.run.lease_epoch;
-        let token = claimed.session.lease_token;
-        let held = || ContinuationLease {
+        let candidate = DispatchCandidate {
+            id: candidate.id,
             owner: candidate.owner_user_id,
-            run_id: &run_id,
-            node_id: NODE,
-            run_epoch: epoch,
-            session_token: token,
+            schedule_id: candidate.schedule_id,
+            run_id: candidate.run_id,
+            conversation_id: candidate.conversation_id,
+            status: candidate.status,
+            device_id: task.target_device_id,
         };
-        // Poll the model continuation outside the scanner's dispatch stack.
-        // The owned task preserves scan cancellation ownership.
-        let connections = self.connections.clone();
-        let db = self.db.clone();
-        let gate = self.gate.clone();
-        let result = owned_task::run(async move {
-            Box::pin(resume_scheduled_turn(
-                connections,
-                db,
-                &gate,
-                target,
-                claimed,
-                LEASE_SECONDS,
-            ))
-            .await
-        })
+        if task.kind == "fresh_task" {
+            return desk_diagnose_core::future::boxed(|| self.process_fresh(&candidate)).await;
+        }
+        let report = desk_diagnose_core::schedule::dispatch::dispatch_continuation(
+            &continuation::ContinuationHost(self),
+            &candidate,
+        )
         .await;
-        let Ok(result) = result else {
-            // A lost task is not proof of completion or permission to replay.
-            return DispatchResult::Reconcile;
-        };
-        if let Err(error) = &result {
+        if let Some(error) = &report.stopped {
             log::warn!(
-                "[schedule-executor] continuation {run_id} stopped before settlement: {}",
+                "[schedule-executor] continuation {} stopped before settlement: {}",
+                candidate.run_id,
                 error.message
             );
         }
-        let store = ScheduleStore::new(self.db.clone());
-        let settled = match result {
-            Ok(LoopOutcome::Answered(answer)) => {
-                store.finish_answered_continuation(held(), &answer).await
-            }
-            Ok(LoopOutcome::PermissionRequested { request_id }) => {
-                return if store
-                    .await_continuation_permission(held(), &request_id)
-                    .await
-                    .is_ok()
-                {
-                    DispatchResult::Waiting
-                } else {
-                    DispatchResult::Reconcile
-                };
-            }
-            // A transport error or other loop outcome alone is not completion.
-            // The settlement transaction verifies the persisted error, exact turn,
-            // both leases and absence of unresolved effects before accounting it.
-            _ => {
-                let Ok(Some(row)) = agent_session::Entity::find()
-                    .filter(agent_session::Column::ConversationId.eq(&conversation))
-                    .filter(agent_session::Column::ActorId.eq(candidate.owner_user_id.to_string()))
-                    .one(&self.db)
-                    .await
-                else {
-                    return DispatchResult::Reconcile;
-                };
-                let Ok(session) = PersistedAgentSession::decode_json(&row.state_json) else {
-                    return DispatchResult::Reconcile;
-                };
-                let Some(error) = session.terminal_error else {
-                    return DispatchResult::Reconcile;
-                };
-                store.finish_failed_continuation(held(), &error).await
-            }
-        };
-        if settled.is_ok() {
-            DispatchResult::Settled
-        } else {
-            DispatchResult::Reconcile
-        }
+        report.result
     }
 
     pub async fn run(self) {
