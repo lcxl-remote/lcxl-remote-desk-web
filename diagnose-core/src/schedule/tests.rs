@@ -156,7 +156,7 @@ fn limits_sorting_and_overflow_fail_closed() {
 #[test]
 fn task_requirement_limit_matches_unicode_character_input() {
     use desk_agent_protocol::schedule::*;
-    let mut draft = ScheduleDraft {
+    let mut draft = ScheduleCreation {
         time_confirmation: None,
         client_create_key: "key".into(),
         kind: ScheduledTaskKind::FreshTask,
@@ -172,11 +172,11 @@ fn task_requirement_limit_matches_unicode_character_input() {
         requirement_revision: None,
         creation_source: ScheduleCreationSource::Manual,
     };
-    assert!(normalize_draft(&draft).is_ok());
+    assert!(normalize_creation(&draft).is_ok());
     draft.prompt.push('x');
-    assert_eq!(normalize_draft(&draft), Err(ScheduleError::InvalidDraft));
+    assert_eq!(normalize_creation(&draft), Err(ScheduleError::InvalidCreation));
     draft.prompt = "中".repeat(MAX_SCHEDULE_PROMPT_CHARS);
-    assert!(normalize_draft(&draft).is_ok());
+    assert!(normalize_creation(&draft).is_ok());
     draft.prompt.push('中');
-    assert_eq!(normalize_draft(&draft), Err(ScheduleError::InvalidDraft));
+    assert_eq!(normalize_creation(&draft), Err(ScheduleError::InvalidCreation));
 }

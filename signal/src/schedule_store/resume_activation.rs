@@ -11,7 +11,7 @@ impl ScheduleStore {
     pub async fn create_task(
         &self,
         owner: i32,
-        request: &desk_agent_protocol::schedule::ScheduleDraft,
+        request: &desk_agent_protocol::schedule::ScheduleCreation,
     ) -> Result<entity::Model, ScheduleStoreError> {
         if request.creation_source != desk_agent_protocol::schedule::ScheduleCreationSource::Manual
         {
@@ -20,7 +20,7 @@ impl ScheduleStore {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let task = desk_diagnose_core::future::send_phase(|| {
-            Self::create_draft_on(&txn, owner, request, now, None)
+            Self::create_task_on(&txn, owner, request, now, None)
         })
         .await?;
         let result = if task.status == "pending_review" {

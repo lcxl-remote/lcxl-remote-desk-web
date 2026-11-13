@@ -1193,7 +1193,7 @@ mod tests {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
         let timer = store
-            .create_draft(1, &draft, now().timestamp_millis())
+            .create_pending_task(1, &draft, now().timestamp_millis())
             .await
             .unwrap();
         assert_eq!(timer.status, "pending_review");
@@ -1276,7 +1276,7 @@ mod tests {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
         let timer = store
-            .create_draft(1, &draft, now().timestamp_millis())
+            .create_pending_task(1, &draft, now().timestamp_millis())
             .await
             .unwrap();
         let row = agent_schedule::Entity::find()

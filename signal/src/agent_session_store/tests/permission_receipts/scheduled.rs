@@ -27,7 +27,7 @@ async fn scheduled_approval_claim_consumes_original_receipt_and_preserves_occurr
     store.save(&mut settled).await.unwrap();
     let scheduler = ScheduleStore::new(store.db.clone());
     let now = Utc::now().timestamp() * 1000;
-    let draft = ScheduleDraft {
+    let draft = ScheduleCreation {
         time_confirmation: None,
         client_create_key: "scheduled-permission".into(),
         kind: ScheduledTaskKind::ConversationResume,
@@ -46,7 +46,7 @@ async fn scheduled_approval_claim_consumes_original_receipt_and_preserves_occurr
         requirement_revision: Some(1),
         creation_source: ScheduleCreationSource::Manual,
     };
-    let task = scheduler.create_draft(1, &draft, now).await.unwrap();
+    let task = scheduler.create_pending_task(1, &draft, now).await.unwrap();
     let mut active: task::ActiveModel = task.into();
     active.status = Set("active".into());
     active.next_run_at = Set(Some(now - 1000));

@@ -51,7 +51,7 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
     let now = chrono::Utc::now();
     let ms = now.timestamp_millis();
     let schedules = desk_signal::schedule_store::ScheduleStore::new(db.clone());
-    let draft = ScheduleDraft {
+    let draft = ScheduleCreation {
         client_create_key: "result-rest".into(),
         kind: ScheduledTaskKind::ConversationResume,
         target_device_id: "device-1".into(),
@@ -71,7 +71,7 @@ async fn scheduled_result_rest_owner_guard_and_original_subject() {
         requirement_revision: Some(1),
         creation_source: ScheduleCreationSource::Manual,
     };
-    let task = schedules.create_draft(1, &draft, ms).await.unwrap();
+    let task = schedules.create_pending_task(1, &draft, ms).await.unwrap();
     let run_id = "schedule-run-rest-test";
     let turn_id = format!("{run_id}-turn");
     let mut session = PersistedAgentSession::new(

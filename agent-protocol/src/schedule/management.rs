@@ -81,7 +81,7 @@ pub enum ScheduleManagementRequest {
     },
     /// Owner creation. The task is enabled immediately; there is no draft state.
     CreateTask {
-        task: ScheduleDraft,
+        task: ScheduleCreation,
     },
     /// Decide a pending AI proposal. Approval enables the task as proposed.
     DecideScheduleProposal {

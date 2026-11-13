@@ -4,7 +4,7 @@ use crate::{
     schedule_store::{ContinuationClaim, ScheduleStore},
 };
 use desk_agent_protocol::schedule::{
-    ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
+    ScheduleCreation, ScheduleCreationSource, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
 };
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
@@ -93,7 +93,7 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
     let store = ScheduleStore::new(db.clone());
     let now = store.database_time().await.unwrap();
     let at = chrono::DateTime::from_timestamp_millis(now + 3000).unwrap();
-    let draft = ScheduleDraft {
+    let draft = ScheduleCreation {
         time_confirmation: None,
         client_create_key: "native-recovery".into(),
         kind: ScheduledTaskKind::ConversationResume,
@@ -112,7 +112,7 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
         requirement_revision: Some(session.input_revision),
         creation_source: ScheduleCreationSource::Manual,
     };
-    let task = store.create_draft(1, &draft, now).await.unwrap();
+    let task = store.create_pending_task(1, &draft, now).await.unwrap();
     let task = store
         .activate_pending_for_test(1, &task.schedule_id, task.revision)
         .await

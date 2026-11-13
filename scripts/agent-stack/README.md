@@ -55,7 +55,7 @@ Redis 必须为隔离测试实例。Manager 的并发事务证明测试另使用
 
 主会话的委派保存入口还须覆盖两宿主 `observation::save_main_delegation_session` 和 `save_main_history_on` 的实际 poll。历史准备、原子任务结果确认、原会话 CAS 与最后的历史写入在同一原事务中完成；保留原查询、完整解码和原始 JSON/version/lease 围栏，最后历史配额之后不再查询或写入原生来源。显式 1 MiB/2 MiB 组合覆盖真实保存、同线程重放、晚期历史/覆盖失败回滚及原生写入先于配额的顺序；Schema 和模型档案夹具放在限定线程之外，不能让测试运行时替产品另起任务。
 
-定时定义的检索范围冻结必须覆盖 `ScheduleStore::create_draft_on` 与 `capture_retrieval_consent_on` 的实际 poll。范围来自原主会话的完整解码与原始行围栏，不由当前设置补发；实际创建、回滚、重试和修改继承在显式 1 MiB/2 MiB 线程上组合验证。该检查不证明真实 occurrence 已完成范围绑定、恢复或模型发送。
+定时定义的检索范围冻结必须覆盖宿主实例化的共享 `schedule::create::create_task_on` 与 `capture_retrieval_consent_on` 的实际 poll。范围来自原主会话的完整解码与原始行围栏，不由当前设置补发；实际创建、回滚、重试和修改继承在显式 1 MiB/2 MiB 线程上组合验证。该检查不证明真实 occurrence 已完成范围绑定、恢复或模型发送。
 
 定时检索期限沿用原生运行边界：会话续跑没有固定运行截止时，保留已有范围期限；独立定时任务必须提供已发布合同的运行时限。范围中的可选期限不替代实际任务、当前租约及来源校验；Goal 的原生截止仍须单独生效，不把 `start_deadline` 当作运行截止。
 

@@ -102,7 +102,7 @@ mod tests {
                     .unwrap()
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             };
-            let task = store.create_draft(1, &draft, now).await.unwrap();
+            let task = store.create_pending_task(1, &draft, now).await.unwrap();
             let mut update = entity::ActiveModel {
                 status: Set("active".into()),
                 next_run_at: Set(Some(at)),

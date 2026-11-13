@@ -554,8 +554,8 @@ async fn view(
 async fn resolve_draft(
     db: &DatabaseConnection,
     owner: i32,
-    mut draft: desk_agent_protocol::schedule::ScheduleDraft,
-) -> Result<desk_agent_protocol::schedule::ScheduleDraft, ScheduleStoreError> {
+    mut draft: desk_agent_protocol::schedule::ScheduleCreation,
+) -> Result<desk_agent_protocol::schedule::ScheduleCreation, ScheduleStoreError> {
     // The single owner may name a future/offline device. This is only a draft;
     // execution resolves an authenticated Server audience before any authority.
     resolve_source(db, owner, &mut draft).await?;
@@ -566,7 +566,7 @@ async fn resolve_draft(
 async fn resolve_source(
     db: &DatabaseConnection,
     owner: i32,
-    draft: &mut desk_agent_protocol::schedule::ScheduleDraft,
+    draft: &mut desk_agent_protocol::schedule::ScheduleCreation,
 ) -> Result<(), ScheduleStoreError> {
     use crate::entity::agent_session as session_row;
     use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
@@ -703,7 +703,7 @@ mod tests {
 
     use super::*;
     use desk_agent_protocol::schedule::{
-        ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
+        ScheduleCreation, ScheduleCreationSource, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
         ScheduledTaskStatus,
     };
     use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait, Schema};
@@ -784,7 +784,7 @@ mod tests {
         proposal.client_create_key = "pending-review-detail".into();
         let store = ScheduleStore::new(db.clone());
         let pending = store
-            .create_draft(1, &proposal, chrono::Utc::now().timestamp_millis())
+            .create_pending_task(1, &proposal, chrono::Utc::now().timestamp_millis())
             .await
             .unwrap();
         let reviewed = task(
@@ -933,8 +933,8 @@ mod tests {
         assert_eq!(row::Entity::find().count(&db).await.unwrap(), 2);
     }
 
-    fn draft() -> ScheduleDraft {
-        ScheduleDraft {
+    fn draft() -> ScheduleCreation {
+        ScheduleCreation {
             time_confirmation: None,
             client_create_key: "management-request-1".into(),
             kind: ScheduledTaskKind::FreshTask,

@@ -16,6 +16,7 @@ mod budget;
 mod cancellation;
 mod candidates;
 mod continuation_wait;
+mod create;
 mod device_wait;
 mod directory_receipt;
 mod edit;
@@ -42,6 +43,8 @@ mod search;
 pub mod session;
 mod settlement;
 mod task;
+#[cfg(test)]
+mod test_host;
 pub use approval_admission::{TaskApprovalReview, lock_fresh_approval_on};
 pub use approval_claim::claim_fresh_approval_on;
 pub use approval_expiry::{expire_fresh_approval_wait_on, wait_expiry_candidates};
@@ -59,6 +62,7 @@ pub use candidates::{
     continuation_candidates, expired_continuation_candidates, fresh_task_candidates,
 };
 pub use continuation_wait::{cancel_continuation_wait_on, lock_approval_on};
+pub use create::create_task_on;
 pub use device_wait::wait_for_device_on;
 pub use directory_receipt::verify_directory_receipt_on;
 pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};

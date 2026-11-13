@@ -4,7 +4,7 @@ use crate::{
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 use desk_agent_protocol::schedule::{
-    ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduleTimeConfirmation,
+    ScheduleCreationSource, ScheduleCreation, ScheduleRule, ScheduleSpec, ScheduleTimeConfirmation,
     ScheduleTimeConversion, ScheduledTaskKind,
 };
 use serde::Deserialize;
@@ -102,7 +102,7 @@ pub fn draft(
     session: &PersistedAgentSession,
     call: &ToolCall,
     observation: &crate::model_observability::tool::ToolObservation,
-) -> Result<ScheduleDraft, &'static str> {
+) -> Result<ScheduleCreation, &'static str> {
     use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
     if call.name != REQUEST_SCHEDULE
         || call.id.is_empty()
@@ -197,7 +197,7 @@ pub fn draft(
     ))
     .map_err(|_| "invalid proposal identity")?;
     observation.stage(Stage::Preflight, StageOutcome::Attempted);
-    Ok(ScheduleDraft {
+    Ok(ScheduleCreation {
         time_confirmation,
         client_create_key: format!("ai-schedule-{:x}", Sha256::digest(identity)),
         kind: input.kind,

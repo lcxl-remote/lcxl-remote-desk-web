@@ -10,12 +10,12 @@ use wincode::{SchemaRead, SchemaWrite};
 pub const SCHEDULE_SCHEMA_VERSION: u16 = 1;
 pub const MAX_SCHEDULE_SPEC_BYTES: usize = 4096;
 
-/// Control-end draft intent. Identity, status, grants and leases are server-owned.
+/// Control-end creation intent. Identity, status, grants and leases are server-owned.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
 )]
 #[serde(deny_unknown_fields)]
-pub struct ScheduleDraft {
+pub struct ScheduleCreation {
     pub client_create_key: String,
     pub kind: ScheduledTaskKind,
     pub target_device_id: String,
@@ -54,7 +54,7 @@ pub struct ScheduleSpec {
 )]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScheduleRule {
-    /// Draft-only continuation delay. Activation replaces it with an absolute UTC once rule.
+    /// Creation-only continuation delay. Activation replaces it with an absolute UTC once rule.
     AfterConfirmation {
         delay_seconds: u32,
     },

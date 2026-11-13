@@ -172,7 +172,7 @@ async fn exercise_with_restart(
         .unwrap();
     let original = PersistedAgentSession::decode_json(&row.state_json).unwrap();
     let store = ScheduleStore::new(db.clone());
-    let draft = ScheduleDraft {
+    let draft = ScheduleCreation {
         time_confirmation: None,
         client_create_key: "schedule-original".into(),
         kind: ScheduledTaskKind::ConversationResume,

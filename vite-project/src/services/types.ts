@@ -16881,9 +16881,9 @@ export type ScheduleTimeConfirmation = {
 };
 
 /**
- * @description Control-end draft intent. Identity, status, grants and leases are server-owned.
+ * @description Control-end creation intent. Identity, status, grants and leases are server-owned.
 */
-export type ScheduleDraft = {
+export type ScheduleCreation = {
     /**
      * @type string
     */
@@ -17333,10 +17333,10 @@ export type ScheduleManagementRequest = ({
     */
     operation: ScheduleManagementRequestOperationEnum14Key;
     /**
-     * @description Control-end draft intent. Identity, status, grants and leases are server-owned.
+     * @description Control-end creation intent. Identity, status, grants and leases are server-owned.
      * @type object
     */
-    task: ScheduleDraft;
+    task: ScheduleCreation;
 } | {
     /**
      * @type boolean

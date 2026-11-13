@@ -18,6 +18,7 @@ sea-orm = { version = "2.0.0-rc", default-features = false, features = ["macros"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
 
 [dev-dependencies]

@@ -533,7 +533,7 @@ async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model
     let store = ScheduleStore::new(db);
     let mut draft = super::super::tests::draft();
     draft.spec.rule = rule;
-    let row = store.create_draft(1, &draft, next).await.unwrap();
+    let row = store.create_pending_task(1, &draft, next).await.unwrap();
     entity::Entity::update_many()
         .set(entity::ActiveModel {
             status: Set("active".into()),

@@ -71,7 +71,7 @@ async fn fixture() -> (
         at: fixture_run_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     let task = store
-        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .create_pending_task(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
     (store, task, row, session)
@@ -103,7 +103,7 @@ async fn fresh_proposal(store: &ScheduleStore, session: &PersistedAgentSession) 
     let now = desk_assistant_data_store::schedule::authority_now(&txn)
         .await
         .unwrap();
-    let task = ScheduleStore::create_draft_on(&txn, 1, &draft, now, Some(session))
+    let task = ScheduleStore::create_task_on(&txn, 1, &draft, now, Some(session))
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -269,7 +269,7 @@ async fn fresh_task_edit_rejects_confirmation_delay_without_changing_the_task() 
     let mut draft = super::super::tests::draft();
     draft.client_create_key = "fresh-delay-edit".into();
     let task = store
-        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .create_pending_task(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
     let spec = desk_agent_protocol::schedule::ScheduleSpec {

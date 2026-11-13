@@ -31,9 +31,9 @@ pub(super) async fn wait_for_permission(
     let session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
     let store = ScheduleStore::new(db.clone());
     let task = store
-        .create_draft(
+        .create_pending_task(
             1,
-            &ScheduleDraft {
+            &ScheduleCreation {
                 time_confirmation: None,
                 client_create_key: "scheduled-read".into(),
                 kind: ScheduledTaskKind::ConversationResume,

@@ -57,9 +57,7 @@ def protected(symbol):
         'settle_slice', 'persist_slice_on', 'validate_slice_session_on',
         'claim_slice', 'PreparedGoalClaim', 'scheduler_transition', 'wake_for_assistant_context', 'continuation_candidates',
     ))) or ('schedule_store' in symbol and any(word in symbol for word in (
-        'create_draft_on', 'capture_retrieval_consent_on', 'capture_definition_consent_on',
         'retrieval_consent', 'fresh_session', 'context_wait', 'fresh_children_settlement', 'fresh_recovery',
-        'fresh_children_recovery', 'fresh_permission_recovery',
         'cancel_run', 'record_run_cancellation',
         'claim_continuation_on', 'assistant_retrieval_deadline_on', 'resume_admission',
         'prepare_continuation_task_on', 'bind_continuation_session_on',

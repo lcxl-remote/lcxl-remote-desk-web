@@ -154,10 +154,10 @@ async fn fresh_task_is_bound_by_server_receipt_and_queries_are_paginated() {
     draft.client_create_key = "ai-fresh".into();
     draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::AiProposal;
     let task = store
-        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .create_pending_task(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
-    let text = json!({"state":"draft","schedule_id":task.schedule_id}).to_string();
+    let text = json!({"state":"pending_review","schedule_id":task.schedule_id}).to_string();
     let parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
         "input".into(),
         "schedule a task".into(),

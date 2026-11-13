@@ -62,6 +62,12 @@ pub enum SessionKey<'a> {
         device: Option<&'a str>,
     },
     Id(i64),
+    /// A proposal source: the target device or an unbound conversation.
+    Source {
+        conversation: &'a str,
+        actor: &'a str,
+        device: &'a str,
+    },
 }
 
 /// Columns a write changes; `None` leaves the column untouched.
@@ -431,15 +437,26 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         owner: i32,
         device: Option<&str>,
     ) -> Result<bool, DbErr>;
-    /// Inserts a task definition from an owner request or an AI proposal.
-    async fn create_draft(
+    /// Whether `owner` is an account of this host; OSS has a single account.
+    fn account_owner(&self, owner: i32) -> bool;
+    /// The read selection of the source conversation's accepted input.
+    async fn original_read_context(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<desk_diagnose_core::input_read_context::ReadContextSelection>,
+        ScheduleStoreError,
+    >;
+    /// The owner's current assistant instructions for a definition consent.
+    async fn definition_instructions(
         &self,
         txn: &C,
         owner: i32,
-        request: &desk_agent_protocol::schedule::ScheduleDraft,
-        now_ms: i64,
-        original: Option<&PersistedAgentSession>,
-    ) -> Result<crate::entity::agent_schedule::Model, ScheduleStoreError>;
+    ) -> Result<
+        desk_agent_protocol::ai_assistant::user_instructions::UserInstructions,
+        crate::AssistantStoreError,
+    >;
     /// Freezes the proposing turn's prompt retention on a proposed task.
     async fn record_prompt_retention(
         &self,

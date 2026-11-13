@@ -152,7 +152,7 @@ async fn exercise_process(reconnect: bool) {
         .await
         .unwrap()
         .unwrap();
-    let draft = ScheduleDraft {
+    let draft = ScheduleCreation {
         time_confirmation: None,
         client_create_key: "schedule-original".into(),
         kind: ScheduledTaskKind::ConversationResume,

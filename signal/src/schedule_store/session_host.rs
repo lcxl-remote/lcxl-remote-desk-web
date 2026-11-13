@@ -86,6 +86,14 @@ impl<C: ConnectionTrait> SessionRows<C> for SignalScheduleHost {
     ) -> Result<Option<SessionRow<agent_session::Model>>, DbErr> {
         let mut query: Select<agent_session::Entity> = match key {
             SessionKey::Id(id) => agent_session::Entity::find_by_id(id),
+            SessionKey::Source {
+                conversation,
+                actor,
+                device,
+            } => agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(conversation))
+                .filter(agent_session::Column::ActorId.eq(actor))
+                .filter(agent_session::Column::DeviceId.is_in([device, ""])),
             SessionKey::Conversation {
                 conversation,
                 actor,
@@ -689,15 +697,35 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         Ok(query.one(txn).await?.is_some())
     }
 
-    async fn create_draft(
+    fn account_owner(&self, owner: i32) -> bool {
+        owner == crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
+    }
+
+    async fn original_read_context(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<desk_diagnose_core::input_read_context::ReadContextSelection>,
+        ScheduleStoreError,
+    > {
+        crate::agent_run_event_store::input_context::original_on(txn, session)
+            .await
+            .map_err(|_| ScheduleStoreError::Invalid)
+    }
+
+    async fn definition_instructions(
         &self,
         txn: &DatabaseTransaction,
         owner: i32,
-        request: &desk_agent_protocol::schedule::ScheduleDraft,
-        now_ms: i64,
-        original: Option<&PersistedAgentSession>,
-    ) -> Result<super::entity::Model, ScheduleStoreError> {
-        ScheduleStore::create_draft_on(txn, owner, request, now_ms, original).await
+    ) -> Result<
+        desk_agent_protocol::ai_assistant::user_instructions::UserInstructions,
+        desk_assistant_data_store::AssistantStoreError,
+    > {
+        use crate::config::ConfigConnection;
+        let actor = owner.to_string();
+        crate::assistant_data_store::ensure_runtime_on(txn, &actor).await?;
+        Ok(txn.config_read().await.assistant_user_instructions.clone())
     }
 
     async fn record_prompt_retention(

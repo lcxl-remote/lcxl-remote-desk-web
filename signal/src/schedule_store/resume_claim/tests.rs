@@ -62,7 +62,7 @@ async fn base_fixture() -> (
         at: "2099-01-01T00:00:00Z".into(),
     };
     let task = store
-        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .create_pending_task(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
     (store, task, row, session)
@@ -101,7 +101,7 @@ pub(crate) async fn retrieval_fixture(
         at: "2099-01-01T00:00:00Z".into(),
     };
     let task = store
-        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .create_pending_task(1, &draft, store.database_time().await.unwrap())
         .await
         .unwrap();
     materialize_fixture(store, task, row, session).await

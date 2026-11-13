@@ -120,7 +120,7 @@ pub async fn manage_on<C: ConnectionTrait, H: ScheduleHostStores<C>>(
             }
             observation.stage(Stage::Preflight, StageOutcome::Passed);
             let mut task = desk_diagnose_core::future::send_phase(|| {
-                host.create_draft(txn, owner, &draft, now, Some(session))
+                super::create_task_on(host, txn, owner, &draft, now, Some(session))
             })
             .await?;
             desk_diagnose_core::future::send_phase(|| {

@@ -46,12 +46,12 @@ pub enum ScheduleError {
     InvalidWeekdays,
     InvalidInterval,
     OutOfRange,
-    InvalidDraft,
+    InvalidCreation,
 }
 
-pub fn normalize_draft(
-    draft: &desk_agent_protocol::schedule::ScheduleDraft,
-) -> Result<desk_agent_protocol::schedule::ScheduleDraft, ScheduleError> {
+pub fn normalize_creation(
+    draft: &desk_agent_protocol::schedule::ScheduleCreation,
+) -> Result<desk_agent_protocol::schedule::ScheduleCreation, ScheduleError> {
     use desk_agent_protocol::schedule::ScheduledTaskKind;
     let valid_id = |id: &str| {
         !id.is_empty() && id.len() <= 256 && id.trim() == id && !id.chars().any(char::is_control)
@@ -72,7 +72,7 @@ pub fn normalize_draft(
             .as_deref()
             .is_some_and(|s| !valid_id(s))
     {
-        return Err(ScheduleError::InvalidDraft);
+        return Err(ScheduleError::InvalidCreation);
     }
     match draft.kind {
         ScheduledTaskKind::ConversationResume
@@ -85,13 +85,13 @@ pub fn normalize_draft(
                     ScheduleRule::Once { .. } | ScheduleRule::AfterConfirmation { .. }
                 ) =>
         {
-            return Err(ScheduleError::InvalidDraft);
+            return Err(ScheduleError::InvalidCreation);
         }
         ScheduledTaskKind::FreshTask
             if draft.requirement_revision.is_some()
                 || matches!(draft.spec.rule, ScheduleRule::AfterConfirmation { .. }) =>
         {
-            return Err(ScheduleError::InvalidDraft);
+            return Err(ScheduleError::InvalidCreation);
         }
         _ => {}
     }
