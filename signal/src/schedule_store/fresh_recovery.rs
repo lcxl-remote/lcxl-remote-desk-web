@@ -74,7 +74,7 @@ impl ScheduleStore {
                 .one(&txn)
                 .await?
                 .ok_or(ScheduleStoreError::NotFound)?;
-            let now = super::authority::authority_now(&txn).await?;
+            let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
             if work.status != "running"
                 || work.failure_accounted
                 || work.finished_at.is_some()

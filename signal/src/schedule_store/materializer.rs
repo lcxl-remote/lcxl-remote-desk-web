@@ -403,13 +403,13 @@ impl ScheduleStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::queue::database_now;
     use super::super::{
         entity,
         tests::{draft, store},
     };
     use super::*;
     use desk_agent_protocol::schedule::ScheduleRule;
+    use desk_assistant_data_store::schedule::database_now;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
 
     #[tokio::test]

@@ -227,7 +227,7 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::Conflict)?;
         let current = Box::new(
             desk_diagnose_core::future::send_phase(|| {
-                Self::lock_run_authority(
+                desk_assistant_data_store::schedule::lock_run_authority(
                     txn,
                     work.owner_user_id,
                     &authority.definition().target_device_id,
@@ -255,7 +255,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        super::budget::reserve_run_budget(txn, &current).await?;
+        desk_assistant_data_store::schedule::reserve_run_budget(txn, &current).await?;
         let task: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let now = chrono::DateTime::from_timestamp_millis(current.verified_at())
@@ -307,7 +307,7 @@ impl ScheduleStore {
         // Inserting can wait on a uniqueness lock; recheck expiry before returning.
         let after = Box::new(
             desk_diagnose_core::future::send_phase(|| {
-                Self::lock_run_authority(
+                desk_assistant_data_store::schedule::lock_run_authority(
                     txn,
                     work.owner_user_id,
                     &session.device_id,
@@ -681,7 +681,7 @@ pub(crate) mod tests {
         let work = ScheduleStore::claim_queued_on(&txn, &queued.run_id, "node", 90)
             .await
             .unwrap();
-        let authority = ScheduleStore::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             1,
             &task.target_device_id,
@@ -828,7 +828,7 @@ pub(crate) mod tests {
             let work = ScheduleStore::claim_queued_on(&txn, &queued.run_id, "fresh-node", 90)
                 .await
                 .unwrap();
-            let authority = ScheduleStore::lock_run_authority(
+            let authority = desk_assistant_data_store::schedule::lock_run_authority(
                 &txn,
                 1,
                 &task.target_device_id,
@@ -903,7 +903,7 @@ pub(crate) mod tests {
         let work = ScheduleStore::claim_queued_on(&txn, &queued.run_id, "fresh-node", 90)
             .await
             .unwrap();
-        let authority = ScheduleStore::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             1,
             &task.target_device_id,

@@ -1,5 +1,5 @@
 //! Waiting-task permission inspection. This cannot claim a model or issue a task grant.
-use super::{ScheduleStore, ScheduleStoreError};
+use super::ScheduleStoreError;
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{
@@ -60,7 +60,7 @@ pub(crate) async fn lock_fresh_approval_on(
         .ok_or_else(invalid)?;
     let owner = initial.actor_id.parse::<i32>().map_err(|_| invalid())?;
     let node = work.lease_owner.as_deref().ok_or_else(invalid)?;
-    let authority = ScheduleStore::lock_waiting_approval(
+    let authority = desk_assistant_data_store::schedule::lock_waiting_approval(
         txn,
         owner,
         &initial.device_id,
@@ -98,7 +98,7 @@ pub(crate) async fn lock_fresh_approval_on(
     }
     // The session lock may have waited. Recheck the parent's expiry and revisions
     // using the database wall clock before the caller commits the owner decision.
-    let current = ScheduleStore::lock_waiting_approval(
+    let current = desk_assistant_data_store::schedule::lock_waiting_approval(
         txn,
         owner,
         &session.device_id,

@@ -114,7 +114,7 @@ impl ScheduleStore {
         }
         let work =
             Self::claim_queued_on(&txn, input.run_id, input.node_id, input.lease_seconds).await?;
-        let authority = Self::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             input.owner,
             &task.target_device_id,

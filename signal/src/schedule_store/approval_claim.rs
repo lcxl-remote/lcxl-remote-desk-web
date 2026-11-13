@@ -38,7 +38,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
         let reference = work
             .result_ref
             .as_deref()
@@ -137,7 +137,7 @@ impl ScheduleStore {
         if changed.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
-        Self::lock_run_authority(
+        desk_assistant_data_store::schedule::lock_run_authority(
             txn,
             input.owner,
             &session.device_id,

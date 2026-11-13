@@ -286,23 +286,24 @@ impl ScheduleStore {
         let source = children::decode_creation(group_row)?
             .scheduled_source
             .ok_or(ScheduleStoreError::Invalid)?;
-        let now = super::authority::authority_now(txn).await?;
-        let authority_withdrawn = match Self::lock_delegation_source_authority(
-            txn,
-            work.owner_user_id,
-            &session.device_id,
-            &source,
-        )
-        .await
-        {
-            Ok(_) => false,
-            Err(
-                ScheduleStoreError::Conflict
-                | ScheduleStoreError::NotFound
-                | ScheduleStoreError::BudgetExceeded,
-            ) => true,
-            Err(error) => return Err(error),
-        };
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
+        let authority_withdrawn =
+            match desk_assistant_data_store::schedule::lock_delegation_source_authority(
+                txn,
+                work.owner_user_id,
+                &session.device_id,
+                &source,
+            )
+            .await
+            {
+                Ok(_) => false,
+                Err(
+                    ScheduleStoreError::Conflict
+                    | ScheduleStoreError::NotFound
+                    | ScheduleStoreError::BudgetExceeded,
+                ) => true,
+                Err(error) => return Err(error),
+            };
         let tasks = children::group_children_on(txn, &group).await?;
         let mut all_terminal = true;
         for task in &tasks {
@@ -639,7 +640,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         Ok(Box::new(FreshReceipts {
             txn,
             work,

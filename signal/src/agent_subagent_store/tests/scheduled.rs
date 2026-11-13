@@ -58,7 +58,7 @@ async fn published_parent_on(
     let work = ScheduleStore::claim_queued_on(&txn, &queued.run_id, "source-node", 90)
         .await
         .unwrap();
-    let authority = ScheduleStore::lock_run_authority(
+    let authority = desk_assistant_data_store::schedule::lock_run_authority(
         &txn,
         1,
         "1",

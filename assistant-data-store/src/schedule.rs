@@ -1,11 +1,37 @@
 //! Scheduled-task storage rules shared by Manager and standalone Signal.
 //! Callers own transactions, locks taken before a rule, and policy sources.
-use crate::entity::{agent_schedule, agent_task_budget_reservation as budget};
+use crate::entity::{agent_schedule, agent_task_budget_reservation as ledger};
 #[cfg(test)]
 use crate::entity_table::EntityTableExt;
 use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
 use sea_orm::{ConnectionTrait, DbErr, sea_query::Index};
 use sha2::{Digest, Sha256};
+
+mod authority;
+mod budget;
+mod candidates;
+mod device_wait;
+mod queue;
+mod search;
+mod task;
+pub use authority::{
+    CurrentDelegationSourceAuthority, CurrentTaskAuthority, PendingTaskApproval, authority_now,
+    lock_delegation_source_authority, lock_run_authority, lock_waiting_approval,
+};
+pub use budget::{
+    TaskBudgetKind, TaskBudgetRequest, authority_of, reserve_delegation_model_budget_on,
+    reserve_run_budget, reserve_task_budget, settle_task_model_budget,
+};
+pub use candidates::{
+    continuation_candidates, expired_continuation_candidates, fresh_task_candidates,
+};
+pub use device_wait::wait_for_device_on;
+pub use queue::{
+    BudgetPolicySource, claim_queued_on, database_now, due_candidates, enqueue_manual_on,
+    materialize_due_on,
+};
+pub use search::search;
+pub use task::{list, pause_on, read};
 
 #[derive(Debug)]
 pub enum ScheduleStoreError {
@@ -101,10 +127,10 @@ pub async fn ensure_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     let budget_window = Index::create()
         .if_not_exists()
         .name("idx_task_budget_schedule_day")
-        .table(budget::Entity)
-        .col(budget::Column::ScheduleId)
-        .col(budget::Column::Kind)
-        .col(budget::Column::UtcDay)
+        .table(ledger::Entity)
+        .col(ledger::Column::ScheduleId)
+        .col(ledger::Column::Kind)
+        .col(ledger::Column::UtcDay)
         .to_owned();
     db.execute(&budget_window).await?;
     Ok(())
@@ -140,7 +166,7 @@ mod tests {
         db.execute(&schema.entity_table(agent_schedule::Entity))
             .await
             .unwrap();
-        db.execute(&schema.entity_table(budget::Entity))
+        db.execute(&schema.entity_table(ledger::Entity))
             .await
             .unwrap();
         ensure_indexes(&db).await.unwrap();

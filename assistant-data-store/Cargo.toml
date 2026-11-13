@@ -14,7 +14,7 @@ async-trait = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
 # Hosts select their SQL driver and runtime; this crate does not select either.
-sea-orm = { version = "2.0.0-rc", default-features = false, features = ["macros"] }
+sea-orm = { version = "2.0.0-rc", default-features = false, features = ["macros", "with-chrono"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

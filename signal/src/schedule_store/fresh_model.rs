@@ -34,7 +34,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         // Task -> session matches cancellation, paired renewal and tool dispatch.
-        Self::lock_run_authority(
+        desk_assistant_data_store::schedule::lock_run_authority(
             txn,
             request.owner,
             request.device,
@@ -65,7 +65,7 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::NotFound)?;
         let current = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let now = super::authority::authority_now(txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
         if current != *held
             || row
                 .lease_deadline
@@ -75,7 +75,7 @@ impl ScheduleStore {
         }
         // This rechecks the parent after the session lock and reserves exactly one
         // logical request. A quota record alone is never proof of provider dispatch.
-        Self::reserve_task_budget(txn, request).await
+        desk_assistant_data_store::schedule::reserve_task_budget(txn, request).await
     }
 }
 
@@ -209,7 +209,7 @@ impl ScheduleStore {
         .map_err(|_| ScheduleStoreError::Invalid)?;
         let units = desk_diagnose_core::schedule::model_usage::terminal_token_units(&usage)
             .ok_or(ScheduleStoreError::Invalid)?;
-        Self::settle_task_model_budget(
+        desk_assistant_data_store::schedule::settle_task_model_budget(
             txn,
             owner,
             run_id,

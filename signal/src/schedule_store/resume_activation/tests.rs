@@ -97,7 +97,9 @@ async fn fresh_proposal(store: &ScheduleStore, session: &PersistedAgentSession) 
     let txn = crate::db::begin_write(&store.db, entity::Entity)
         .await
         .unwrap();
-    let now = super::super::authority::authority_now(&txn).await.unwrap();
+    let now = desk_assistant_data_store::schedule::authority_now(&txn)
+        .await
+        .unwrap();
     let task = ScheduleStore::create_draft_on(&txn, 1, &draft, now, Some(session))
         .await
         .unwrap();

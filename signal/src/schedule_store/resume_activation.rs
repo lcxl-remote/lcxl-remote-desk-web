@@ -33,7 +33,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let task = desk_diagnose_core::future::send_phase(|| {
             Self::create_draft_on(&txn, owner, request, now, None)
         })
@@ -118,7 +118,7 @@ impl ScheduleStore {
         let result = if approve {
             Self::activate_on(txn, owner, &task, false).await?
         } else {
-            let now = super::authority::authority_now(txn).await?;
+            let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
             let changed = entity::Entity::update_many()
                 .set(entity::ActiveModel {
                     status: Set("deleted".into()),
@@ -195,7 +195,7 @@ impl ScheduleStore {
         }
         // PostgreSQL CURRENT_TIMESTAMP is the transaction start time. Use the
         // actual database clock after the locks, so an elapsed deadline rejects.
-        let now = super::authority::authority_now(txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
         let spec = parse_json(&task.spec_json).map_err(|_| ScheduleStoreError::Invalid)?;
         let spec = validate_publication(&spec, now, continuation).map_err(|_| {
             ScheduleStoreError::ToolInput(
@@ -342,7 +342,7 @@ pub(super) async fn record_decision_on(
     task: &entity::Model,
     decider: Option<&ProposalDecider>,
 ) -> Result<(), ScheduleStoreError> {
-    let now = super::authority::authority_now(txn).await?;
+    let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
     let rejected = task.status == "deleted";
     let conversation = match decider {
         Some(_) => task.proposal_conversation_id.as_deref(),

@@ -296,7 +296,7 @@ impl ScheduleStore {
         if i64::try_from(failures.recovery_epoch).ok() != Some(work.recovery_epoch) {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         if work.status != "running"
             || work.cancel_requested_at.is_some() != cancelled
             || !settlement_lease.accepts(work.lease_deadline, now)
@@ -456,7 +456,7 @@ impl ScheduleStore {
         }) {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         if !settlement_lease.accepts(work.lease_deadline, now) {
             return Err(ScheduleStoreError::Conflict);
         }

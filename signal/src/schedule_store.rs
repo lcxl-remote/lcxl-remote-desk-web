@@ -7,11 +7,8 @@ use desk_assistant_data_store::entity_table::EntityTableExt;
 use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, sea_query::OnConflict,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::OnConflict};
 
-mod authority;
 mod history;
 mod model_management;
 mod proposal;
@@ -44,9 +41,10 @@ pub use fresh_model::FreshModelDispatch;
 mod materializer;
 pub use materializer::ScheduleScanReport;
 pub(crate) mod budget;
-pub(crate) use authority::CurrentDelegationSourceAuthority;
-pub use authority::CurrentTaskAuthority;
-pub use budget::{TaskBudgetKind, TaskBudgetRequest};
+pub(crate) use desk_assistant_data_store::schedule::CurrentDelegationSourceAuthority;
+pub use desk_assistant_data_store::schedule::{
+    CurrentTaskAuthority, TaskBudgetKind, TaskBudgetRequest,
+};
 mod cancel;
 mod device_wait;
 mod edit;
@@ -63,7 +61,7 @@ mod resume_claim;
 mod resume_lease;
 pub use continuation_heartbeat::ScheduleHeartbeat;
 pub use desk_assistant_data_store::schedule::ScheduleStoreError;
-use desk_assistant_data_store::schedule::{digest, json, key, valid_digest};
+use desk_assistant_data_store::schedule::{digest, json, key};
 pub use resume_claim::{ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim};
 pub use resume_lease::{ContinuationLease, FreshTaskLease};
 mod resume_result;
@@ -93,7 +91,7 @@ pub struct ScheduleStore {
 }
 impl ScheduleStore {
     pub(crate) async fn database_time(&self) -> Result<i64, ScheduleStoreError> {
-        queue::database_now(&self.db).await
+        desk_assistant_data_store::schedule::database_now(&self.db).await
     }
 
     pub fn new(db: DatabaseConnection) -> Self {
@@ -108,79 +106,15 @@ impl ScheduleStore {
         expected_revision: i64,
         now_ms: i64,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        use crate::entity::agent_schedule_run as work_entity;
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
-        let row = entity::Entity::find()
-            .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::ScheduleId.eq(schedule_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if row.revision != expected_revision {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        if !matches!(row.status.as_str(), "active" | "triggered" | "paused") || now_ms < 0 {
-            return Err(ScheduleStoreError::Invalid);
-        }
-        let mut failures: FailureState = serde_json::from_str(&row.failure_state_json)
-            .map_err(|_| ScheduleStoreError::Invalid)?;
-        failures
-            .pause_reasons
-            .insert(desk_agent_protocol::schedule::SchedulePauseReason::User);
-        let revision = row
-            .revision
-            .checked_add(1)
-            .ok_or(ScheduleStoreError::Invalid)?;
-        let pending = if let Some(run_id) = row.active_run_id.as_deref() {
-            work_entity::Entity::find()
-                .filter(work_entity::Column::RunId.eq(run_id))
-                .one(&txn)
-                .await?
-                .filter(|work| matches!(work.status.as_str(), "queued" | "waiting_device"))
-        } else {
-            None
-        };
-        let changed = entity::Entity::update_many()
-            .set(entity::ActiveModel {
-                status: Set("paused".into()),
-                active_run_id: Set(if pending.is_some() {
-                    None
-                } else {
-                    row.active_run_id.clone()
-                }),
-                next_run_at: Set(None),
-                revision: Set(revision),
-                failure_state_json: Set(json(&failures)?),
-                updated_at: Set(now_ms),
-                ..Default::default()
-            })
-            .filter(entity::Column::Id.eq(row.id))
-            .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::Revision.eq(expected_revision))
-            .exec(&txn)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        if let Some(work) = pending {
-            let cancelled = work_entity::Entity::update_many()
-                .set(work_entity::ActiveModel {
-                    status: Set("cancelled".into()),
-                    cancel_requested_at: Set(Some(now_ms)),
-                    failure_accounted: Set(true),
-                    finished_at: Set(Some(now_ms)),
-                    updated_at: Set(now_ms),
-                    ..Default::default()
-                })
-                .filter(work_entity::Column::Id.eq(work.id))
-                .filter(work_entity::Column::Status.eq(work.status))
-                .filter(work_entity::Column::LeaseEpoch.eq(work.lease_epoch))
-                .exec(&txn)
-                .await?;
-            if cancelled.rows_affected != 1 {
-                return Err(ScheduleStoreError::Conflict);
-            }
-        }
+        desk_assistant_data_store::schedule::pause_on(
+            &txn,
+            owner,
+            schedule_id,
+            expected_revision,
+            now_ms,
+        )
+        .await?;
         txn.commit().await?;
         self.read(owner, schedule_id).await
     }
@@ -436,7 +370,7 @@ impl ScheduleStore {
                 });
             }
         }
-        let captured_at = authority::authority_now(db).await?;
+        let captured_at = desk_assistant_data_store::schedule::authority_now(db).await?;
         let captured_at = captured_at
             .try_into()
             .map_err(|_| ScheduleStoreError::Invalid)?;
@@ -510,7 +444,7 @@ impl ScheduleStore {
         data::ensure_runtime_on(db, &actor).await?;
         let config = db.config_read().await;
         let runtime = data::runtime_on(db, &actor).await?;
-        let now = authority::authority_now(db)
+        let now = desk_assistant_data_store::schedule::authority_now(db)
             .await
             .map_err(|error| match error {
                 ScheduleStoreError::Backend(error) => data::AssistantStoreError::Backend(error),
@@ -540,32 +474,16 @@ impl ScheduleStore {
         owner: i32,
         schedule_id: &str,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        entity::Entity::find()
-            .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::ScheduleId.eq(schedule_id))
-            .one(&self.db)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)
+        desk_assistant_data_store::schedule::read(&self.db, owner, schedule_id).await
     }
 
-    /// The stable primary-key cursor prevents duplicate rows during concurrent inserts.
     pub async fn list(
         &self,
         owner: i32,
         after_id: i64,
         limit: u64,
     ) -> Result<Vec<entity::Model>, ScheduleStoreError> {
-        if owner <= 0 || after_id < 0 || limit == 0 || limit > 100 {
-            return Err(ScheduleStoreError::Invalid);
-        }
-        Ok(entity::Entity::find()
-            .filter(entity::Column::OwnerUserId.eq(owner))
-            .filter(entity::Column::Id.gt(after_id))
-            .filter(entity::Column::Status.ne("deleted"))
-            .order_by_asc(entity::Column::Id)
-            .limit(limit)
-            .all(&self.db)
-            .await?)
+        desk_assistant_data_store::schedule::list(&self.db, owner, after_id, limit).await
     }
 }
 
@@ -716,7 +634,9 @@ pub(crate) mod tests {
                 let txn = crate::db::begin_write(&store.db, entity::Entity)
                     .await
                     .unwrap();
-                let now = authority::authority_now(&txn).await.unwrap();
+                let now = desk_assistant_data_store::schedule::authority_now(&txn)
+                    .await
+                    .unwrap();
                 let pending =
                     ScheduleStore::create_draft_on(&txn, owner, &draft, now, Some(source))
                         .await

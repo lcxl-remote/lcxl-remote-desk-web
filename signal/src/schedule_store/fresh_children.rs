@@ -111,8 +111,13 @@ impl ScheduleStore {
                 .scheduled_source
                 .as_ref()
                 .ok_or(ScheduleStoreError::Invalid)?;
-            Self::lock_delegation_source_authority(txn, input.owner, &session.device_id, frozen)
-                .await?;
+            desk_assistant_data_store::schedule::lock_delegation_source_authority(
+                txn,
+                input.owner,
+                &session.device_id,
+                frozen,
+            )
+            .await?;
             crate::agent_subagent_store::prepare_notification_on(txn, &mut session).await?;
             row = agent_session::Entity::find_by_id(row.id)
                 .one(txn)
@@ -146,9 +151,13 @@ impl ScheduleStore {
             .scheduled_source
             .as_ref()
             .ok_or(ScheduleStoreError::Invalid)?;
-        let authority =
-            Self::lock_delegation_source_authority(txn, input.owner, &session.device_id, frozen)
-                .await?;
+        let authority = desk_assistant_data_store::schedule::lock_delegation_source_authority(
+            txn,
+            input.owner,
+            &session.device_id,
+            frozen,
+        )
+        .await?;
         // Task -> session lock order agrees with cancellation and native dispatch.
         let locked = agent_session::Entity::find_by_id(row.id)
             .one(txn)
@@ -157,7 +166,7 @@ impl ScheduleStore {
         if locked != row {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
         let until = now
             .checked_add(i64::from(input.lease_seconds) * 1_000)
             .ok_or(ScheduleStoreError::Invalid)?
@@ -232,7 +241,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         crate::agent_subagent_store::mark_notification_attempt_on(txn, &session).await?;
-        let after = Self::lock_run_authority(
+        let after = desk_assistant_data_store::schedule::lock_run_authority(
             txn,
             input.owner,
             &session.device_id,
@@ -311,7 +320,7 @@ mod tests {
         assert_eq!(current.attempt, 1);
         assert_eq!(current.status, "running");
         let txn = db.begin().await.unwrap();
-        let authority = ScheduleStore::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             1,
             &after.device_id,

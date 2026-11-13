@@ -135,7 +135,7 @@ async fn validate_continuation_action_on(
         .ok_or_else(invalid)?;
     let failures: FailureState =
         serde_json::from_str(&task.failure_state_json).map_err(|_| invalid())?;
-    let now = super::authority::authority_now(txn)
+    let now = desk_assistant_data_store::schedule::authority_now(txn)
         .await
         .map_err(|error| match error {
             super::ScheduleStoreError::Backend(error) => error,
@@ -216,7 +216,7 @@ pub(crate) async fn fresh_action_authority_on(
     {
         return Err(invalid());
     }
-    super::ScheduleStore::lock_run_authority(
+    desk_assistant_data_store::schedule::lock_run_authority(
         txn,
         work.owner_user_id,
         &session.device_id,
@@ -408,7 +408,7 @@ impl super::ScheduleStore {
         consent
             .validate_occurrence_binding(expected, &occurrence)
             .map_err(|message| DbErr::Custom(message.into()))?;
-        let now = super::authority::authority_now(txn)
+        let now = desk_assistant_data_store::schedule::authority_now(txn)
             .await
             .map_err(|_| invalid())?;
         if deadline <= now {

@@ -128,7 +128,7 @@ impl ScheduleStore {
         {
             return Ok(false);
         }
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let timestamp =
             chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
         let context = super::TaskReceiptContext::load(&txn, &work).await?;

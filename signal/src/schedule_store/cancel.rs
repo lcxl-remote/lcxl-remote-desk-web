@@ -1,7 +1,7 @@
 //! Owner cancellation persists intent without claiming to undo external effects.
-use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
+use desk_assistant_data_store::schedule::database_now;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {

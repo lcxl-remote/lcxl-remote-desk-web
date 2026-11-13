@@ -173,7 +173,7 @@ impl ScheduleStore {
             return Ok(false);
         }
         if fresh {
-            Self::lock_run_authority(
+            desk_assistant_data_store::schedule::lock_run_authority(
                 &txn,
                 lease.owner,
                 &snapshot.target_device_id,
@@ -259,7 +259,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let Some(session_deadline) = row.lease_deadline.map(|d| d.timestamp_millis()) else {
             return Ok(false);
         };
@@ -305,7 +305,7 @@ impl ScheduleStore {
         // The session/run locks may have waited. Recheck wall-clock parent expiry
         // after both updates; any error rolls back both deadlines.
         if fresh {
-            Self::lock_run_authority(
+            desk_assistant_data_store::schedule::lock_run_authority(
                 &txn,
                 lease.owner,
                 &snapshot.target_device_id,

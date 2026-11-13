@@ -148,7 +148,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         let reconciled = work.receipts_reconciled_at;
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         if reconciled.is_some_and(|value| value > now) {
             return Err(ScheduleStoreError::Conflict);
         }

@@ -87,7 +87,7 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::Invalid)?
             .checked_add(i64::from(policy.maximum.max_runtime_seconds) * 1000)
             .ok_or(ScheduleStoreError::Invalid)?;
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let row = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(run_id))
             .lock_exclusive()

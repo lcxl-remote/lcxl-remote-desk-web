@@ -156,7 +156,7 @@ impl MeteredModel {
                 .await
                 .map_err(model_gate::admission_error)?;
         desk_diagnose_core::future::boxed(|| async {
-            ScheduleStore::lock_run_authority(
+            desk_assistant_data_store::schedule::lock_run_authority(
                 &txn,
                 SINGLE_ACCOUNT_USER_ID,
                 &task.device_id,

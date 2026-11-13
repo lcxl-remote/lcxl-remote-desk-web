@@ -479,7 +479,7 @@ impl ScheduleStore {
         if locked.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(txn).await?;
         if permission.is_none() && now >= work.start_deadline {
             return Err(ScheduleStoreError::Conflict);
         }

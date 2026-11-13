@@ -155,7 +155,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let now = super::authority::authority_now(&txn).await?;
+        let now = desk_assistant_data_store::schedule::authority_now(&txn).await?;
         let timestamp =
             chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
         let reference = work

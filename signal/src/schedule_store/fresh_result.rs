@@ -78,7 +78,7 @@ impl ScheduleStore {
             .one(&txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        let authority = Self::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             lease.owner,
             &initial.device_id,
@@ -313,7 +313,7 @@ impl ScheduleStore {
                 )
             }
         };
-        let current = Self::lock_run_authority(
+        let current = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             lease.owner,
             &session.device_id,

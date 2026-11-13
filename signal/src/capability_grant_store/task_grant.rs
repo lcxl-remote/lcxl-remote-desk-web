@@ -4,7 +4,7 @@ use crate::config::connection::DatabaseTransaction;
 mod exception;
 use super::*;
 use crate::entity::agent_task_budget_reservation as ledger;
-use crate::schedule_store::{self, ScheduleStore, TaskBudgetKind, TaskBudgetRequest};
+use crate::schedule_store::{self, TaskBudgetKind, TaskBudgetRequest};
 use desk_agent_protocol::capability_grant::{
     CAPABILITY_GRANT_SCHEMA_VERSION, CapabilityGrant, CapabilityGrantIssuer, CapabilityGrantLimits,
     CapabilityGrantUsePolicy,
@@ -101,7 +101,7 @@ pub(super) async fn issue_on(
         }
     };
     let allocation = desk_diagnose_core::future::boxed(|| async {
-        ScheduleStore::reserve_task_budget(
+        desk_assistant_data_store::schedule::reserve_task_budget(
             txn,
             &TaskBudgetRequest {
                 owner: authority.run().owner_user_id,

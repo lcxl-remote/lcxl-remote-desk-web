@@ -47,7 +47,7 @@ pub(super) async fn reserve_on(
     if row.source_schedule_budget_id.is_some() || row.version != 1 {
         return Err(invalid());
     }
-    let allocation = crate::schedule_store::ScheduleStore::reserve_delegation_model_budget_on(
+    let allocation = desk_assistant_data_store::schedule::reserve_delegation_model_budget_on(
         txn,
         source,
         &key(reservation),
@@ -182,7 +182,7 @@ pub(super) async fn settle_on(
             row.provider_receipt_kind.as_deref().unwrap_or_default(),
             row.provider_receipt_id.as_deref().unwrap_or_default()
         );
-        crate::schedule_store::ScheduleStore::settle_task_model_budget(
+        desk_assistant_data_store::schedule::settle_task_model_budget(
             txn,
             allocation.owner_user_id,
             &allocation.run_id,

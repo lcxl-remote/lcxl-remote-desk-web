@@ -1,9 +1,12 @@
-use super::*;
+use super::super::*;
 use crate::config::connection::DatabaseConnection;
 use crate::entity::agent_schedule_run as run;
+use crate::entity::agent_task_budget_reservation as ledger;
 use desk_agent_protocol::schedule::{ScheduledRunStatus, policy::TaskBudget};
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
+use desk_assistant_data_store::schedule::*;
+use sea_orm::PaginatorTrait;
 use sea_orm::{ConnectionTrait, TransactionTrait};
 
 /// Small platform limits pinned by the claimed occurrence: one run a day,
@@ -57,7 +60,7 @@ pub(crate) async fn reserve(
     units: u64,
 ) -> Result<ledger::Model, ScheduleStoreError> {
     let txn = store.db.begin().await.unwrap();
-    let result = ScheduleStore::reserve_task_budget(
+    let result = desk_assistant_data_store::schedule::reserve_task_budget(
         &txn,
         &TaskBudgetRequest {
             owner: 1,
@@ -87,7 +90,7 @@ async fn settle(
     receipt: &str,
 ) -> Result<ledger::Model, ScheduleStoreError> {
     let txn = store.db.begin().await.unwrap();
-    let result = ScheduleStore::settle_task_model_budget(
+    let result = desk_assistant_data_store::schedule::settle_task_model_budget(
         &txn,
         1,
         &work.run_id,
@@ -109,7 +112,7 @@ async fn tool_budget_is_atomic_idempotent_and_never_refilled_by_a_retry() {
     let (store, task, work) = fixture().await;
     let before = store.read(1, &task.schedule_id).await.unwrap();
     let txn = store.db.begin().await.unwrap();
-    ScheduleStore::reserve_task_budget(
+    desk_assistant_data_store::schedule::reserve_task_budget(
         &txn,
         &TaskBudgetRequest {
             owner: 1,
@@ -147,7 +150,7 @@ async fn tool_budget_is_atomic_idempotent_and_never_refilled_by_a_retry() {
     assert_eq!(ledger::Entity::find().count(&store.db).await.unwrap(), 3);
     let txn = store.db.begin().await.unwrap();
     assert!(matches!(
-        ScheduleStore::reserve_task_budget(
+        desk_assistant_data_store::schedule::reserve_task_budget(
             &txn,
             &TaskBudgetRequest {
                 owner: 1,
@@ -337,7 +340,9 @@ async fn utc_day_run_quota_survives_a_pause_and_resume() {
             1,
             &task.schedule_id,
             current.revision,
-            super::super::queue::database_now(&store.db).await.unwrap(),
+            desk_assistant_data_store::schedule::database_now(&store.db)
+                .await
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -449,7 +454,7 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
             .unwrap();
         let txn = store.db.begin().await.unwrap();
         let canonical = super::super::digest("{}");
-        let budget = ScheduleStore::reserve_task_budget(
+        let budget = desk_assistant_data_store::schedule::reserve_task_budget(
             &txn,
             &TaskBudgetRequest {
                 owner: 1,
@@ -465,7 +470,7 @@ async fn budget_and_exact_task_grant_commit_or_rollback_together() {
         )
         .await
         .unwrap();
-        let authority = ScheduleStore::lock_run_authority(
+        let authority = desk_assistant_data_store::schedule::lock_run_authority(
             &txn,
             1,
             &task.target_device_id,

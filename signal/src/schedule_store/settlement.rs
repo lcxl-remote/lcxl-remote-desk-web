@@ -1,8 +1,8 @@
 //! Fenced finalization atomically settles the active slot and failure policy.
-use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity, json};
 use crate::entity::{agent_goal_run as goal_row, agent_schedule_run as run};
 use desk_agent_protocol::schedule::ScheduledRunStatus;
+use desk_assistant_data_store::schedule::database_now;
 use desk_diagnose_core::schedule::lifecycle::FailureState;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
