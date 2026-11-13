@@ -299,6 +299,27 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     ) -> Result<bool, DbErr> {
         unreachable!()
     }
+    async fn verify_fresh_wait_request(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &str,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    fn decode_group(
+        &self,
+        _: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr> {
+        unreachable!()
+    }
+    async fn group_children(
+        &self,
+        _: &DatabaseConnection,
+        _: &desk_diagnose_core::subagent::group::DelegationGroup,
+    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr> {
+        unreachable!()
+    }
     async fn directory_receipt(
         &self,
         _: &DatabaseConnection,

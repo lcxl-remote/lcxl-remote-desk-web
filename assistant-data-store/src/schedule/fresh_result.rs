@@ -366,7 +366,7 @@ pub async fn finish_fresh_result_on<C: ConnectionTrait, H: ScheduleHostStores<C>
 
 /// Whether an action leaves a fresh result's external effects unknown. Only a
 /// failed result may carry unsuccessful actions, and only finished ones.
-fn action_leaves_unknown(
+pub(super) fn action_leaves_unknown(
     class: ActionClass,
     failure: bool,
     effect_after_intent: bool,

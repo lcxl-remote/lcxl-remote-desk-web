@@ -1,19 +1,25 @@
 //! Recover a committed task permission pause without restarting the model.
-use super::{ScheduleStoreError, entity};
-use crate::config::connection::DatabaseTransaction;
-use crate::entity::{agent_action_item as work_item, agent_schedule_run as run, agent_session};
+use super::super::{
+    ScheduleStoreError,
+    session::{
+        ActionClass, ActionFilter, Finish, ScheduleHostStores, SessionGuard, SessionPatch,
+        SessionRow,
+    },
+};
+use crate::entity::{agent_schedule as entity, agent_schedule_run as run};
 use desk_diagnose_core::session::{ExecutionState, PersistedAgentSession, TurnState};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
 /// Caller has locked the original task and session and checked subject, run and
 /// expired execution lease. Ownership of the transaction prevents a partial wait.
-pub(super) async fn recover(
-    txn: DatabaseTransaction,
+pub(in crate::schedule) async fn recover<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
     work: run::Model,
-    row: agent_session::Model,
+    row: SessionRow<H::Row>,
     mut session: PersistedAgentSession,
     now: i64,
-) -> Result<bool, ScheduleStoreError> {
+) -> Result<Finish<bool>, ScheduleStoreError> {
     let unfinished = desk_diagnose_core::schedule::permission_wait::unfinished_pause(&session);
     if (session.turn_state != TurnState::Idle && unfinished.is_none())
         || session.execution_state != ExecutionState::None
@@ -21,14 +27,12 @@ pub(super) async fn recover(
         || (unfinished.is_none() && session.handled_input_seq != session.latest_input_seq)
         || !session.pending_auto_triggers.is_empty()
         || !session.unclosed_tool_call_ids().is_empty()
-        || row
-            .lease_deadline
-            .is_some_and(|deadline| deadline.timestamp_millis() > now)
+        || row.lease_deadline_ms.is_some_and(|deadline| deadline > now)
     {
-        return Ok(false);
+        return Ok(Finish::Rollback(false));
     }
-    if unfinished.is_some() && row.lease_deadline.is_none() {
-        return Ok(false);
+    if unfinished.is_some() && row.lease_deadline_ms.is_none() {
+        return Ok(Finish::Rollback(false));
     }
     let request_id = session
         .terminal_permission_request_id
@@ -46,34 +50,27 @@ pub(super) async fn recover(
     {
         return Err(ScheduleStoreError::Conflict);
     }
-    if work_item::Entity::find()
-        .filter(work_item::Column::ConversationId.eq(&work.run_id))
-        .filter(
-            work_item::Column::Status.ne(crate::capability_grant_store::CAPABILITY_WORK_SUCCEEDED),
+    if host
+        .find_action(
+            txn,
+            &work.run_id,
+            ActionFilter {
+                exclude: Some(ActionClass::Succeeded),
+                ..ActionFilter::default()
+            },
+            true,
         )
-        .lock_exclusive()
-        .one(&txn)
         .await?
         .is_some()
     {
-        return Ok(false);
+        return Ok(Finish::Rollback(false));
     }
     if reference.starts_with("permission:") {
-        crate::agent_session_store::permission_resume::verify_fresh_wait_request_on(
-            &txn,
-            &session,
-            &request_id,
-        )
-        .await
-        .map_err(|_| ScheduleStoreError::Conflict)?;
+        host.verify_fresh_wait_request(txn, &session, &request_id)
+            .await
+            .map_err(|_| ScheduleStoreError::Conflict)?;
     } else {
-        desk_assistant_data_store::schedule::verify_directory_receipt_on(
-            &super::SignalScheduleHost,
-            &txn,
-            &session,
-            &request_id,
-        )
-        .await?;
+        super::super::verify_directory_receipt_on(host, txn, &session, &request_id).await?;
     }
     // The same decision must not be recovered as a second pause segment.
     if work.result_ref.as_deref() == Some(reference.as_str()) {
@@ -87,13 +84,9 @@ pub(super) async fn recover(
         if previous == request_id {
             return Err(ScheduleStoreError::Conflict);
         }
-        let timestamp =
-            chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
-        crate::agent_session_store::permission_resume::settle_fresh_decision_on(
-            &txn, &session, previous, timestamp,
-        )
-        .await
-        .map_err(|_| ScheduleStoreError::Conflict)?;
+        host.settle_fresh_decision(txn, &session, previous, now)
+            .await
+            .map_err(|_| ScheduleStoreError::Conflict)?;
     }
     session.version = session
         .version
@@ -111,23 +104,29 @@ pub(super) async fn recover(
         session.handled_input_seq = session.latest_input_seq;
         session.terminal_permission_request_id = Some(request_id);
     }
-    let changed = agent_session::Entity::update_many()
-        .set(agent_session::ActiveModel {
-            state_json: Set(session
-                .encode_json_for_storage()
-                .map_err(|_| ScheduleStoreError::Invalid)?),
-            version: Set(session.version),
-            lease_token: Set(session.lease_token as i64),
-            lease_deadline: Set(None),
-            updated_at: Set(timestamp),
-            ..Default::default()
-        })
-        .filter(agent_session::Column::Id.eq(row.id))
-        .filter(agent_session::Column::Version.eq(row.version))
-        .filter(agent_session::Column::LeaseToken.eq(row.lease_token))
-        .exec(&txn)
+    let state_json = session
+        .encode_json_for_storage()
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+    let changed = host
+        .write_session(
+            txn,
+            SessionGuard {
+                id: Some(row.id),
+                version: Some(row.version),
+                lease_token: Some(row.lease_token),
+                ..SessionGuard::any()
+            },
+            SessionPatch {
+                state_json: Some(&state_json),
+                version: Some(session.version),
+                lease_token: Some(session.lease_token as i64),
+                lease_deadline_ms: Some(None),
+                updated_at_ms: Some(now),
+                turn_state: Some(TurnState::Idle.as_str()),
+            },
+        )
         .await?;
-    if changed.rows_affected != 1 {
+    if changed != 1 {
         return Err(ScheduleStoreError::Conflict);
     }
     let changed = run::Entity::update_many()
@@ -142,13 +141,12 @@ pub(super) async fn recover(
         .filter(run::Column::Status.eq("running"))
         .filter(run::Column::LeaseEpoch.eq(work.lease_epoch))
         .filter(run::Column::FailureAccounted.eq(false))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     if changed.rows_affected != 1 {
         return Err(ScheduleStoreError::Conflict);
     }
     // Keep started_at and cancellation intent. The wait scanner applies an
     // already elapsed deadline, rejection or cancellation without dispatch.
-    txn.commit().await?;
-    Ok(true)
+    Ok(Finish::Commit(true))
 }

@@ -437,6 +437,34 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         crate::agent_subagent_store::required_children_complete_on(txn, session).await
     }
 
+    async fn verify_fresh_wait_request(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<(), LockError> {
+        crate::agent_session_store::permission_resume::verify_fresh_wait_request_on(
+            txn, session, request_id,
+        )
+        .await
+        .map_err(|_| LockError::Denied)
+    }
+
+    fn decode_group(
+        &self,
+        row: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr> {
+        crate::agent_subagent_store::decode_group(row)
+    }
+
+    async fn group_children(
+        &self,
+        txn: &DatabaseTransaction,
+        group: &desk_diagnose_core::subagent::group::DelegationGroup,
+    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr> {
+        crate::agent_subagent_store::group_children_on(txn, group).await
+    }
+
     async fn directory_receipt(
         &self,
         txn: &DatabaseTransaction,

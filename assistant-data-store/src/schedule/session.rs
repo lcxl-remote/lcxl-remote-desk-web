@@ -294,6 +294,24 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         txn: &C,
         session: &PersistedAgentSession,
     ) -> Result<bool, DbErr>;
+    /// Confirms the fresh occurrence's pending owner permission request.
+    async fn verify_fresh_wait_request(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        request_id: &str,
+    ) -> Result<(), LockError>;
+    /// Decodes a delegation group row against its stored columns.
+    fn decode_group(
+        &self,
+        row: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr>;
+    /// Every child run of a delegation group.
+    async fn group_children(
+        &self,
+        txn: &C,
+        group: &desk_diagnose_core::subagent::group::DelegationGroup,
+    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr>;
     /// Reads the directory receipt from the host run-event table and compares
     /// every column that table has. Missing row: NotFound; undecodable:
     /// Invalid; mismatch: Conflict.

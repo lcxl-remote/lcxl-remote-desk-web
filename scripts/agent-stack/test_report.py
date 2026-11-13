@@ -360,10 +360,10 @@ class Reports(unittest.TestCase):
 
     def test_expired_fresh_context_recovery_requires_the_native_poll(self):
         for package in ['desk-signal', 'lcxl-remote-desk-manager']:
-            patterns = [pattern for pattern in gate.REQUIRED[package]
-                        if 'recover_action_free_fresh_task' in pattern]
-            self.assertEqual(len(patterns), 1)
             prefix = 'desk_signal' if package == 'desk-signal' else 'lcxl_remote_desk_manager::service'
+            patterns = [pattern for pattern in gate.REQUIRED[package]
+                        if prefix + '::schedule_store::fresh_recovery' in pattern]
+            self.assertEqual(len(patterns), 1)
             constructor = prefix + '::schedule_store::fresh_recovery::_<impl ' + prefix + '::schedule_store::ScheduleStore>::recover_action_free_fresh_task'
             poll = constructor + '::_{{closure}}::_{{closure}}'
             self.assertTrue(report.protected(poll))
@@ -371,17 +371,12 @@ class Reports(unittest.TestCase):
             self.assertTrue(report.check_ceiling({'frames': {constructor + '::_{{closure}}': 128}}, report.HARD_FRAME_LIMIT, patterns))
             self.assertTrue(report.check_ceiling({'frames': {'core::ptr::drop_in_place<' + poll + '>': 64}}, report.HARD_FRAME_LIMIT, patterns))
             self.assertEqual(report.check_ceiling({'frames': {poll: 65536}}, report.HARD_FRAME_LIMIT, patterns), [])
-            for name in ['reconcile_expired_fresh_task', 'settle_expired_fresh_task']:
-                phases = [pattern for pattern in gate.REQUIRED[package] if name in pattern]
-                self.assertEqual(len(phases), 1)
-                phase = constructor.rsplit('::', 1)[0] + '::' + name
-                self.assertTrue(report.protected(phase))
-                self.assertTrue(report.check_ceiling({'frames': {phase: 128}}, report.HARD_FRAME_LIMIT, phases))
-                self.assertEqual(report.check_ceiling({'frames': {phase + '::_{{closure}}': 65536}}, report.HARD_FRAME_LIMIT, phases), [])
-            for module in ['fresh_children_recovery', 'fresh_permission_recovery']:
-                phases = [pattern for pattern in gate.REQUIRED[package] if 'schedule_store::' + module in pattern]
-                self.assertEqual(len(phases), 1)
-                phase = prefix + '::schedule_store::' + module + '::recover'
+            shared = 'desk_assistant_data_store::schedule::fresh_recovery::'
+            for name in ['recover_action_free_fresh_task_on', 'reconcile_expired_fresh_task',
+                         'settle_expired_fresh_task', 'children::recover', 'permission::recover']:
+                phases = [pattern for pattern in gate.REQUIRED[package] if '^' + shared + name + '.*' in pattern]
+                self.assertEqual(len(phases), 1, name)
+                phase = shared + name
                 self.assertTrue(report.protected(phase))
                 self.assertTrue(report.check_ceiling({'frames': {phase: 128}}, report.HARD_FRAME_LIMIT, phases))
                 self.assertEqual(report.check_ceiling({'frames': {phase + '::_{{closure}}': 65536}}, report.HARD_FRAME_LIMIT, phases), [])
@@ -425,7 +420,7 @@ class Reports(unittest.TestCase):
                         if 'closure' in pattern and any(name in pattern for name in [
                             'assistant_data_store::', 'schedule_store::', 'agent_goal_store::claim_slice',
                             'agent_run_event_store::', 'agent_subagent_store::observation::'])]
-            self.assertEqual(len(patterns), 73 if package == 'desk-signal' else 76)
+            self.assertEqual(len(patterns), 74 if package == 'desk-signal' else 77)
             for pattern in patterns:
                 constructor = pattern.removeprefix('^').split('.*', 1)[0].split(r'::_\{', 1)[0].rstrip(':')
                 depth = 2 if pattern.count('closure') == 2 else 1
