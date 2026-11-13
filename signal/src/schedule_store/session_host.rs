@@ -6,15 +6,15 @@ use crate::entity::{
     agent_action_item, agent_exec_task, agent_goal_run as goal_row, agent_run_event, agent_session,
 };
 use desk_assistant_data_store::schedule::session::{
-    ActionClass, LockError, OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey,
-    SessionPatch, SessionRow, SessionRows, TouchColumn,
+    ActionClass, ActionFilter, ActionView, LockError, OrgMode, ScheduleHostStores, ScheduleLocks,
+    SessionGuard, SessionKey, SessionPatch, SessionRow, SessionRows, TouchColumn,
 };
 use desk_diagnose_core::{
     file_scope::transaction::{self, FileScopeReceipt},
     session::PersistedAgentSession,
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Select,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Select, Set,
     sea_query::Expr,
 };
 
@@ -157,6 +157,156 @@ impl<C: ConnectionTrait> SessionRows<C> for SignalScheduleHost {
 impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
     fn action_class(&self, status: &str) -> ActionClass {
         Self::action_class(status)
+    }
+
+    type Action = agent_action_item::Model;
+    type NativeScope = crate::assistant_data_store::NativeStatusScope;
+
+    async fn find_actions(
+        &self,
+        txn: &DatabaseTransaction,
+        conversation: &str,
+        filter: ActionFilter<'_>,
+        exclusive: bool,
+    ) -> Result<Vec<ActionView<agent_action_item::Model>>, DbErr> {
+        let mut query = action_query(conversation, filter);
+        if exclusive {
+            query = query.lock_exclusive();
+        }
+        Ok(query.all(txn).await?.into_iter().map(action_view).collect())
+    }
+
+    async fn find_action(
+        &self,
+        txn: &DatabaseTransaction,
+        conversation: &str,
+        filter: ActionFilter<'_>,
+        exclusive: bool,
+    ) -> Result<Option<ActionView<agent_action_item::Model>>, DbErr> {
+        let mut query = action_query(conversation, filter);
+        if exclusive {
+            query = query.lock_exclusive();
+        }
+        Ok(query.one(txn).await?.map(action_view))
+    }
+
+    async fn verify_manual_outbox(
+        &self,
+        txn: &DatabaseTransaction,
+        action: &ActionView<agent_action_item::Model>,
+        execution_id: &str,
+        requested: bool,
+    ) -> Result<(), ScheduleStoreError> {
+        use crate::entity::agent_capability_dispatch_outbox as outbox_row;
+        let outbox = outbox_row::Entity::find()
+            .filter(outbox_row::Column::WorkId.eq(action.id))
+            .filter(outbox_row::Column::DispatchId.eq(execution_id))
+            .lock_exclusive()
+            .one(txn)
+            .await?
+            .ok_or(ScheduleStoreError::Conflict)?;
+        let payload: crate::capability_grant_store::CapabilityDispatchPayload =
+            serde_json::from_str(&outbox.payload_json).map_err(|_| ScheduleStoreError::Invalid)?;
+        if payload.work_id != action.id
+            || payload.dispatch_id != execution_id
+            || (requested
+                && outbox.state != crate::capability_grant_store::DISPATCH_OUTBOX_OUTCOME_UNKNOWN)
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(())
+    }
+
+    async fn resolve_unknown_action(
+        &self,
+        txn: &DatabaseTransaction,
+        action: &ActionView<agent_action_item::Model>,
+        at_ms: i64,
+    ) -> Result<bool, DbErr> {
+        let at = chrono::DateTime::from_timestamp_millis(at_ms)
+            .ok_or_else(|| DbErr::Custom("invalid resolution time".into()))?;
+        let changed = agent_action_item::Entity::update_many()
+            .set(agent_action_item::ActiveModel {
+                manual_resolved_at: Set(Some(at)),
+                updated_at: Set(at),
+                ..Default::default()
+            })
+            .filter(agent_action_item::Column::Id.eq(action.id))
+            .filter(
+                agent_action_item::Column::Status
+                    .eq(crate::capability_grant_store::CAPABILITY_WORK_OUTCOME_UNKNOWN),
+            )
+            .exec(txn)
+            .await?;
+        Ok(changed.rows_affected == 1)
+    }
+
+    async fn list_task_grants(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<Vec<desk_agent_protocol::capability_grant::CapabilityGrant>, DbErr> {
+        crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
+            txn,
+            &session.conversation_id,
+            &session.actor_id,
+            &session.device_id,
+        )
+        .await
+    }
+
+    async fn close_fresh_wait_decision(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LockError> {
+        let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)
+            .map_err(|_| LockError::Denied)?;
+        crate::agent_session_store::permission_resume::close_fresh_wait_decision_on(
+            txn, session, request_id, now,
+        )
+        .await
+        .map_err(|_| LockError::Denied)
+    }
+
+    async fn restore_completed_calls(
+        &self,
+        txn: &DatabaseTransaction,
+        work: &crate::entity::agent_schedule_run::Model,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<bool, ScheduleStoreError> {
+        let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)?;
+        let context = super::TaskReceiptContext::load(txn, work).await?;
+        Ok(
+            crate::capability_grant_store::fresh_recovery::restore_completed_calls(
+                txn,
+                session,
+                &context,
+                &now.to_rfc3339(),
+            )
+            .await?,
+        )
+    }
+
+    async fn open_native_scope(
+        &self,
+        txn: &DatabaseTransaction,
+        actor: &str,
+        device: &str,
+        root: &str,
+    ) -> Result<Option<Box<Self::NativeScope>>, DbErr> {
+        crate::assistant_data_store::native_scope_on(txn, actor, device, root).await
+    }
+
+    async fn capture_native_scope(
+        &self,
+        txn: &DatabaseTransaction,
+        scope: &Self::NativeScope,
+    ) -> Result<(), DbErr> {
+        scope.capture_on(txn).await
     }
 
     async fn directory_receipt(
@@ -377,6 +527,23 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
 }
 
 impl SignalScheduleHost {
+    /// Raw statuses of a class that a lookup can exclude in SQL.
+    fn class_statuses(class: ActionClass) -> &'static [&'static str] {
+        use crate::capability_grant_store::{
+            CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_FAILED, CAPABILITY_WORK_OUTCOME_UNKNOWN,
+            CAPABILITY_WORK_REVOKED, CAPABILITY_WORK_SUCCEEDED, CAPABILITY_WORK_SUPERSEDED,
+        };
+        match class {
+            ActionClass::Succeeded => &[CAPABILITY_WORK_SUCCEEDED],
+            ActionClass::Failed => &[CAPABILITY_WORK_FAILED],
+            ActionClass::Withdrawn => &[CAPABILITY_WORK_SUPERSEDED, CAPABILITY_WORK_REVOKED],
+            ActionClass::LegacyClosed => &["done", "rejected", "expired", "cancelled"],
+            ActionClass::OutcomeUnknown => &[CAPABILITY_WORK_OUTCOME_UNKNOWN],
+            ActionClass::Dispatching => &[CAPABILITY_WORK_DISPATCHING],
+            ActionClass::Open => unreachable!("open statuses are not enumerable"),
+        }
+    }
+
     /// Action-item status classes. Rows from the earlier action vocabulary
     /// (done, rejected, expired, cancelled) are `LegacyClosed`.
     pub(crate) fn action_class(status: &str) -> ActionClass {
@@ -396,9 +563,147 @@ impl SignalScheduleHost {
     }
 }
 
+fn action_query(conversation: &str, filter: ActionFilter<'_>) -> Select<agent_action_item::Entity> {
+    let mut query = agent_action_item::Entity::find()
+        .filter(agent_action_item::Column::ConversationId.eq(conversation));
+    if let Some(kind) = filter.kind {
+        query = query.filter(agent_action_item::Column::Kind.eq(kind));
+    }
+    if let Some(class) = filter.exclude {
+        query = query.filter(
+            agent_action_item::Column::Status
+                .is_not_in(SignalScheduleHost::class_statuses(class).iter().copied()),
+        );
+    }
+    if filter.not_cancel_requested {
+        query = query.filter(agent_action_item::Column::CancelRequestedAt.is_null());
+    }
+    query
+}
+
+fn action_view(model: agent_action_item::Model) -> ActionView<agent_action_item::Model> {
+    ActionView {
+        id: model.id,
+        kind: model.kind.clone(),
+        class: SignalScheduleHost::action_class(&model.status),
+        conversation_id: model.conversation_id.clone(),
+        turn_id: model.turn_id.clone(),
+        actor_id: model.actor_id.clone(),
+        target_device_id: model.target_device_id.clone(),
+        action_request_id: Some(model.action_request_id.clone()),
+        execution_id: model.execution_id.clone(),
+        tool_call_id: model.tool_call_id.clone(),
+        has_result: model.result_json.is_some(),
+        is_side_effecting: model.is_side_effecting,
+        dispatch_intent_at_ms: model.dispatch_intent_at.map(|at| at.timestamp_millis()),
+        manual_resolved_at_ms: model.manual_resolved_at.map(|at| at.timestamp_millis()),
+        raw: model,
+    }
+}
+
+/// Applies a shared rule's commit or rollback decision to its transaction.
+pub(super) async fn finish<T>(
+    txn: crate::config::connection::DatabaseTransaction,
+    decision: desk_assistant_data_store::schedule::session::Finish<T>,
+) -> Result<T, ScheduleStoreError> {
+    use desk_assistant_data_store::schedule::session::Finish;
+    match decision {
+        Finish::Commit(value) => {
+            txn.commit().await?;
+            Ok(value)
+        }
+        Finish::Rollback(value) => Ok(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn action(db: &crate::config::connection::DatabaseConnection, id: i64, status: &str) {
+        use sea_orm::ActiveModelTrait;
+        let now = chrono::Utc::now();
+        agent_action_item::ActiveModel {
+            id: Set(id),
+            kind: Set(crate::capability_grant_store::CAPABILITY_WORK_KIND.into()),
+            action_request_id: Set(format!("request-{id}")),
+            conversation_id: Set("run".into()),
+            turn_id: Set("turn".into()),
+            tool_call_id: Set(format!("call-{id}")),
+            actor_id: Set("1".into()),
+            target_device_id: Set("device".into()),
+            status: Set(status.into()),
+            attempt: Set(1),
+            draft_hash: Set("hash".into()),
+            policy_revision: Set(1),
+            is_side_effecting: Set(true),
+            payload_json: Set("{}".into()),
+            payload_schema_version: Set(1),
+            completion_event_id: Set(format!("event-{id}")),
+            completion_delivery_state: Set("pending".into()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn action_lookups_exclude_a_class_in_sql_and_classify_rows() {
+        use crate::capability_grant_store::*;
+        use sea_orm::TransactionTrait;
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        action(&db, 1, CAPABILITY_WORK_SUCCEEDED).await;
+        action(&db, 2, CAPABILITY_WORK_FAILED).await;
+        action(&db, 3, "done").await;
+        let txn = db.begin().await.unwrap();
+        let host = SignalScheduleHost;
+        let unsucceeded = host
+            .find_actions(
+                &txn,
+                "run",
+                ActionFilter {
+                    exclude: Some(ActionClass::Succeeded),
+                    ..ActionFilter::default()
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unsucceeded
+                .iter()
+                .map(|action| (action.id, action.class))
+                .collect::<Vec<_>>(),
+            [(2, ActionClass::Failed), (3, ActionClass::LegacyClosed)]
+        );
+        let first = host
+            .find_action(
+                &txn,
+                "run",
+                ActionFilter {
+                    exclude: Some(ActionClass::Succeeded),
+                    ..ActionFilter::default()
+                },
+                true,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.class, ActionClass::Succeeded);
+        assert_eq!(
+            host.find_actions(&txn, "other", ActionFilter::default(), false)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
 
     #[test]
     fn every_action_status_maps_to_its_class() {

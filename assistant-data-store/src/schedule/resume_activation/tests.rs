@@ -152,6 +152,80 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     fn action_class(&self, _: &str) -> crate::schedule::session::ActionClass {
         unreachable!()
     }
+    type Action = ();
+    type NativeScope = ();
+    async fn find_actions(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: crate::schedule::session::ActionFilter<'_>,
+        _: bool,
+    ) -> Result<Vec<crate::schedule::session::ActionView<()>>, DbErr> {
+        unreachable!()
+    }
+    async fn find_action(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: crate::schedule::session::ActionFilter<'_>,
+        _: bool,
+    ) -> Result<Option<crate::schedule::session::ActionView<()>>, DbErr> {
+        unreachable!()
+    }
+    async fn verify_manual_outbox(
+        &self,
+        _: &DatabaseConnection,
+        _: &crate::schedule::session::ActionView<()>,
+        _: &str,
+        _: bool,
+    ) -> Result<(), ScheduleStoreError> {
+        unreachable!()
+    }
+    async fn resolve_unknown_action(
+        &self,
+        _: &DatabaseConnection,
+        _: &crate::schedule::session::ActionView<()>,
+        _: i64,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn list_task_grants(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<Vec<desk_agent_protocol::capability_grant::CapabilityGrant>, DbErr> {
+        unreachable!()
+    }
+    async fn close_fresh_wait_decision(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &str,
+        _: i64,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    async fn restore_completed_calls(
+        &self,
+        _: &DatabaseConnection,
+        _: &crate::entity::agent_schedule_run::Model,
+        _: &mut PersistedAgentSession,
+        _: i64,
+    ) -> Result<bool, ScheduleStoreError> {
+        unreachable!()
+    }
+    async fn open_native_scope(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<Box<()>>, DbErr> {
+        unreachable!()
+    }
+    async fn capture_native_scope(&self, _: &DatabaseConnection, _: &()) -> Result<(), DbErr> {
+        unreachable!()
+    }
     async fn directory_receipt(
         &self,
         _: &DatabaseConnection,

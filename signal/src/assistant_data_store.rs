@@ -66,6 +66,7 @@ pub(crate) use history_native::read as read_native_history;
 pub(crate) use memory::memories;
 pub(crate) use memory_control::clear_memories;
 pub(crate) use memory_control::forget_memory;
+pub(crate) use native_status::NativeStatusScope;
 pub(crate) use native_status::ReclaimObservation;
 pub(crate) use native_status::scope_on as native_scope_on;
 pub(crate) use output_archive::gc::schedule::run_due_once as run_output_gc_once;

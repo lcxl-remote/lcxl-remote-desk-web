@@ -1045,6 +1045,6 @@ pub(crate) mod tests {
 mod late_receipts;
 
 mod outcome_review;
-pub(crate) use outcome_review::reviewed_at as outcome_reviewed_at;
+pub(crate) use desk_assistant_data_store::schedule::outcome_reviewed_at;
 
 mod cancel_actions;

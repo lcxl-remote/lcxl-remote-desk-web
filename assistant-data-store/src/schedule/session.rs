@@ -142,6 +142,76 @@ pub trait SessionRows<C: ConnectionTrait>: Sync {
 pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks<C> {
     /// The class of a host action status.
     fn action_class(&self, status: &str) -> ActionClass;
+    /// Host action row type.
+    type Action: Clone + Send + Sync;
+    /// Action rows of a conversation; `exclusive` locks every matching row.
+    async fn find_actions(
+        &self,
+        txn: &C,
+        conversation: &str,
+        filter: ActionFilter<'_>,
+        exclusive: bool,
+    ) -> Result<Vec<ActionView<Self::Action>>, DbErr>;
+    /// The first matching action row; `exclusive` locks only that row.
+    async fn find_action(
+        &self,
+        txn: &C,
+        conversation: &str,
+        filter: ActionFilter<'_>,
+        exclusive: bool,
+    ) -> Result<Option<ActionView<Self::Action>>, DbErr>;
+    /// OSS checks the dispatch outbox row and payload of a manual disposition;
+    /// Manager has nothing to check. Mismatch: Conflict.
+    async fn verify_manual_outbox(
+        &self,
+        txn: &C,
+        action: &ActionView<Self::Action>,
+        execution_id: &str,
+        requested: bool,
+    ) -> Result<(), ScheduleStoreError>;
+    /// Marks an outcome-unknown action manually resolved (CAS on the raw
+    /// unknown status); Manager also records the outbox event. `false` when
+    /// the CAS matched no row.
+    async fn resolve_unknown_action(
+        &self,
+        txn: &C,
+        action: &ActionView<Self::Action>,
+        at_ms: i64,
+    ) -> Result<bool, DbErr>;
+    /// Current task grants of the session's subject.
+    async fn list_task_grants(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<Vec<desk_agent_protocol::capability_grant::CapabilityGrant>, DbErr>;
+    /// Closes the owner's pending decision for an expiring fresh wait.
+    async fn close_fresh_wait_decision(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LockError>;
+    /// Restores calls completed by the device into the run's session. OSS
+    /// writes completion records here; the caller rolls back on `false`.
+    async fn restore_completed_calls(
+        &self,
+        txn: &C,
+        work: &crate::entity::agent_schedule_run::Model,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<bool, ScheduleStoreError>;
+    /// Host native-history scope captured after a settlement's writes.
+    type NativeScope: Send + Sync;
+    async fn open_native_scope(
+        &self,
+        txn: &C,
+        actor: &str,
+        device: &str,
+        root: &str,
+    ) -> Result<Option<Box<Self::NativeScope>>, DbErr>;
+    /// Runs after every original mutation; a history outage cannot discard them.
+    async fn capture_native_scope(&self, txn: &C, scope: &Self::NativeScope) -> Result<(), DbErr>;
     /// Reads the directory receipt from the host run-event table and compares
     /// every column that table has. Missing row: NotFound; undecodable:
     /// Invalid; mismatch: Conflict.
@@ -295,4 +365,36 @@ pub enum ActionClass {
     OutcomeUnknown,
     Dispatching,
     Open,
+}
+
+/// Host action row reduced to the fields schedule rules read. `raw` goes back
+/// to host hooks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionView<R> {
+    pub raw: R,
+    pub id: i64,
+    pub kind: String,
+    pub class: ActionClass,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub actor_id: String,
+    pub target_device_id: String,
+    pub action_request_id: Option<String>,
+    pub execution_id: Option<String>,
+    pub tool_call_id: String,
+    pub has_result: bool,
+    pub is_side_effecting: bool,
+    pub dispatch_intent_at_ms: Option<i64>,
+    pub manual_resolved_at_ms: Option<i64>,
+}
+
+/// Conditions of an action lookup; the host translates them into SQL before
+/// any row is read or locked.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ActionFilter<'a> {
+    pub kind: Option<&'a str>,
+    /// Leaves out rows of this class.
+    pub exclude: Option<ActionClass>,
+    /// Only rows without a recorded cancellation request.
+    pub not_cancel_requested: bool,
 }

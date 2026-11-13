@@ -252,4 +252,4 @@ impl PreparedNativeStatus {
 }
 
 mod scoped;
-pub(crate) use scoped::{ReclaimObservation, scope_on};
+pub(crate) use scoped::{NativeStatusScope, ReclaimObservation, scope_on};

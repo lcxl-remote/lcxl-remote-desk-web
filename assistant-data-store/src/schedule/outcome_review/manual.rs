@@ -1,23 +1,32 @@
 //! Require original durable owner disposition; a note alone is not evidence.
-use super::{ScheduleStoreError, entity};
-use crate::config::connection::DatabaseTransaction;
-use crate::entity::{agent_action_item as action, agent_schedule_run as run, agent_session};
+use super::super::session::{
+    ActionClass, ActionFilter, OrgMode, ScheduleHostStores, SessionGuard, SessionKey, SessionPatch,
+};
+use super::{ScheduleStoreError, entity, run};
 use desk_diagnose_core::session::{
     ExecutionState, ManualOutcomeDisposition, PersistedAgentSession, TriggerOrigin, TurnState,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::ConnectionTrait;
 
-pub(super) async fn evidence(
-    txn: &DatabaseTransaction,
+pub(super) async fn evidence<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
     task: &entity::Model,
     run: &run::Model,
     now: i64,
     requested: Option<(i64, &str)>,
 ) -> Result<ManualOutcomeDisposition, ScheduleStoreError> {
-    let row = agent_session::Entity::find()
-        .filter(agent_session::Column::ConversationId.eq(&run.run_id))
-        .lock_exclusive()
-        .one(txn)
+    let row = host
+        .find_session(
+            txn,
+            SessionKey::Conversation {
+                conversation: &run.run_id,
+                actor: None,
+                device: None,
+            },
+            OrgMode::Any,
+            true,
+        )
         .await?
         .ok_or(ScheduleStoreError::Conflict)?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json)
@@ -25,7 +34,8 @@ pub(super) async fn evidence(
     if session.trigger_origin != TriggerOrigin::ScheduledTask
         || session.turn_state != TurnState::Failed
         || (requested.is_none() && session.execution_state != ExecutionState::None)
-        || row.lease_deadline.is_some()
+        || row.lease_deadline_ms.is_some()
+        || !row.personal
         || session.actor_id != run.owner_user_id.to_string()
         || session.actor_id != row.actor_id
         || session.device_id != task.target_device_id
@@ -64,34 +74,20 @@ pub(super) async fn evidence(
     {
         return Err(ScheduleStoreError::Conflict);
     }
-    let items = action::Entity::find()
-        .filter(action::Column::ConversationId.eq(&run.run_id))
-        .lock_exclusive()
-        .all(txn)
+    let items = host
+        .find_actions(txn, &run.run_id, ActionFilter::default(), true)
         .await?;
     let item = items
         .iter()
         .find(|item| item.id == evidence.action.work_id)
         .ok_or(ScheduleStoreError::Conflict)?;
-    let outbox = crate::entity::agent_capability_dispatch_outbox::Entity::find()
-        .filter(crate::entity::agent_capability_dispatch_outbox::Column::WorkId.eq(item.id))
-        .filter(
-            crate::entity::agent_capability_dispatch_outbox::Column::DispatchId
-                .eq(&evidence.action.execution_id),
-        )
-        .lock_exclusive()
-        .one(txn)
-        .await?
-        .ok_or(ScheduleStoreError::Conflict)?;
-    let payload: crate::capability_grant_store::CapabilityDispatchPayload =
-        serde_json::from_str(&outbox.payload_json).map_err(|_| ScheduleStoreError::Invalid)?;
-    if payload.work_id != item.id
-        || payload.dispatch_id != evidence.action.execution_id
-        || (requested.is_some()
-            && outbox.state != crate::capability_grant_store::DISPATCH_OUTBOX_OUTCOME_UNKNOWN)
-    {
-        return Err(ScheduleStoreError::Conflict);
-    }
+    host.verify_manual_outbox(
+        txn,
+        item,
+        &evidence.action.execution_id,
+        requested.is_some(),
+    )
+    .await?;
     let anchor = session
         .conversation
         .iter()
@@ -100,25 +96,22 @@ pub(super) async fn evidence(
     if anchor.tool_call_id.as_deref() != Some(item.tool_call_id.as_str()) {
         return Err(ScheduleStoreError::Conflict);
     }
-    let disposed = item.manual_resolved_at;
+    let disposed = item.manual_resolved_at_ms;
     if requested.is_none() && disposed.is_none() {
         return Err(ScheduleStoreError::Conflict);
     }
     if item.actor_id != session.actor_id
         || item.target_device_id != session.device_id
         || item.turn_id != run.turn_id
-        || item.action_request_id != evidence.action.action_request_id
+        || item.action_request_id.as_deref() != Some(evidence.action.action_request_id.as_str())
         || item.execution_id.as_deref() != Some(evidence.action.execution_id.as_str())
         || item.kind != evidence.action.kind.as_str()
-        || disposed.is_some_and(|value| value.timestamp_millis() > at)
+        || disposed.is_some_and(|value| value > at)
         || items.iter().any(|other| {
             other.id != item.id
                 && !matches!(
-                    other.status.as_str(),
-                    crate::capability_grant_store::CAPABILITY_WORK_SUCCEEDED
-                        | crate::capability_grant_store::CAPABILITY_WORK_FAILED
-                        | crate::capability_grant_store::CAPABILITY_WORK_SUPERSEDED
-                        | crate::capability_grant_store::CAPABILITY_WORK_REVOKED
+                    other.class,
+                    ActionClass::Succeeded | ActionClass::Failed | ActionClass::Withdrawn
                 )
         })
     {
@@ -126,46 +119,37 @@ pub(super) async fn evidence(
     }
     let evidence = evidence.clone();
     if requested.is_some() {
-        if item.status != crate::capability_grant_store::CAPABILITY_WORK_OUTCOME_UNKNOWN
-            || item.result_json.is_some()
-        {
+        if item.class != ActionClass::OutcomeUnknown || item.has_result {
             return Err(ScheduleStoreError::Conflict);
         }
-        let changed = action::Entity::update_many()
-            .set(action::ActiveModel {
-                manual_resolved_at: Set(Some(timestamp)),
-                updated_at: Set(timestamp),
-                ..Default::default()
-            })
-            .filter(action::Column::Id.eq(item.id))
-            .filter(
-                action::Column::Status
-                    .eq(crate::capability_grant_store::CAPABILITY_WORK_OUTCOME_UNKNOWN),
-            )
-            .exec(txn)
-            .await?;
-        if changed.rows_affected != 1 {
+        if !host.resolve_unknown_action(txn, item, now).await? {
             return Err(ScheduleStoreError::Conflict);
         }
         session.version = session
             .version
             .checked_add(1)
             .ok_or(ScheduleStoreError::Invalid)?;
-        let changed = agent_session::Entity::update_many()
-            .set(agent_session::ActiveModel {
-                state_json: Set(session
-                    .encode_json_for_storage()
-                    .map_err(|_| ScheduleStoreError::Invalid)?),
-                version: Set(session.version),
-                updated_at: Set(timestamp),
-                ..Default::default()
-            })
-            .filter(agent_session::Column::Id.eq(row.id))
-            .filter(agent_session::Column::Version.eq(row.version))
-            .filter(agent_session::Column::LeaseToken.eq(row.lease_token))
-            .exec(txn)
+        let state_json = session
+            .encode_json_for_storage()
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let changed = host
+            .write_session(
+                txn,
+                SessionGuard {
+                    id: Some(row.id),
+                    version: Some(row.version),
+                    lease_token: Some(row.lease_token),
+                    ..SessionGuard::any()
+                },
+                SessionPatch {
+                    state_json: Some(&state_json),
+                    version: Some(session.version),
+                    updated_at_ms: Some(now),
+                    ..Default::default()
+                },
+            )
             .await?;
-        if changed.rows_affected != 1 {
+        if changed != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
     }

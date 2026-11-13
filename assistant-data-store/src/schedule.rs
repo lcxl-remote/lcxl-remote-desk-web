@@ -8,6 +8,8 @@ use sea_orm::{ConnectionTrait, DbErr, sea_query::Index};
 use sha2::{Digest, Sha256};
 
 mod approval_admission;
+mod approval_claim;
+mod approval_expiry;
 mod approval_request;
 mod authority;
 mod budget;
@@ -18,7 +20,9 @@ mod device_wait;
 mod directory_receipt;
 mod edit;
 mod history;
+mod late_receipts;
 mod model_management;
+mod outcome_review;
 mod proposal;
 mod proposal_review;
 mod queue;
@@ -30,8 +34,11 @@ mod resume_lease;
 mod review_wait;
 mod search;
 pub mod session;
+mod settlement;
 mod task;
 pub use approval_admission::{TaskApprovalReview, lock_fresh_approval_on};
+pub use approval_claim::claim_fresh_approval_on;
+pub use approval_expiry::{expire_fresh_approval_wait_on, wait_expiry_candidates};
 pub use approval_request::{validate_task_directory_on, validate_task_permission_on};
 pub use authority::{
     CurrentDelegationSourceAuthority, CurrentTaskAuthority, PendingTaskApproval, authority_now,
@@ -50,10 +57,12 @@ pub use device_wait::wait_for_device_on;
 pub use directory_receipt::verify_directory_receipt_on;
 pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};
 pub use history::{RunHistoryPage, resolve_run_session, run_history};
+pub use late_receipts::{late_receipt_candidates, reconcile_late_task_receipts_on};
 pub use model_management::{
     cancel as cancel_managed_task, list as list_managed_tasks, lock_target,
     view as managed_task_view,
 };
+pub use outcome_review::{review_run_outcome_on, reviewed_at as outcome_reviewed_at};
 pub use proposal::manage_on;
 pub use proposal_review::{decide_by_ai_on, review_proposal_on};
 pub use queue::{
@@ -76,6 +85,7 @@ pub use resume_claim::{
 pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
 pub use review_wait::{ReviewPoll, poll_review_decision_on};
 pub use search::search;
+pub use settlement::{Settlement, expire_pending_on, settle_on};
 pub use task::{list, pause_on, read};
 
 #[derive(Debug)]
