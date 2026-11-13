@@ -176,6 +176,7 @@ pub async fn renew_paired_lease_on<C: ConnectionTrait, H: SessionRows<C>>(
                 version: None,
                 lease_token: Some(lease.session_token as i64),
                 state_json: None,
+                lease_deadline_null: false,
                 org: OrgMode::PersonalOnly,
             },
         )

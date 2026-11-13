@@ -149,6 +149,9 @@ impl SessionRows<DatabaseConnection> for Recorder {
 
 #[async_trait::async_trait]
 impl ScheduleHostStores<DatabaseConnection> for Recorder {
+    fn action_class(&self, _: &str) -> crate::schedule::session::ActionClass {
+        unreachable!()
+    }
     async fn directory_receipt(
         &self,
         _: &DatabaseConnection,
@@ -219,7 +222,7 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
         _: &DatabaseConnection,
         _: &str,
         _: i32,
-        _: &str,
+        _: Option<&str>,
     ) -> Result<bool, DbErr> {
         unreachable!()
     }

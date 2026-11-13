@@ -26,7 +26,7 @@ pub mod agent_file_recovery_scope;
 
 pub mod agent_attachment;
 
-pub mod agent_delegation_group;
+pub use desk_assistant_data_store::entity::agent_delegation_group;
 
 pub use desk_assistant_data_store::entity::agent_subagent_run;
 

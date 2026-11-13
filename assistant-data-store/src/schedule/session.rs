@@ -70,6 +70,8 @@ pub struct SessionGuard<'a> {
     pub version: Option<i64>,
     pub lease_token: Option<i64>,
     pub state_json: Option<&'a str>,
+    /// Adds `lease_deadline IS NULL`.
+    pub lease_deadline_null: bool,
     pub org: OrgMode,
 }
 
@@ -84,6 +86,7 @@ impl SessionGuard<'_> {
             version: None,
             lease_token: None,
             state_json: None,
+            lease_deadline_null: false,
             org: OrgMode::Any,
         }
     }
@@ -137,6 +140,8 @@ pub trait SessionRows<C: ConnectionTrait>: Sync {
 /// Host stores and definition helpers reached from shared schedule rules.
 #[async_trait::async_trait]
 pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks<C> {
+    /// The class of a host action status.
+    fn action_class(&self, status: &str) -> ActionClass;
     /// Reads the directory receipt from the host run-event table and compares
     /// every column that table has. Missing row: NotFound; undecodable:
     /// Invalid; mismatch: Conflict.
@@ -193,13 +198,13 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         txn: &C,
     ) -> Result<Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>, DbErr>;
     /// An unfinished long-term goal plans this conversation (OSS by `actor_id`,
-    /// Manager by `owner_user_id`).
+    /// Manager by `owner_user_id`), on `device` when given.
     async fn active_goal_conflict(
         &self,
         txn: &C,
         conversation: &str,
         owner: i32,
-        device: &str,
+        device: Option<&str>,
     ) -> Result<bool, DbErr>;
     /// Inserts a task definition from an owner request or an AI proposal.
     async fn create_draft(
@@ -257,4 +262,37 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
 /// Milliseconds since the Unix epoch as a UTC timestamp.
 pub fn timestamp(ms: i64) -> Result<chrono::DateTime<chrono::Utc>, ScheduleStoreError> {
     chrono::DateTime::from_timestamp_millis(ms).ok_or(ScheduleStoreError::Invalid)
+}
+
+/// Whether the host commits or rolls back the caller's transaction after a
+/// shared rule returns. Rules that hold a transaction never commit it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish<T> {
+    Commit(T),
+    Rollback(T),
+}
+
+impl<T> Finish<T> {
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Commit(value) | Self::Rollback(value) => value,
+        }
+    }
+}
+
+/// Host action status reduced to the classes schedule rules decide on.
+/// Each call site states which classes it accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionClass {
+    Succeeded,
+    Failed,
+    /// Superseded or revoked before intent (OSS); rejected, expired or
+    /// cancelled (Manager).
+    Withdrawn,
+    /// OSS rows from the earlier action vocabulary: done, rejected, expired,
+    /// cancelled. Finished for continuation results only.
+    LegacyClosed,
+    OutcomeUnknown,
+    Dispatching,
+    Open,
 }

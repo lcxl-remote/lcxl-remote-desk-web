@@ -18,6 +18,7 @@ pub mod agent_assistant_search_document;
 pub mod agent_assistant_search_term;
 pub mod agent_assistant_source_suppression;
 pub mod agent_assistant_source_use;
+pub mod agent_delegation_group;
 pub mod agent_issue_admission;
 pub mod agent_issue_event;
 pub mod agent_issue_reply;
@@ -71,6 +72,7 @@ pub fn register_schema(schema: sea_orm::SchemaBuilder) -> sea_orm::SchemaBuilder
         .register(agent_memory_tombstone::Entity)
         .register(agent_memory_use::Entity)
         .register(agent_subagent_inbox::Entity)
+        .register(agent_delegation_group::Entity)
         .register(agent_subagent_run::Entity)
         .register(agent_schedule::Entity)
         .register(agent_schedule_run::Entity)

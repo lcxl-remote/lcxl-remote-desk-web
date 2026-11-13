@@ -70,8 +70,8 @@ pub use resume_admission::{
     same_retrieval_definition, scheduled_context_on,
 };
 pub use resume_claim::{
-    ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim, PermissionReceiptClaim,
-    claim_continuation_on,
+    ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim, FreshTaskClaim,
+    PermissionReceiptClaim, claim_continuation_on,
 };
 pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
 pub use review_wait::{ReviewPoll, poll_review_decision_on};

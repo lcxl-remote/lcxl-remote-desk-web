@@ -249,6 +249,17 @@ pub enum TurnState {
 }
 
 impl TurnState {
+    /// The stored column value, matching the serde name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
     /// Whether the turn has reached a settled (terminal) state, so a fresh
     /// follow-up turn may be claimed while reusing the accumulated conversation
     /// history. [`Idle`] (a completed turn), [`Failed`] (an errored turn), and
@@ -5585,5 +5596,26 @@ mod tests {
         let replay = crate::thinking_context::protected_replay_ids(&session);
         assert!(!replay.contains("assistant-0"));
         assert!(replay.contains("assistant-1"));
+    }
+}
+
+#[cfg(test)]
+mod turn_state_name_tests {
+    use super::TurnState;
+
+    #[test]
+    fn stored_names_match_the_serialized_names() {
+        for state in [
+            TurnState::Idle,
+            TurnState::Running,
+            TurnState::AwaitingApproval,
+            TurnState::Cancelled,
+            TurnState::Failed,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{}\"", state.as_str())
+            );
+        }
     }
 }

@@ -6,8 +6,8 @@ use crate::entity::{
     agent_action_item, agent_exec_task, agent_goal_run as goal_row, agent_run_event, agent_session,
 };
 use desk_assistant_data_store::schedule::session::{
-    LockError, OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch,
-    SessionRow, SessionRows, TouchColumn,
+    ActionClass, LockError, OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey,
+    SessionPatch, SessionRow, SessionRows, TouchColumn,
 };
 use desk_diagnose_core::{
     file_scope::transaction::{self, FileScopeReceipt},
@@ -58,6 +58,9 @@ fn guarded<Q: QueryFilter>(mut query: Q, guard: &SessionGuard<'_>) -> Q {
     }
     if let Some(state) = guard.state_json {
         query = query.filter(agent_session::Column::StateJson.eq(state));
+    }
+    if guard.lease_deadline_null {
+        query = query.filter(agent_session::Column::LeaseDeadline.is_null());
     }
     query
 }
@@ -152,6 +155,10 @@ impl<C: ConnectionTrait> SessionRows<C> for SignalScheduleHost {
 
 #[async_trait::async_trait]
 impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
+    fn action_class(&self, status: &str) -> ActionClass {
+        Self::action_class(status)
+    }
+
     async fn directory_receipt(
         &self,
         txn: &DatabaseTransaction,
@@ -297,16 +304,16 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         txn: &DatabaseTransaction,
         conversation: &str,
         owner: i32,
-        device: &str,
+        device: Option<&str>,
     ) -> Result<bool, DbErr> {
-        Ok(goal_row::Entity::find()
+        let mut query = goal_row::Entity::find()
             .filter(goal_row::Column::ConversationId.eq(conversation))
             .filter(goal_row::Column::ActorId.eq(owner.to_string()))
-            .filter(goal_row::Column::DeviceId.eq(device))
-            .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
-            .one(txn)
-            .await?
-            .is_some())
+            .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]));
+        if let Some(device) = device {
+            query = query.filter(goal_row::Column::DeviceId.eq(device));
+        }
+        Ok(query.one(txn).await?.is_some())
     }
 
     async fn create_draft(
@@ -366,5 +373,55 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         device: &str,
     ) -> Result<String, ScheduleStoreError> {
         ScheduleStore::owner_prompt_retention_on(txn, actor, device).await
+    }
+}
+
+impl SignalScheduleHost {
+    /// Action-item status classes. Rows from the earlier action vocabulary
+    /// (done, rejected, expired, cancelled) are `LegacyClosed`.
+    pub(crate) fn action_class(status: &str) -> ActionClass {
+        use crate::capability_grant_store::{
+            CAPABILITY_WORK_DISPATCHING, CAPABILITY_WORK_FAILED, CAPABILITY_WORK_OUTCOME_UNKNOWN,
+            CAPABILITY_WORK_REVOKED, CAPABILITY_WORK_SUCCEEDED, CAPABILITY_WORK_SUPERSEDED,
+        };
+        match status {
+            CAPABILITY_WORK_SUCCEEDED => ActionClass::Succeeded,
+            CAPABILITY_WORK_FAILED => ActionClass::Failed,
+            CAPABILITY_WORK_SUPERSEDED | CAPABILITY_WORK_REVOKED => ActionClass::Withdrawn,
+            "done" | "rejected" | "expired" | "cancelled" => ActionClass::LegacyClosed,
+            CAPABILITY_WORK_OUTCOME_UNKNOWN => ActionClass::OutcomeUnknown,
+            CAPABILITY_WORK_DISPATCHING => ActionClass::Dispatching,
+            _ => ActionClass::Open,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_action_status_maps_to_its_class() {
+        use crate::capability_grant_store::*;
+        for (status, class) in [
+            (CAPABILITY_WORK_SUCCEEDED, ActionClass::Succeeded),
+            (CAPABILITY_WORK_FAILED, ActionClass::Failed),
+            (CAPABILITY_WORK_SUPERSEDED, ActionClass::Withdrawn),
+            (CAPABILITY_WORK_REVOKED, ActionClass::Withdrawn),
+            ("done", ActionClass::LegacyClosed),
+            ("rejected", ActionClass::LegacyClosed),
+            ("expired", ActionClass::LegacyClosed),
+            ("cancelled", ActionClass::LegacyClosed),
+            (CAPABILITY_WORK_OUTCOME_UNKNOWN, ActionClass::OutcomeUnknown),
+            (CAPABILITY_WORK_DISPATCHING, ActionClass::Dispatching),
+            (CAPABILITY_WORK_REVIEW_CLOSED, ActionClass::Open),
+            (CAPABILITY_WORK_PREPARED, ActionClass::Open),
+            (CAPABILITY_WORK_INTENT_RECORDED, ActionClass::Open),
+            ("approved", ActionClass::Open),
+            ("dispatched", ActionClass::Open),
+            ("unknown", ActionClass::Open),
+        ] {
+            assert_eq!(SignalScheduleHost::action_class(status), class, "{status}");
+        }
     }
 }

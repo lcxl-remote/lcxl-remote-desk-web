@@ -250,6 +250,7 @@ pub async fn lock_original_requirement<C: ConnectionTrait, H: ScheduleHostStores
                 version: Some(row.version),
                 lease_token: None,
                 state_json: Some(&row.state_json),
+                lease_deadline_null: false,
                 org: OrgMode::Any,
             },
         )

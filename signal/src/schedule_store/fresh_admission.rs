@@ -4,6 +4,7 @@ use crate::{
     ai_assistant_gate::AiAssistantGate, control_authorizer::SINGLE_ACCOUNT_USER_ID,
     entity::agent_schedule_run,
 };
+#[cfg(test)]
 use desk_agent_protocol::AgentScope;
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
@@ -17,15 +18,7 @@ use desk_signal_facade::model::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-/// Scope and policy must come from current server-side projection.
-pub struct FreshTaskClaim<'a> {
-    pub owner: i32,
-    pub run_id: &'a str,
-    pub node_id: &'a str,
-    pub lease_seconds: u32,
-    pub policy_revision: i64,
-    pub scope: AgentScope,
-}
+pub use desk_assistant_data_store::schedule::FreshTaskClaim;
 
 pub struct ClaimedFreshTask {
     pub target_connection_id: String,

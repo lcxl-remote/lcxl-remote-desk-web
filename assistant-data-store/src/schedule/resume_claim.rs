@@ -28,6 +28,17 @@ pub struct ContinuationClaim<'a> {
     pub scope: AgentScope,
 }
 
+/// A fresh occurrence claim. Scope and policy come from the current server-side
+/// projection, never from a task or client.
+pub struct FreshTaskClaim<'a> {
+    pub owner: i32,
+    pub run_id: &'a str,
+    pub node_id: &'a str,
+    pub lease_seconds: u32,
+    pub policy_revision: i64,
+    pub scope: AgentScope,
+}
+
 /// A coherent server-side approval projection; never client-supplied authority.
 pub struct ContinuationPermissionClaim<'a> {
     pub continuation: ContinuationClaim<'a>,
@@ -399,7 +410,7 @@ async fn bind_continuation_session_on<C: ConnectionTrait, H: ScheduleHostStores<
         return Err(ScheduleStoreError::NotFound);
     }
     if host
-        .active_goal_conflict(txn, source, input.owner, subject)
+        .active_goal_conflict(txn, source, input.owner, Some(subject))
         .await?
     {
         return Err(ScheduleStoreError::Conflict);
@@ -452,6 +463,7 @@ async fn bind_continuation_session_on<C: ConnectionTrait, H: ScheduleHostStores<
                 version: Some(row.version),
                 lease_token: Some(row.lease_token),
                 state_json: Some(&row.state_json),
+                lease_deadline_null: false,
                 org: OrgMode::Any,
             },
         )
