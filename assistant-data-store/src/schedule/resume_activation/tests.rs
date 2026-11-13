@@ -180,6 +180,85 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     ) -> Result<(), ScheduleStoreError> {
         unreachable!()
     }
+    async fn lock_permission_owner(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+
+    async fn consume_scheduled_decision(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &str,
+        _: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+        _: i64,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    async fn initialize_continuation_group(
+        &self,
+        _: &DatabaseConnection,
+        _: &mut PersistedAgentSession,
+        _: i64,
+    ) -> Result<(), DbErr> {
+        unreachable!()
+    }
+    async fn assistant_data_limits(
+        &self,
+        _: &DatabaseConnection,
+    ) -> Result<Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>, DbErr> {
+        unreachable!()
+    }
+    async fn active_goal_conflict(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: i32,
+        _: &str,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn create_draft(
+        &self,
+        _: &DatabaseConnection,
+        _: i32,
+        _: &desk_agent_protocol::schedule::ScheduleDraft,
+        _: i64,
+        _: Option<&PersistedAgentSession>,
+    ) -> Result<entity::Model, ScheduleStoreError> {
+        unreachable!()
+    }
+    async fn record_prompt_retention(
+        &self,
+        _: &DatabaseConnection,
+        _: &mut entity::Model,
+        _: &PersistedAgentSession,
+        _: &desk_diagnose_core::chat::ChatMessage,
+    ) -> Result<(), ScheduleStoreError> {
+        unreachable!()
+    }
+    async fn validate_model_control(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<(), DbErr> {
+        unreachable!()
+    }
+    async fn open_for_schedule_proposal(
+        &self,
+        _: &DatabaseConnection,
+        _: &(),
+        _: &mut PersistedAgentSession,
+        _: u64,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
     async fn check_resume_retention(
         &self,
         _: &DatabaseConnection,

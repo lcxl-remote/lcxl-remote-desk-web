@@ -6,6 +6,18 @@ use crate::{
 
 /// Prefixes distinguish permission batches from directory consent identifiers.
 /// The caller must fence the session/input and persist this reference atomically.
+/// The turn that resumes `run_id` after the owner decides `request_id`.
+/// Both parts are length-prefixed so distinct pairs never collide.
+pub fn resume_turn_id(run_id: &str, request_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for value in [run_id, request_id] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("permission-resume-{:x}", digest.finalize())
+}
+
 pub fn reference(session: &PersistedAgentSession, id: &str) -> Option<String> {
     if id.is_empty() || id.len() > 256 || id.trim() != id || id.chars().any(char::is_control) {
         return None;
@@ -446,5 +458,17 @@ mod tests {
         );
         assert!(reference(&session, "directory\n").is_none());
         assert!(reference(&session, "missing").is_none());
+    }
+}
+
+#[cfg(test)]
+mod resume_turn_tests {
+    use super::resume_turn_id;
+
+    #[test]
+    fn resume_turn_ids_are_stable_and_length_prefixed() {
+        assert_eq!(resume_turn_id("run", "req"), resume_turn_id("run", "req"));
+        assert_ne!(resume_turn_id("ab", "c"), resume_turn_id("a", "bc"));
+        assert!(resume_turn_id("run", "req").starts_with("permission-resume-"));
     }
 }

@@ -23,12 +23,7 @@ fn storage(_: sea_orm::DbErr) -> AgentError {
 }
 
 pub fn turn_id(run_id: &str, request_id: &str) -> String {
-    let mut digest = Sha256::new();
-    for value in [run_id, request_id] {
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value.as_bytes());
-    }
-    format!("permission-resume-{:x}", digest.finalize())
+    desk_diagnose_core::schedule::permission_wait::resume_turn_id(run_id, request_id)
 }
 
 pub(super) async fn insert_pending(

@@ -2,10 +2,12 @@
 //! transaction serializes writers, so the lock hooks are no-ops.
 use super::{ScheduleStore, ScheduleStoreError};
 use crate::config::connection::DatabaseTransaction;
-use crate::entity::{agent_action_item, agent_exec_task, agent_run_event, agent_session};
+use crate::entity::{
+    agent_action_item, agent_exec_task, agent_goal_run as goal_row, agent_run_event, agent_session,
+};
 use desk_assistant_data_store::schedule::session::{
-    OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch, SessionRow,
-    SessionRows, TouchColumn,
+    LockError, OrgMode, ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch,
+    SessionRow, SessionRows, TouchColumn,
 };
 use desk_diagnose_core::{
     file_scope::transaction::{self, FileScopeReceipt},
@@ -245,6 +247,107 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         )
         .await
         .map_err(|_| ScheduleStoreError::Conflict)
+    }
+
+    async fn lock_permission_owner(
+        &self,
+        _: &DatabaseTransaction,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), LockError> {
+        Ok(())
+    }
+
+    async fn consume_scheduled_decision(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+        now_ms: i64,
+    ) -> Result<(), LockError> {
+        let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)
+            .map_err(|_| LockError::Denied)?;
+        crate::agent_session_store::permission_resume::consume_scheduled_decision_on(
+            txn, session, request_id, grants, now,
+        )
+        .await
+        .map_err(|_| LockError::Denied)
+    }
+
+    async fn assistant_data_limits(
+        &self,
+        txn: &DatabaseTransaction,
+    ) -> Result<Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>, DbErr> {
+        Ok(crate::assistant_data_config::policy(txn).await.limits)
+    }
+
+    async fn initialize_continuation_group(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), DbErr> {
+        crate::agent_subagent_store::initialize_continuation_group_on(txn, session, now_ms).await
+    }
+
+    async fn active_goal_conflict(
+        &self,
+        txn: &DatabaseTransaction,
+        conversation: &str,
+        owner: i32,
+        device: &str,
+    ) -> Result<bool, DbErr> {
+        Ok(goal_row::Entity::find()
+            .filter(goal_row::Column::ConversationId.eq(conversation))
+            .filter(goal_row::Column::ActorId.eq(owner.to_string()))
+            .filter(goal_row::Column::DeviceId.eq(device))
+            .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+            .one(txn)
+            .await?
+            .is_some())
+    }
+
+    async fn create_draft(
+        &self,
+        txn: &DatabaseTransaction,
+        owner: i32,
+        request: &desk_agent_protocol::schedule::ScheduleDraft,
+        now_ms: i64,
+        original: Option<&PersistedAgentSession>,
+    ) -> Result<super::entity::Model, ScheduleStoreError> {
+        ScheduleStore::create_draft_on(txn, owner, request, now_ms, original).await
+    }
+
+    async fn record_prompt_retention(
+        &self,
+        txn: &DatabaseTransaction,
+        task: &mut super::entity::Model,
+        session: &PersistedAgentSession,
+        parent: &desk_diagnose_core::chat::ChatMessage,
+    ) -> Result<(), ScheduleStoreError> {
+        ScheduleStore::record_prompt_retention_on(txn, task, session, parent).await
+    }
+
+    async fn validate_model_control(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<(), DbErr> {
+        crate::model_egress_store::SignalModelEgressStore::validate_control_on(txn, session, call)
+            .await
+    }
+
+    async fn open_for_schedule_proposal(
+        &self,
+        txn: &DatabaseTransaction,
+        row: &agent_session::Model,
+        session: &mut PersistedAgentSession,
+        now_ms: u64,
+    ) -> Result<bool, DbErr> {
+        crate::agent_approval_store::open_for_schedule_proposal_on(txn, row, session, now_ms).await
     }
 
     async fn check_resume_retention(

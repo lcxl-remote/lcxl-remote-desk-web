@@ -1,0 +1,522 @@
+//! Atomic occurrence/session claim for an explicitly confirmed continuation.
+use super::{
+    ScheduleStoreError,
+    authority::authority_now,
+    json,
+    session::{
+        LockError, OrgMode, ScheduleHostStores, SessionGuard, SessionKey, SessionPatch, SessionRow,
+        TouchColumn,
+    },
+};
+use crate::entity::{agent_schedule as entity, agent_schedule_run as run};
+use desk_agent_protocol::AgentScope;
+use desk_diagnose_core::{
+    ai_assistant::scheduled_retrieval::{RetrievalOccurrence, ScheduledRetrievalKind},
+    schedule::{SCHEDULE_CALC_VERSION, lifecycle::FailureState},
+    session::{AgentSessionSurface, ExecutionState, PersistedAgentSession, TriggerOrigin},
+};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+
+/// Server-resolved personal subject policy. Never deserialize this from a client
+/// or infer it from the stored task. Device/session policy is rechecked per call.
+pub struct ContinuationClaim<'a> {
+    pub owner: i32,
+    pub run_id: &'a str,
+    pub node_id: &'a str,
+    pub lease_seconds: u32,
+    pub policy_revision: i64,
+    pub scope: AgentScope,
+}
+
+/// A coherent server-side approval projection; never client-supplied authority.
+pub struct ContinuationPermissionClaim<'a> {
+    pub continuation: ContinuationClaim<'a>,
+    pub request_id: &'a str,
+    pub expected_session_version: i64,
+    pub expected_run_epoch: i64,
+    pub grants: &'a [desk_agent_protocol::capability_grant::CapabilityGrant],
+}
+
+/// The owner decision a permission resume consumes.
+#[derive(Clone, Copy)]
+pub struct PermissionReceiptClaim<'a> {
+    pub request_id: &'a str,
+    pub version: i64,
+    pub epoch: i64,
+    pub grants: &'a [desk_agent_protocol::capability_grant::CapabilityGrant],
+}
+
+pub struct ClaimedContinuation {
+    pub run: run::Model,
+    pub session: PersistedAgentSession,
+}
+
+// These values stay owned by the original claim transaction. Stage boundaries
+// change future/frame layout without releasing fences or granting another run.
+struct ContinuationTaskClaim {
+    work: run::Model,
+    task: entity::Model,
+    snapshot: entity::Model,
+    consent: desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent,
+}
+
+struct ContinuationSessionClaim<R> {
+    row: SessionRow<R>,
+    session: Box<PersistedAgentSession>,
+    now: i64,
+}
+
+/// The claim in the caller's transaction; the caller commits on success.
+pub async fn claim_continuation_on<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
+    input: ContinuationClaim<'_>,
+    permission: Option<PermissionReceiptClaim<'_>>,
+) -> Result<ClaimedContinuation, ScheduleStoreError> {
+    if input.owner <= 0
+        || input.node_id.is_empty()
+        || input.node_id.len() > 256
+        || !(30..=300).contains(&input.lease_seconds)
+    {
+        return Err(ScheduleStoreError::Invalid);
+    }
+    let mut task_claim = desk_diagnose_core::future::send_phase(|| {
+        prepare_continuation_task_on(host, txn, &input, permission)
+    })
+    .await?;
+    let mut source_claim = desk_diagnose_core::future::send_phase(|| {
+        bind_continuation_session_on(host, txn, &input, permission, &task_claim)
+    })
+    .await?;
+    let ContinuationTaskClaim {
+        work,
+        task,
+        snapshot,
+        consent,
+    } = task_claim.as_mut();
+    let ContinuationSessionClaim { row, session, now } = source_claim.as_mut();
+    let now = *now;
+    let source = task
+        .source_conversation_id
+        .as_deref()
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let deadline = now
+        .checked_add(i64::from(input.lease_seconds) * 1000)
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let now_dt = chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
+    let turn_id = if let Some(PermissionReceiptClaim {
+        request_id, grants, ..
+    }) = permission
+    {
+        host.consume_scheduled_decision(txn, session, request_id, grants, now)
+            .await
+            .map_err(denied_conflict)?;
+        desk_diagnose_core::schedule::permission_wait::resume_turn_id(source, request_id)
+    } else {
+        work.turn_id.clone()
+    };
+    if permission.is_none() {
+        // Freeze the approved task text separately from later chat. It is
+        // context, not a new user input or a tool permission grant.
+        let id = desk_diagnose_core::native_ids::scheduled_message(&work.run_id);
+        let parent = desk_diagnose_core::schedule::review_result::activation_envelope(
+            &session.conversation,
+            &task.schedule_id,
+        );
+        let mut message = desk_diagnose_core::chat::ChatMessage::system_event(&id, &task.prompt);
+        message.data_envelope =
+            desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
+                parent,
+                &id,
+                &task.prompt,
+                "scheduled_task_input",
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        message.turn_id = Some(turn_id.clone());
+        session.conversation.push(message);
+    }
+    session
+        .begin_turn(
+            &turn_id,
+            Some(work.run_id.clone()),
+            None,
+            input.policy_revision,
+            input.scope,
+            now_dt.to_rfc3339(),
+        )
+        .map_err(|_| ScheduleStoreError::Conflict)?;
+    session.adopt_trigger(TriggerOrigin::ScheduledContinuation, &turn_id);
+    session.scheduled_request = Some(Box::new(consent.request_binding(&work.run_id)));
+    if permission.is_none() {
+        session.scheduled_owner_group_id = session.delegation_group_id.clone();
+        host.initialize_continuation_group(txn, session, now)
+            .await?;
+    }
+    session.version = row
+        .version
+        .checked_add(1)
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let state_json = session
+        .encode_json_for_storage()
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+    let changed = host
+        .write_session(
+            txn,
+            SessionGuard {
+                id: Some(row.id),
+                version: Some(row.version),
+                ..SessionGuard::any()
+            },
+            SessionPatch {
+                state_json: Some(&state_json),
+                version: Some(session.version),
+                lease_token: Some(session.lease_token as i64),
+                lease_deadline_ms: Some(Some(deadline)),
+                updated_at_ms: Some(now),
+                turn_state: Some("running"),
+            },
+        )
+        .await?;
+    if changed != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    // Approval persists across ordinary chat. Bind only the first dispatch to
+    // the latest settled input; permission resumes retain that exact fence.
+    if permission.is_none() {
+        snapshot.requirement_revision =
+            Some(i64::try_from(session.input_revision).map_err(|_| ScheduleStoreError::Invalid)?);
+    }
+    let epoch = work
+        .lease_epoch
+        .checked_add(1)
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let changed = run::Entity::update_many()
+        .set(run::ActiveModel {
+            task_snapshot_json: Set(json(snapshot)?),
+            status: Set("running".into()),
+            lease_owner: Set(Some(input.node_id.into())),
+            lease_epoch: Set(epoch),
+            lease_deadline: Set(Some(deadline)),
+            attempt: Set(if permission.is_some() {
+                work.attempt
+            } else {
+                work.attempt
+                    .checked_add(1)
+                    .ok_or(ScheduleStoreError::Invalid)?
+            }),
+            turn_id: Set(turn_id),
+            result_ref: Set(None),
+            started_at: Set(work.started_at.or(Some(now))),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .filter(run::Column::Id.eq(work.id))
+        .filter(run::Column::Status.eq(&work.status))
+        .filter(run::Column::LeaseEpoch.eq(work.lease_epoch))
+        .filter(run::Column::CancelRequestedAt.is_null())
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    entity::Entity::update_many()
+        .set(entity::ActiveModel {
+            updated_at: Set(now),
+            requirement_revision: Set(snapshot.requirement_revision),
+            ..Default::default()
+        })
+        .filter(entity::Column::Id.eq(task.id))
+        .exec(txn)
+        .await?;
+    let run = run::Entity::find_by_id(work.id)
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    let ContinuationSessionClaim { session, .. } = *source_claim;
+    Ok(ClaimedContinuation {
+        run,
+        session: *session,
+    })
+}
+
+async fn prepare_continuation_task_on<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
+    input: &ContinuationClaim<'_>,
+    permission: Option<PermissionReceiptClaim<'_>>,
+) -> Result<Box<ContinuationTaskClaim>, ScheduleStoreError> {
+    let work = run::Entity::find()
+        .filter(run::Column::RunId.eq(input.run_id))
+        .filter(run::Column::OwnerUserId.eq(input.owner))
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    if work.cancel_requested_at.is_some() || work.failure_accounted {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if let Some(PermissionReceiptClaim {
+        request_id,
+        version,
+        epoch,
+        ..
+    }) = permission
+    {
+        if version < 1
+            || epoch < 1
+            || epoch != work.lease_epoch
+            || work.status != "awaiting_permission"
+            || work.lease_deadline.is_some()
+            || work.started_at.is_none()
+            || work.finished_at.is_some()
+            || work.attempt != 1
+            || work.result_ref.as_deref() != Some(format!("permission:{request_id}").as_str())
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+    } else if !matches!(work.status.as_str(), "queued" | "waiting_device")
+        || work.lease_epoch != 0
+        || work.attempt != 0
+        || work.started_at.is_some()
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let task = entity::Entity::find()
+        .filter(entity::Column::ScheduleId.eq(&work.schedule_id))
+        .filter(entity::Column::OwnerUserId.eq(input.owner))
+        .one(txn)
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    if permission.is_some() {
+        host.lock_permission_owner(
+            txn,
+            &work.conversation_id,
+            &input.owner.to_string(),
+            &task.target_device_id,
+        )
+        .await
+        .map_err(denied_conflict)?;
+        host.lock_conversation(txn, &work.conversation_id).await?;
+    }
+    let snapshot: entity::Model =
+        serde_json::from_str(&work.task_snapshot_json).map_err(|_| ScheduleStoreError::Invalid)?;
+    let failure: FailureState =
+        serde_json::from_str(&task.failure_state_json).map_err(|_| ScheduleStoreError::Invalid)?;
+    let consent = super::retrieval_consent(&task)?.ok_or(ScheduleStoreError::Conflict)?;
+    let source = task
+        .source_conversation_id
+        .as_deref()
+        .ok_or(ScheduleStoreError::Invalid)?;
+    if task.kind != "conversation_resume"
+        || !(matches!(task.status.as_str(), "active" | "triggered")
+            || (permission.is_some() && task.status == "paused"))
+        || task.active_run_id.as_deref() != Some(input.run_id)
+        || failure.pause_reasons.iter().any(|reason| {
+            permission.is_none()
+                || *reason != desk_agent_protocol::schedule::SchedulePauseReason::User
+        })
+        || i64::try_from(failure.recovery_epoch).ok() != Some(work.recovery_epoch)
+        || task.calc_version != SCHEDULE_CALC_VERSION
+        || task.requirement_revision.is_none_or(|v| v <= 0)
+        || work.conversation_id != source
+        || work.turn_id.is_empty()
+        || snapshot.schedule_id != task.schedule_id
+        || snapshot.owner_user_id != input.owner
+        || snapshot.kind != task.kind
+        || snapshot.target_device_id != task.target_device_id
+        || snapshot.task_revision != task.task_revision
+        || snapshot.retrieval_consent_json != task.retrieval_consent_json
+        || snapshot.prompt != task.prompt
+        || snapshot.spec_json != task.spec_json
+        || snapshot.requirement_revision != task.requirement_revision
+        || snapshot.source_conversation_id != task.source_conversation_id
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    // All task operations lock task before session and occurrence rows.
+    let revision = task
+        .revision
+        .checked_add(1)
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let locked = entity::Entity::update_many()
+        .set(entity::ActiveModel {
+            revision: Set(revision),
+            ..Default::default()
+        })
+        .filter(entity::Column::Id.eq(task.id))
+        .filter(entity::Column::Revision.eq(task.revision))
+        .exec(txn)
+        .await?;
+    if locked.rows_affected != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    Ok(Box::new(ContinuationTaskClaim {
+        work,
+        task,
+        snapshot,
+        consent,
+    }))
+}
+
+async fn bind_continuation_session_on<C: ConnectionTrait, H: ScheduleHostStores<C>>(
+    host: &H,
+    txn: &C,
+    input: &ContinuationClaim<'_>,
+    permission: Option<PermissionReceiptClaim<'_>>,
+    claim: &ContinuationTaskClaim,
+) -> Result<Box<ContinuationSessionClaim<H::Row>>, ScheduleStoreError> {
+    let work = &claim.work;
+    let task = &claim.task;
+    let consent = &claim.consent;
+    let subject = &consent.source_session_device_id;
+    let source = task
+        .source_conversation_id
+        .as_deref()
+        .ok_or(ScheduleStoreError::Invalid)?;
+    let actor = input.owner.to_string();
+    let row = host
+        .find_session(
+            txn,
+            SessionKey::Conversation {
+                conversation: source,
+                actor: Some(&actor),
+                device: Some(subject),
+            },
+            OrgMode::PersonalOnly,
+            true,
+        )
+        .await?
+        .ok_or(ScheduleStoreError::NotFound)?;
+    let mut session = Box::new(
+        PersistedAgentSession::decode_json(&row.state_json)
+            .map_err(|_| ScheduleStoreError::Invalid)?,
+    );
+    if session.conversation_id != source
+        || session.check_subject(&actor, subject).is_err()
+        || session
+            .check_surface(AgentSessionSurface::AiAssistant)
+            .is_err()
+    {
+        return Err(ScheduleStoreError::NotFound);
+    }
+    if host
+        .active_goal_conflict(txn, source, input.owner, subject)
+        .await?
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if (permission.is_some() && session.input_revision != task.requirement_revision.unwrap() as u64)
+        || session.input_revision < task.requirement_revision.unwrap() as u64
+        || !session.turn_state.can_claim()
+        || session.latest_input_seq != session.handled_input_seq
+        || session.execution_state != ExecutionState::None
+        || session.version != row.version
+        || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
+        || row.lease_token < 0
+        || row.lease_token == i64::MAX
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if let Some(PermissionReceiptClaim {
+        request_id,
+        version,
+        ..
+    }) = permission
+        && (desk_diagnose_core::assistant_policy::require_current_policy(input.policy_revision)
+            .is_err()
+            || row
+                .turn_state
+                .as_deref()
+                .is_some_and(|state| state != "idle")
+            || session.version != version
+            || session.trigger_origin != TriggerOrigin::ScheduledContinuation
+            || session.current_request_id.as_deref() != Some(work.run_id.as_str())
+            || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
+            || session.active_control_connection_id.is_some()
+            || session.turn_state != desk_diagnose_core::session::TurnState::Idle
+            || session.terminal_error.is_some()
+            || !session.pending_auto_triggers.is_empty()
+            || desk_diagnose_core::schedule::permission_wait::reference(&session, request_id)
+                != work.result_ref)
+    {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    let locked = host
+        .touch_session(
+            txn,
+            TouchColumn::Version,
+            SessionGuard {
+                id: Some(row.id),
+                conversation: Some(source),
+                actor: Some(&actor),
+                device: Some(subject),
+                version: Some(row.version),
+                lease_token: Some(row.lease_token),
+                state_json: Some(&row.state_json),
+                org: OrgMode::Any,
+            },
+        )
+        .await?;
+    if locked != 1 {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    if permission.is_some() {
+        let current = run::Entity::find_by_id(work.id)
+            .lock_exclusive()
+            .one(txn)
+            .await?
+            .ok_or(ScheduleStoreError::NotFound)?;
+        if &current != work {
+            return Err(ScheduleStoreError::Conflict);
+        }
+    }
+    let now = authority_now(txn).await?;
+    if permission.is_none() && now >= work.start_deadline {
+        return Err(ScheduleStoreError::Conflict);
+    }
+    // Only the first native claim creates the occurrence ledger. Permission
+    // resumes verify its original identity and retain every spent counter.
+    let source_device_ref = session.assistant_data.as_ref().map_or_else(
+        || task.target_device_id.clone(),
+        |data| data.source_device_ref.clone(),
+    );
+    let source_instance_id = session
+        .assistant_data
+        .as_ref()
+        .and_then(|data| data.source_instance_id.clone());
+    let occurrence = RetrievalOccurrence {
+        schedule_id: &task.schedule_id,
+        task_revision: task
+            .task_revision
+            .try_into()
+            .map_err(|_| ScheduleStoreError::Invalid)?,
+        run_id: &work.run_id,
+        kind: ScheduledRetrievalKind::ConversationResume,
+        source_conversation_id: Some(source),
+        root_conversation_id: source,
+        actor_id: &actor,
+        device_id: &task.target_device_id,
+        source_device_ref: &source_device_ref,
+        source_instance_id: source_instance_id.as_deref(),
+        started_at_unix_ms: work
+            .started_at
+            .unwrap_or(now)
+            .try_into()
+            .map_err(|_| ScheduleStoreError::Invalid)?,
+        original_deadline_unix_ms: None,
+    };
+    if permission.is_some() {
+        consent.validate_occurrence_binding(&session, &occurrence)
+    } else {
+        let limits = host.assistant_data_limits(txn).await?;
+        consent.bind_conversation_resume(&mut session, &occurrence, &limits)
+    }
+    .map_err(|_| ScheduleStoreError::Conflict)?;
+    Ok(Box::new(ContinuationSessionClaim { row, session, now }))
+}
+
+fn denied_conflict(error: LockError) -> ScheduleStoreError {
+    match error {
+        LockError::Backend(error) => ScheduleStoreError::Backend(error),
+        LockError::Denied => ScheduleStoreError::Conflict,
+    }
+}

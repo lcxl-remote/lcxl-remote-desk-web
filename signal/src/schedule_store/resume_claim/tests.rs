@@ -1,11 +1,15 @@
+use super::super::entity;
 use super::*;
+use crate::entity::{agent_schedule_run as run, agent_session as session_row};
 use desk_agent_protocol::{
     AgentScope, ExecutionMode,
     schedule::{ScheduleRule, ScheduledTaskKind},
 };
 #[cfg(test)]
 use desk_assistant_data_store::entity_table::EntityTableExt;
+use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema, TransactionTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 async fn base_fixture() -> (
     ScheduleStore,
     entity::Model,

@@ -19,11 +19,13 @@ mod directory_receipt;
 mod edit;
 mod history;
 mod model_management;
+mod proposal;
 mod proposal_review;
 mod queue;
 mod receipt_context;
 mod resume_activation;
 mod resume_admission;
+mod resume_claim;
 mod resume_lease;
 mod review_wait;
 mod search;
@@ -52,6 +54,7 @@ pub use model_management::{
     cancel as cancel_managed_task, list as list_managed_tasks, lock_target,
     view as managed_task_view,
 };
+pub use proposal::manage_on;
 pub use proposal_review::{decide_by_ai_on, review_proposal_on};
 pub use queue::{
     BudgetPolicySource, claim_queued_on, database_now, due_candidates, enqueue_manual_on,
@@ -65,6 +68,10 @@ pub use resume_activation::{
 pub use resume_admission::{
     assistant_retrieval_deadline_on, fresh_action_authority_on, lock_action_session,
     same_retrieval_definition, scheduled_context_on,
+};
+pub use resume_claim::{
+    ClaimedContinuation, ContinuationClaim, ContinuationPermissionClaim, PermissionReceiptClaim,
+    claim_continuation_on,
 };
 pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
 pub use review_wait::{ReviewPoll, poll_review_decision_on};

@@ -162,6 +162,78 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
     /// Manager: the device row's owner is `owner` (an unparsable id is not).
     /// OSS has a single account and always returns true.
     async fn owns_device(&self, txn: &C, owner: i32, device: &str) -> Result<bool, DbErr>;
+    /// Manager permission owner lock for the run's subject; no-op on OSS.
+    async fn lock_permission_owner(
+        &self,
+        txn: &C,
+        run_id: &str,
+        actor: &str,
+        device: &str,
+    ) -> Result<(), LockError>;
+    /// Consumes the owner's recorded decision for a continuation permission
+    /// resume. OSS reports every refusal, including storage errors, as `Denied`.
+    async fn consume_scheduled_decision(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
+        now_ms: i64,
+    ) -> Result<(), LockError>;
+    /// Starts the continuation's sub-agent group in the claimed session.
+    async fn initialize_continuation_group(
+        &self,
+        txn: &C,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), DbErr>;
+    /// Current assistant-data limits for a first continuation claim.
+    async fn assistant_data_limits(
+        &self,
+        txn: &C,
+    ) -> Result<Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>, DbErr>;
+    /// An unfinished long-term goal plans this conversation (OSS by `actor_id`,
+    /// Manager by `owner_user_id`).
+    async fn active_goal_conflict(
+        &self,
+        txn: &C,
+        conversation: &str,
+        owner: i32,
+        device: &str,
+    ) -> Result<bool, DbErr>;
+    /// Inserts a task definition from an owner request or an AI proposal.
+    async fn create_draft(
+        &self,
+        txn: &C,
+        owner: i32,
+        request: &desk_agent_protocol::schedule::ScheduleDraft,
+        now_ms: i64,
+        original: Option<&PersistedAgentSession>,
+    ) -> Result<crate::entity::agent_schedule::Model, ScheduleStoreError>;
+    /// Freezes the proposing turn's prompt retention on a proposed task.
+    async fn record_prompt_retention(
+        &self,
+        txn: &C,
+        task: &mut crate::entity::agent_schedule::Model,
+        session: &PersistedAgentSession,
+        parent: &desk_diagnose_core::chat::ChatMessage,
+    ) -> Result<(), ScheduleStoreError>;
+    /// Checks a model-control call against its recorded model egress.
+    async fn validate_model_control(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<(), DbErr>;
+    /// Opens the approval review of a fresh-task proposal; `true` when it
+    /// wrote an audit event that advanced the session row.
+    async fn open_for_schedule_proposal(
+        &self,
+        txn: &C,
+        row: &Self::Row,
+        session: &mut PersistedAgentSession,
+        now_ms: u64,
+    ) -> Result<bool, DbErr>;
     /// Unfinished device actions on the conversation, locked for the caller.
     async fn has_open_actions(&self, txn: &C, conversation: &str) -> Result<bool, DbErr>;
     /// Closes the owner's pending permission decision for a cancelled wait.

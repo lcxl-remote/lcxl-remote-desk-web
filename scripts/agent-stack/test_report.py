@@ -425,7 +425,7 @@ class Reports(unittest.TestCase):
                         if 'closure' in pattern and any(name in pattern for name in [
                             'assistant_data_store::', 'schedule_store::', 'agent_goal_store::claim_slice',
                             'agent_run_event_store::', 'agent_subagent_store::observation::'])]
-            self.assertEqual(len(patterns), 72 if package == 'desk-signal' else 75)
+            self.assertEqual(len(patterns), 73 if package == 'desk-signal' else 76)
             for pattern in patterns:
                 constructor = pattern.removeprefix('^').split('.*', 1)[0].split(r'::_\{', 1)[0].rstrip(':')
                 depth = 2 if pattern.count('closure') == 2 else 1
