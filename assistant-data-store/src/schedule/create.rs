@@ -360,7 +360,6 @@ mod tests {
     };
     use desk_diagnose_core::session::PersistedAgentSession;
     use sea_orm::{Database, Schema};
-    use std::sync::Mutex;
 
     #[tokio::test]
     async fn a_source_consent_locks_the_conversation_before_reading_the_personal_source() {
@@ -368,22 +367,19 @@ mod tests {
         db.execute(&Schema::new(db.get_database_backend()).entity_table(entity::Entity))
             .await
             .unwrap();
-        let host = Recorder {
-            session: PersistedAgentSession::new(
-                "source",
-                "2",
-                "device",
-                1,
-                AgentScope {
-                    granted: vec![],
-                    mode: ExecutionMode::ReadOnly,
-                    expires_at: None,
-                    policy_name: None,
-                },
-                "2026-11-13T00:00:00Z",
-            ),
-            calls: Mutex::default(),
-        };
+        let host = Recorder::new(PersistedAgentSession::new(
+            "source",
+            "2",
+            "device",
+            1,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-11-13T00:00:00Z",
+        ));
         let request = ScheduleCreation {
             client_create_key: "create-1".into(),
             kind: ScheduledTaskKind::FreshTask,

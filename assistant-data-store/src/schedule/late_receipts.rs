@@ -120,11 +120,7 @@ pub async fn reconcile_late_task_receipts_on<C: ConnectionTrait, H: ScheduleHost
     let actions = host
         .find_actions(txn, run_id, ActionFilter::default(), true)
         .await?;
-    if actions.is_empty()
-        || actions
-            .iter()
-            .any(|action| !matches!(action.class, ActionClass::Succeeded | ActionClass::Failed))
-    {
+    if !receipts_settled(actions.iter().map(|action| action.class)) {
         return Ok(Finish::Rollback(false));
     }
     let now = authority_now(txn).await?;
@@ -182,4 +178,32 @@ pub async fn reconcile_late_task_receipts_on<C: ConnectionTrait, H: ScheduleHost
         return Err(ScheduleStoreError::Conflict);
     }
     Ok(Finish::Commit(true))
+}
+
+/// Late receipts restore only when every original action has a definite
+/// result; withdrawn or still unknown work keeps the occurrence unknown.
+fn receipts_settled(mut classes: impl Iterator<Item = ActionClass>) -> bool {
+    let mut any = false;
+    classes.all(|class| {
+        any = true;
+        matches!(class, ActionClass::Succeeded | ActionClass::Failed)
+    }) && any
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_definite_results_settle_late_receipts() {
+        use ActionClass::*;
+        assert!(!receipts_settled([].into_iter()));
+        assert!(receipts_settled([Succeeded, Failed].into_iter()));
+        for other in [Withdrawn, LegacyClosed, OutcomeUnknown, Dispatching, Open] {
+            assert!(
+                !receipts_settled([Succeeded, other].into_iter()),
+                "{other:?}"
+            );
+        }
+    }
 }

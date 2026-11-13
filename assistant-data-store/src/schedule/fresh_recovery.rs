@@ -504,3 +504,168 @@ async fn settle_expired_fresh_task<C: ConnectionTrait, H: ScheduleHostStores<C>>
     .await?;
     Ok(Finish::Commit(true))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::test_host::{Recorder, fresh_rows};
+    use desk_diagnose_core::session::AgentSessionSurface;
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn expired_fresh_recovery_refuses_an_organization_session() {
+        let mut session = PersistedAgentSession::new(
+            "run",
+            "1",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-11-13T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.trigger_origin = TriggerOrigin::ScheduledTask;
+        session.input_revision = 1;
+        session.begin_focus_epoch(1, Vec::new()).unwrap();
+        session.lease_token = 7;
+        session.turn_state = TurnState::Running;
+        session.current_request_id = Some("run".into());
+        session.current_turn_id = Some("run-turn".into());
+        let recover = |personal| {
+            let session = session.clone();
+            async move {
+                let db = Database::connect("sqlite::memory:").await.unwrap();
+                fresh_rows(&db, 1).await;
+                let mut host = Recorder::new(session);
+                host.lease_token = 7;
+                host.personal = personal;
+                recover_action_free_fresh_task_on(&host, &db, "run")
+                    .await
+                    .map(Finish::into_inner)
+            }
+        };
+        // A personal session reaches the turn check; its live turn without a
+        // session lease is left for the executor and rolls back.
+        let personal = recover(true).await;
+        assert!(matches!(personal, Ok(false)), "{personal:?}");
+        assert!(matches!(
+            recover(false).await,
+            Err(ScheduleStoreError::Conflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_saved_answer_waits_for_pending_native_child_effects() {
+        let mut session = PersistedAgentSession::new(
+            "run",
+            "1",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-11-13T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.trigger_origin = TriggerOrigin::ScheduledTask;
+        session.input_revision = 1;
+        session.begin_focus_epoch(1, Vec::new()).unwrap();
+        session.lease_token = 7;
+        session.turn_state = TurnState::Idle;
+        session.handled_input_seq = session.latest_input_seq;
+        session.current_request_id = Some("run".into());
+        session.current_turn_id = Some("run-turn".into());
+        session.delegation_group_id = Some("group".into());
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        fresh_rows(&db, 1).await;
+        crate::schedule::test_host::fresh_group(&db).await;
+        let mut host = Recorder::new(session);
+        host.lease_token = 7;
+        host.native = NativeDisposition::Pending;
+        let result = recover_action_free_fresh_task_on(&host, &db, "run").await;
+        assert!(matches!(result, Ok(Finish::Rollback(false))), "{result:?}");
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|call| matches!(call, crate::schedule::test_host::Call::Write(..)))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_permission_pause_parks_the_occurrence_unless_an_action_failed() {
+        use crate::entity::agent_schedule_run as run;
+        use crate::schedule::test_host::Call;
+        let mut session = PersistedAgentSession::new(
+            "run",
+            "1",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-11-13T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.trigger_origin = TriggerOrigin::ScheduledTask;
+        session.input_revision = 1;
+        session.begin_focus_epoch(1, Vec::new()).unwrap();
+        session.lease_token = 7;
+        session.turn_state = TurnState::Idle;
+        session.handled_input_seq = session.latest_input_seq;
+        session.current_request_id = Some("run".into());
+        session.current_turn_id = Some("run-turn".into());
+        session.terminal_permission_request_id = Some("wait".into());
+        session.permission_requests.push(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": desk_diagnose_core::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION,
+                "request_id": "wait", "input_revision": 1, "state": "pending",
+                "created_at": "2026-09-06T00:00:00Z", "items": [{
+                    "item_id": "read", "provider_id": "desktop.session",
+                    "tool_name": "inspect_desktop_session", "expected_effect": "read_device",
+                    "resource_scope": ["target:current_device"], "operation_scope": ["observe"],
+                    "suggested_ttl_seconds": 120, "suggested_max_uses": 1,
+                    "reason": "Inspect current device"
+                }]
+            }))
+            .unwrap(),
+        );
+        let recover = |actions: Vec<ActionClass>| {
+            let session = session.clone();
+            async move {
+                let db = Database::connect("sqlite::memory:").await.unwrap();
+                fresh_rows(&db, 1).await;
+                let mut host = Recorder::new(session);
+                host.lease_token = 7;
+                host.actions = actions;
+                let result = recover_action_free_fresh_task_on(&host, &db, "run").await;
+                let work = run::Entity::find().one(&db).await.unwrap().unwrap();
+                (result, host.calls(), work)
+            }
+        };
+        // Successful earlier work does not hold the pause back.
+        let (result, calls, work) = recover(vec![ActionClass::Succeeded]).await;
+        assert!(matches!(result, Ok(Finish::Commit(true))), "{result:?}");
+        assert_eq!(
+            (work.status.as_str(), work.result_ref.as_deref()),
+            ("awaiting_permission", Some("permission:wait"))
+        );
+        let Some(Call::Write(_, patch)) = calls.last() else {
+            panic!("the pause is saved before the occurrence parks")
+        };
+        assert_eq!(patch.turn_state.as_deref(), Some("idle"));
+        let (result, calls, _) = recover(vec![ActionClass::Failed]).await;
+        assert!(matches!(result, Ok(Finish::Rollback(false))), "{result:?}");
+        assert!(!calls.iter().any(|call| matches!(call, Call::Write(..))));
+    }
+}

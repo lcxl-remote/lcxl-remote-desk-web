@@ -291,3 +291,45 @@ pub async fn renew_paired_lease_on<C: ConnectionTrait, H: SessionRows<C>>(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::test_host::{Call, Recorder, continuation_rows, continuation_session};
+    use desk_diagnose_core::session::TurnState;
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn renewal_extends_only_the_unchanged_session_version_and_token() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let far = chrono::Utc::now().timestamp_millis() + 600_000;
+        continuation_rows(&db, "running", Some(far), false, None).await;
+        let mut session = continuation_session();
+        session.turn_state = TurnState::Running;
+        let mut host = Recorder::new(session);
+        host.lease_token = 7;
+        host.lease_deadline_ms = Some(far);
+        let lease = ContinuationLease {
+            owner: 1,
+            run_id: "run",
+            node_id: "node",
+            run_epoch: 1,
+            session_token: 7,
+        };
+        assert!(
+            renew_paired_lease_on(&host, &db, lease, 60, false)
+                .await
+                .unwrap()
+        );
+        let Some(Call::Write(guard, patch)) = host.calls().pop() else {
+            panic!("renewal writes the session deadline last")
+        };
+        // A concurrent writer that changed the transcript or the token makes
+        // this CAS miss instead of extending a lease it no longer owns.
+        assert_eq!(
+            (guard.id, guard.version, guard.lease_token),
+            (Some(11), Some(4), Some(7))
+        );
+        assert_eq!(patch.lease_deadline_ms, Some(Some(far)));
+    }
+}

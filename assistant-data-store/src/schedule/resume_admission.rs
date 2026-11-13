@@ -469,3 +469,54 @@ pub fn same_retrieval_definition(task: &entity::Model, snapshot: &entity::Model)
 fn invalid() -> DbErr {
     DbErr::Custom("scheduled action is no longer bound to an active run".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::test_host::{Recorder, continuation_rows, continuation_session};
+    use desk_diagnose_core::{
+        ai_assistant::scheduled_retrieval::ScheduledRequestBinding,
+        dynamic_run::AssistantInputTarget, session::TurnState,
+    };
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn continuation_actions_require_a_personal_session_row() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let far = chrono::Utc::now().timestamp_millis() + 600_000;
+        continuation_rows(&db, "running", Some(far), false, None).await;
+        let mut session = continuation_session();
+        session.turn_state = TurnState::Running;
+        session.scheduled_request = Some(Box::new(ScheduledRequestBinding {
+            schedule_id: "task".into(),
+            run_id: "run".into(),
+            execution_target: AssistantInputTarget::fixed("device".into()),
+            original_read_context: None,
+            recorded_at_unix_ms: 1,
+        }));
+        let host = Recorder::new(session.clone());
+        let row = |personal| SessionRow {
+            raw: (),
+            id: 11,
+            conversation_id: "source".into(),
+            actor_id: "1".into(),
+            device_id: "device".into(),
+            state_json: String::new(),
+            version: 4,
+            lease_token: 7,
+            lease_deadline_ms: Some(far),
+            personal,
+            turn_state: None,
+        };
+        let validate = |row| {
+            let (host, db, session) = (&host, &db, &session);
+            async move {
+                validate_continuation_action_on(host, db, "source", &row, session, "task", "run")
+                    .await
+                    .is_ok()
+            }
+        };
+        assert!(validate(row(true)).await);
+        assert!(!validate(row(false)).await);
+    }
+}

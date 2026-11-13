@@ -901,6 +901,117 @@ mod tests {
         .unwrap();
     }
 
+    async fn outbox(
+        db: &crate::config::connection::DatabaseConnection,
+        dispatch: &str,
+        work_id: i64,
+        payload_work: i64,
+        state: &str,
+    ) {
+        use crate::capability_grant_store::CapabilityDispatchPayload;
+        use crate::entity::agent_capability_dispatch_outbox as outbox_row;
+        use desk_agent_protocol::{
+            capability_grant::CapabilityRiskTier, capability_provider::CapabilityEffect,
+        };
+        use sea_orm::ActiveModelTrait;
+        let authority = desk_diagnose_core::provider_preflight::ObservedCapabilityAuthority {
+            target_session_id: None,
+            envelope_ids: vec![],
+            provider_id: "provider".into(),
+            capability_id: "command".into(),
+            tool_name: "tool".into(),
+            tool_schema_version: 1,
+            effect: CapabilityEffect::ExecuteCommand,
+            risk_tier: CapabilityRiskTier::R2,
+            canonical_input_sha256: "0".repeat(64),
+            resources: vec![],
+            operations: vec![],
+            export_destinations: vec![],
+        };
+        let payload = CapabilityDispatchPayload {
+            observed_authority: authority,
+            command_origin: None,
+            command_receipt: None,
+            command_export: None,
+            dispatch_id: dispatch.into(),
+            grant_id: "grant".into(),
+            reservation_id: "reservation".into(),
+            work_id: payload_work,
+            call_id: "call".into(),
+            generation: 1,
+            input_revision: 1,
+            input_watermark: 1,
+            canonical_input_json: "{}".into(),
+            canonical_input_digest_sha256: "0".repeat(64),
+            provider_id: "provider".into(),
+            capability_id: "command".into(),
+            tool_name: "tool".into(),
+        };
+        let now = chrono::Utc::now();
+        outbox_row::ActiveModel {
+            dispatch_id: Set(dispatch.into()),
+            call_id: Set(format!("call-{dispatch}")),
+            work_id: Set(work_id),
+            reservation_id: Set(format!("reservation-{dispatch}")),
+            generation: Set(1),
+            state: Set(state.into()),
+            payload_json: Set(serde_json::to_string(&payload).unwrap()),
+            payload_schema_version: Set(1),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_resolution_requires_the_matching_unknown_dispatch_record() {
+        use crate::capability_grant_store::{
+            CAPABILITY_WORK_OUTCOME_UNKNOWN, DISPATCH_OUTBOX_OUTCOME_UNKNOWN,
+        };
+        use sea_orm::TransactionTrait;
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        for id in [1, 2, 3] {
+            action(&db, id, CAPABILITY_WORK_OUTCOME_UNKNOWN).await;
+        }
+        outbox(&db, "unknown", 1, 1, DISPATCH_OUTBOX_OUTCOME_UNKNOWN).await;
+        outbox(&db, "sending", 2, 2, "sending").await;
+        outbox(&db, "foreign", 3, 1, DISPATCH_OUTBOX_OUTCOME_UNKNOWN).await;
+        let txn = db.begin().await.unwrap();
+        let host = SignalScheduleHost;
+        let actions = host
+            .find_actions(&txn, "run", ActionFilter::default(), false)
+            .await
+            .unwrap();
+        let mut verdicts = Vec::new();
+        // Disposing a requested unknown outcome needs its unknown dispatch
+        // record; acknowledging needs only the matching record.
+        for (index, dispatch, requested) in [
+            (0, "unknown", true),
+            (1, "sending", false),
+            (1, "sending", true),
+            (0, "missing", false),
+            (2, "foreign", false),
+        ] {
+            verdicts.push(
+                match host
+                    .verify_manual_outbox(&txn, &actions[index], dispatch, requested)
+                    .await
+                {
+                    Ok(()) => "ok",
+                    Err(ScheduleStoreError::Conflict) => "conflict",
+                    Err(_) => "other",
+                },
+            );
+        }
+        assert_eq!(verdicts, ["ok", "ok", "conflict", "conflict", "conflict"]);
+    }
+
     #[tokio::test]
     async fn action_lookups_exclude_a_class_in_sql_and_classify_rows() {
         use crate::capability_grant_store::*;

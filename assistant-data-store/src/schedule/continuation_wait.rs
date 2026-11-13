@@ -190,3 +190,57 @@ pub async fn cancel_continuation_wait_on<C: ConnectionTrait, H: ScheduleHostStor
     }
     Ok(Some((work, now)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::test_host::{Call, Recorder, continuation_rows, continuation_session};
+    use desk_diagnose_core::session::TurnState;
+    use sea_orm::Database;
+
+    #[tokio::test]
+    async fn cancelling_a_wait_writes_only_the_unchanged_session_lease() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        continuation_rows(
+            &db,
+            "awaiting_permission",
+            None,
+            true,
+            Some("permission:wait"),
+        )
+        .await;
+        let mut session = continuation_session();
+        session.turn_state = TurnState::Idle;
+        session.handled_input_seq = session.latest_input_seq;
+        session.terminal_permission_request_id = Some("wait".into());
+        session.permission_requests.push(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": desk_diagnose_core::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION,
+                "request_id": "wait", "input_revision": 3, "state": "pending",
+                "created_at": "2026-09-06T00:00:00Z", "items": [{
+                    "item_id": "read", "provider_id": "desktop.session",
+                    "tool_name": "inspect_desktop_session", "expected_effect": "read_device",
+                    "resource_scope": ["target:current_device"], "operation_scope": ["observe"],
+                    "suggested_ttl_seconds": 120, "suggested_max_uses": 1,
+                    "reason": "Inspect current device"
+                }]
+            }))
+            .unwrap(),
+        );
+        let mut host = Recorder::new(session);
+        host.lease_token = 7;
+        assert!(
+            cancel_continuation_wait_on(&host, &db, "run")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let Some(Call::Write(guard, _)) = host.calls().pop() else {
+            panic!("cancellation writes the closed pause last")
+        };
+        assert_eq!(
+            (guard.id, guard.version, guard.lease_token),
+            (Some(11), Some(4), Some(7))
+        );
+    }
+}

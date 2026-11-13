@@ -4,7 +4,6 @@ use crate::schedule::test_host::{Call, Guard, Patch, Recorder};
 use desk_agent_protocol::AgentScope;
 use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
 use sea_orm::Database;
-use std::sync::Mutex;
 
 fn scope() -> AgentScope {
     AgentScope {
@@ -63,10 +62,7 @@ fn task(kind: &str, status: &str) -> entity::Model {
 #[tokio::test]
 async fn an_activation_receipt_writes_only_the_transcript_version_and_time() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    let host = Recorder {
-        session: session(3),
-        calls: Mutex::default(),
-    };
+    let host = Recorder::new(session(3));
     record_decision_on(&host, &db, &task("conversation_resume", "active"), None)
         .await
         .unwrap();
@@ -117,10 +113,7 @@ async fn the_source_requirement_lock_fences_the_exact_envelope() {
     consent.assistant_seed = None;
     let mut task = task("conversation_resume", "active");
     task.retrieval_consent_json = Some(consent.encode().unwrap());
-    let host = Recorder {
-        session: session(3),
-        calls: Mutex::default(),
-    };
+    let host = Recorder::new(session(3));
     let db = Database::connect("sqlite::memory:").await.unwrap();
     lock_original_requirement(&host, &db, 1, &task)
         .await
