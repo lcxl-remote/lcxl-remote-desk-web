@@ -226,6 +226,79 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     async fn capture_native_scope(&self, _: &DatabaseConnection, _: &()) -> Result<(), DbErr> {
         unreachable!()
     }
+    fn action_matches_identity(
+        &self,
+        _: &crate::schedule::session::ActionView<()>,
+        _: &desk_diagnose_core::session::ActionIdentity,
+    ) -> bool {
+        unreachable!()
+    }
+    async fn has_open_exec_tasks(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: &PersistedAgentSession,
+        _: bool,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
+    async fn reconcile_scheduled_actions(
+        &self,
+        _: &DatabaseConnection,
+        _: &mut PersistedAgentSession,
+        _: i64,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    async fn settle_scheduled_decision(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: i64,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    async fn settle_fresh_decision(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+        _: &str,
+        _: i64,
+    ) -> Result<(), crate::schedule::session::LockError> {
+        unreachable!()
+    }
+    async fn lock_task_subject(
+        &self,
+        _: &DatabaseConnection,
+        _: i32,
+        _: &str,
+        _: &str,
+    ) -> Result<(), ScheduleStoreError> {
+        unreachable!()
+    }
+    async fn lock_root_children(
+        &self,
+        _: &DatabaseConnection,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), DbErr> {
+        unreachable!()
+    }
+    async fn scheduled_native(
+        &self,
+        _: &DatabaseConnection,
+        _: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<crate::schedule::session::NativeDisposition, DbErr> {
+        unreachable!()
+    }
+    async fn required_children_complete(
+        &self,
+        _: &DatabaseConnection,
+        _: &PersistedAgentSession,
+    ) -> Result<bool, DbErr> {
+        unreachable!()
+    }
     async fn directory_receipt(
         &self,
         _: &DatabaseConnection,

@@ -27,6 +27,23 @@ pub struct SessionRow<R> {
     pub turn_state: Option<String>,
 }
 
+impl<R> SessionRow<R> {
+    /// Whether Manager's stored `turn_state` names `state`; OSS stores none.
+    pub fn stored_turn_state_is(&self, state: desk_diagnose_core::session::TurnState) -> bool {
+        self.turn_state
+            .as_deref()
+            .is_none_or(|stored| stored == state.as_str())
+    }
+}
+
+/// Native delegated effects of a scheduled sub-agent group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeDisposition {
+    Settled,
+    Pending,
+    Unknown,
+}
+
 /// How a lookup or guard treats organization sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrgMode {
@@ -212,6 +229,71 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
     ) -> Result<Option<Box<Self::NativeScope>>, DbErr>;
     /// Runs after every original mutation; a history outage cannot discard them.
     async fn capture_native_scope(&self, txn: &C, scope: &Self::NativeScope) -> Result<(), DbErr>;
+    /// Whether an action row is the one a session execution identity names.
+    fn action_matches_identity(
+        &self,
+        action: &ActionView<Self::Action>,
+        identity: &desk_diagnose_core::session::ActionIdentity,
+    ) -> bool;
+    /// OSS `agent_exec_task` rows that are not done and not the session's own
+    /// awaited execution when `allow_result`; Manager has no such table.
+    async fn has_open_exec_tasks(
+        &self,
+        txn: &C,
+        conversation: &str,
+        session: &PersistedAgentSession,
+        allow_result: bool,
+    ) -> Result<bool, DbErr>;
+    /// Reconciles an interrupted continuation's actions into its session.
+    async fn reconcile_scheduled_actions(
+        &self,
+        txn: &C,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), LockError>;
+    /// Settles the continuation's scheduled permission decision.
+    async fn settle_scheduled_decision(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), LockError>;
+    /// Settles a fresh occurrence's recorded owner decision.
+    async fn settle_fresh_decision(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LockError>;
+    /// Manager task subject lock with its device policy check; no-op on OSS.
+    async fn lock_task_subject(
+        &self,
+        txn: &C,
+        owner: i32,
+        device: &str,
+        run_id: &str,
+    ) -> Result<(), ScheduleStoreError>;
+    /// Manager lock of the root's child runs; no-op on OSS.
+    async fn lock_root_children(
+        &self,
+        txn: &C,
+        root: &str,
+        actor: &str,
+        device: &str,
+    ) -> Result<(), DbErr>;
+    /// Native delegated effects of a scheduled sub-agent group.
+    async fn scheduled_native(
+        &self,
+        txn: &C,
+        group: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<NativeDisposition, DbErr>;
+    /// Whether every required child of the session's group finished.
+    async fn required_children_complete(
+        &self,
+        txn: &C,
+        session: &PersistedAgentSession,
+    ) -> Result<bool, DbErr>;
     /// Reads the directory receipt from the host run-event table and compares
     /// every column that table has. Missing row: NotFound; undecodable:
     /// Invalid; mismatch: Conflict.
@@ -397,4 +479,34 @@ pub struct ActionFilter<'a> {
     pub exclude: Option<ActionClass>,
     /// Only rows without a recorded cancellation request.
     pub not_cancel_requested: bool,
+}
+
+#[cfg(test)]
+mod stored_turn_state_tests {
+    use super::*;
+    use desk_diagnose_core::session::TurnState;
+
+    fn row(turn_state: Option<&str>) -> SessionRow<()> {
+        SessionRow {
+            raw: (),
+            id: 1,
+            conversation_id: String::new(),
+            actor_id: String::new(),
+            device_id: String::new(),
+            state_json: String::new(),
+            version: 1,
+            lease_token: 1,
+            lease_deadline_ms: None,
+            personal: true,
+            turn_state: turn_state.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn stored_turn_state_must_name_the_expected_state_when_present() {
+        assert!(row(None).stored_turn_state_is(TurnState::Failed));
+        assert!(row(Some("idle")).stored_turn_state_is(TurnState::Idle));
+        assert!(!row(Some("running")).stored_turn_state_is(TurnState::Idle));
+        assert!(!row(Some("idle")).stored_turn_state_is(TurnState::Failed));
+    }
 }

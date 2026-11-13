@@ -434,10 +434,7 @@ async fn bind_continuation_session_on<C: ConnectionTrait, H: ScheduleHostStores<
     }) = permission
         && (desk_diagnose_core::assistant_policy::require_current_policy(input.policy_revision)
             .is_err()
-            || row
-                .turn_state
-                .as_deref()
-                .is_some_and(|state| state != "idle")
+            || !row.stored_turn_state_is(desk_diagnose_core::session::TurnState::Idle)
             || session.version != version
             || session.trigger_origin != TriggerOrigin::ScheduledContinuation
             || session.current_request_id.as_deref() != Some(work.run_id.as_str())

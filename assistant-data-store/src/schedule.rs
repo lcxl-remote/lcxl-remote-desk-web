@@ -19,6 +19,7 @@ mod continuation_wait;
 mod device_wait;
 mod directory_receipt;
 mod edit;
+mod fresh_result;
 mod history;
 mod late_receipts;
 mod model_management;
@@ -31,6 +32,7 @@ mod resume_activation;
 mod resume_admission;
 mod resume_claim;
 mod resume_lease;
+mod resume_result;
 mod review_wait;
 mod search;
 pub mod session;
@@ -56,6 +58,7 @@ pub use continuation_wait::{cancel_continuation_wait_on, lock_approval_on};
 pub use device_wait::wait_for_device_on;
 pub use directory_receipt::verify_directory_receipt_on;
 pub use edit::{edit_on, rename, set_failure_threshold_on, stop_pending};
+pub use fresh_result::{FreshResult, finish_fresh_result_on};
 pub use history::{RunHistoryPage, resolve_run_session, run_history};
 pub use late_receipts::{late_receipt_candidates, reconcile_late_task_receipts_on};
 pub use model_management::{
@@ -83,6 +86,9 @@ pub use resume_claim::{
     PermissionReceiptClaim, claim_continuation_on,
 };
 pub use resume_lease::{ContinuationLease, FreshTaskLease, renew_paired_lease_on};
+pub use resume_result::{
+    CommittedResult, SettlementLease, committed_result, record_committed_continuation_on,
+};
 pub use review_wait::{ReviewPoll, poll_review_decision_on};
 pub use search::search;
 pub use settlement::{Settlement, expire_pending_on, settle_on};

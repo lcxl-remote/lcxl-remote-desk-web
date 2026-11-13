@@ -123,10 +123,7 @@ pub async fn expire_fresh_approval_wait_on<C: ConnectionTrait, H: ScheduleHostSt
         || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
         || session.input_revision != 1
         || !row.personal
-        || row
-            .turn_state
-            .as_deref()
-            .is_some_and(|state| state != "idle")
+        || !row.stored_turn_state_is(desk_diagnose_core::session::TurnState::Idle)
     {
         return Err(ScheduleStoreError::Conflict);
     }

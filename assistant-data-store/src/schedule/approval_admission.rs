@@ -104,10 +104,7 @@ pub async fn lock_fresh_approval_on<C: ConnectionTrait, H: ScheduleHostStores<C>
         || session.handled_input_seq != session.latest_input_seq
         || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
         || !row.personal
-        || row
-            .turn_state
-            .as_deref()
-            .is_some_and(|state| state != "idle")
+        || !row.stored_turn_state_is(TurnState::Idle)
         || desk_diagnose_core::schedule::permission_wait::reference(&session, request_id).as_deref()
             != work.result_ref.as_deref()
     {

@@ -6,8 +6,9 @@ use crate::entity::{
     agent_action_item, agent_exec_task, agent_goal_run as goal_row, agent_run_event, agent_session,
 };
 use desk_assistant_data_store::schedule::session::{
-    ActionClass, ActionFilter, ActionView, LockError, OrgMode, ScheduleHostStores, ScheduleLocks,
-    SessionGuard, SessionKey, SessionPatch, SessionRow, SessionRows, TouchColumn,
+    ActionClass, ActionFilter, ActionView, LockError, NativeDisposition, OrgMode,
+    ScheduleHostStores, ScheduleLocks, SessionGuard, SessionKey, SessionPatch, SessionRow,
+    SessionRows, TouchColumn,
 };
 use desk_diagnose_core::{
     file_scope::transaction::{self, FileScopeReceipt},
@@ -307,6 +308,133 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         scope: &Self::NativeScope,
     ) -> Result<(), DbErr> {
         scope.capture_on(txn).await
+    }
+
+    fn action_matches_identity(
+        &self,
+        action: &ActionView<agent_action_item::Model>,
+        identity: &desk_diagnose_core::session::ActionIdentity,
+    ) -> bool {
+        use desk_diagnose_core::session::WorkKind;
+        match identity.kind {
+            WorkKind::ComputerAction => identity.work_id == action.id,
+            WorkKind::CapabilityProvider => {
+                identity.work_id == action.id
+                    && identity.action_request_id == action.raw.action_request_id
+            }
+            WorkKind::AgentExec => identity.action_request_id == action.raw.action_request_id,
+            _ => false,
+        }
+    }
+
+    async fn has_open_exec_tasks(
+        &self,
+        txn: &DatabaseTransaction,
+        conversation: &str,
+        session: &PersistedAgentSession,
+        allow_result: bool,
+    ) -> Result<bool, DbErr> {
+        use crate::entity::agent_exec_task;
+        let executions = agent_exec_task::Entity::find()
+            .filter(agent_exec_task::Column::ConversationId.eq(conversation))
+            .all(txn)
+            .await?;
+        Ok(executions.iter().any(|execution| {
+            execution.status != "done"
+                && !(allow_result
+                    && session.execution_state.tasks().into_iter().any(|action| {
+                        action.kind == desk_diagnose_core::session::WorkKind::AgentExec
+                            && action.work_id == execution.id
+                            && action.action_request_id == execution.exec_request_id
+                            && action.execution_id == execution.execution_generation
+                    }))
+        }))
+    }
+
+    async fn reconcile_scheduled_actions(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &mut PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), LockError> {
+        let now = u64::try_from(now_ms).map_err(|_| LockError::Denied)?;
+        crate::capability_grant_store::scheduled_recovery::reconcile_on(txn, session, now)
+            .await
+            .map_err(LockError::Backend)
+    }
+
+    async fn settle_scheduled_decision(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        now_ms: i64,
+    ) -> Result<(), LockError> {
+        let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)
+            .map_err(|_| LockError::Denied)?;
+        crate::agent_session_store::permission_resume::settle_scheduled_decision_on(
+            txn, session, now,
+        )
+        .await
+        .map_err(|_| LockError::Denied)
+    }
+
+    async fn settle_fresh_decision(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), LockError> {
+        let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)
+            .map_err(|_| LockError::Denied)?;
+        crate::agent_session_store::permission_resume::settle_fresh_decision_on(
+            txn, session, request_id, now,
+        )
+        .await
+        .map_err(|_| LockError::Denied)
+    }
+
+    async fn lock_task_subject(
+        &self,
+        _: &DatabaseTransaction,
+        _: i32,
+        _: &str,
+        _: &str,
+    ) -> Result<(), ScheduleStoreError> {
+        Ok(())
+    }
+
+    async fn lock_root_children(
+        &self,
+        _: &DatabaseTransaction,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), DbErr> {
+        Ok(())
+    }
+
+    async fn scheduled_native(
+        &self,
+        txn: &DatabaseTransaction,
+        group: &crate::entity::agent_delegation_group::Model,
+    ) -> Result<NativeDisposition, DbErr> {
+        use crate::agent_subagent_store::ScheduledNativeDisposition as Native;
+        Ok(
+            match crate::agent_subagent_store::scheduled_native_on(txn, group).await? {
+                Native::Settled => NativeDisposition::Settled,
+                Native::Pending => NativeDisposition::Pending,
+                Native::Unknown => NativeDisposition::Unknown,
+            },
+        )
+    }
+
+    async fn required_children_complete(
+        &self,
+        txn: &DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<bool, DbErr> {
+        crate::agent_subagent_store::required_children_complete_on(txn, session).await
     }
 
     async fn directory_receipt(
