@@ -1,6 +1,7 @@
 import { useId, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -13,9 +14,10 @@ import {
 } from '@/services/clients';
 import { deskErrorCodeEnum, type IssueConnectionChoice, type IssueSubscriptionView, type IssueWorkKind } from '@/services/types';
 
-export function WorkbenchSubscriptions({ workbench, approvalMode, onOpenTask }: {
+export function WorkbenchSubscriptions({ workbench, approvalMode, issueConnectionsPath = null, onOpenTask }: {
     workbench: string;
     approvalMode?: 'manual' | 'ai_review';
+    issueConnectionsPath?: string | null;
     onOpenTask(request: string): void;
 }) {
     const { t } = useTranslation();
@@ -52,9 +54,14 @@ export function WorkbenchSubscriptions({ workbench, approvalMode, onOpenTask }: 
     });
 
     return <div className="space-y-3">
-        <Button disabled={!connections.data?.length || editing === 'new'} onClick={() => setEditing('new')}>
-            {t('pages.aiAssistant.workbench.newSubscription')}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+            <Button disabled={!connections.data?.length || editing === 'new'} onClick={() => setEditing('new')}>
+                {t('pages.aiAssistant.workbench.newSubscription')}
+            </Button>
+            {issueConnectionsPath && <Button asChild variant="outline">
+                <Link to={issueConnectionsPath}>{t('pages.issueConnections.title')}</Link>
+            </Button>}
+        </div>
         {subscriptions.isPending && <p role="status">{t('common.loading')}</p>}
         {subscriptions.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.conversations.loadFailed')}</p>}
         {connections.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.issueSources.loadFailed')}</p>}

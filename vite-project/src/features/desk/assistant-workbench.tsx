@@ -22,7 +22,9 @@ import { useDeskSignaling } from './use-desk-signaling';
 
 const workbenchesKey = ['ai-assistant-workbenches'] as const;
 
-export default function AssistantWorkbench() {
+/** `issueConnectionsPath` links the subscription tab to the issue connection
+ * settings; hosts pass `null` when the viewer cannot manage connections. */
+export default function AssistantWorkbench({ issueConnectionsPath = '/system/issue-connections' }: { issueConnectionsPath?: string | null }) {
     const { t } = useTranslation();
     const [params, setParams] = useSearchParams();
     const nameId = useId();
@@ -94,11 +96,11 @@ export default function AssistantWorkbench() {
                 {create.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.workbench.saveFailed')}</p>}
             </form>
         </CardContent></Card>}
-        {active && <WorkbenchTabs key={active.workbenchId} workbench={active} />}
+        {active && <WorkbenchTabs key={active.workbenchId} workbench={active} issueConnectionsPath={issueConnectionsPath} />}
     </AiAssistantHubLayout>;
 }
 
-function WorkbenchTabs({ workbench }: { workbench: AiAssistantWorkbenchView }) {
+function WorkbenchTabs({ workbench, issueConnectionsPath }: { workbench: AiAssistantWorkbenchView; issueConnectionsPath: string | null }) {
     const { t } = useTranslation();
     const [params, setParams] = useSearchParams();
     const selectedTab = params.get('tab');
@@ -158,7 +160,8 @@ function WorkbenchTabs({ workbench }: { workbench: AiAssistantWorkbenchView }) {
                 onOpen={id => changeView('tasks', id)} onClose={() => changeView('tasks')} />
         </TabsContent>
         <TabsContent value="subscriptions">
-            <WorkbenchSubscriptions workbench={workbench.workbenchId} approvalMode={subscriptionMode} onOpenTask={id => changeView('tasks', id)} />
+            <WorkbenchSubscriptions workbench={workbench.workbenchId} approvalMode={subscriptionMode} issueConnectionsPath={issueConnectionsPath}
+                onOpenTask={id => changeView('tasks', id)} />
         </TabsContent>
         <TabsContent value="settings" className="space-y-3">
             <AssistantApprovalModePicker session={workbench.workbenchId} />
