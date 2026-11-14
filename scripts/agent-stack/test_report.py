@@ -58,10 +58,7 @@ class Reports(unittest.TestCase):
     def test_recorded_call_restoration_and_receipt_verifiers_keep_the_frame_ceiling(self):
         symbols = [
             'desk_diagnose_core::ui_model_ids::resolve_recorded_call',
-            'desk_diagnose_core::schedule::contract::exception::request_for_original_call',
-            'desk_diagnose_core::schedule::rehearsal::read_sources::project_tool_result_source',
-            'desk_signal::schedule_store::ScheduleStore::read_rehearsal_reads_on',
-            'lcxl_remote_desk_manager::service::schedule_store::ScheduleStore::read_rehearsal_read_sources_on',
+            'desk_diagnose_core::schedule::run_approval::request_for_original_call',
         ]
         for symbol in symbols:
             with self.subTest(symbol=symbol):
@@ -116,7 +113,6 @@ class Reports(unittest.TestCase):
         symbols = [
             ('desk-diagnose-core', 'desk_diagnose_core::provider_preflight::read::output_digest'),
             ('desk-diagnose-core', 'desk_diagnose_core::provider_preflight::read::error_output_digest'),
-            ('desk-diagnose-core', 'desk_diagnose_core::schedule::rehearsal::read_sources::project_tool_result_source'),
             ('desk-diagnose-core', 'desk_diagnose_core::agent_loop::task_permission::pause::_{{closure}}'),
             ('lcxl-remote-desk-manager', 'lcxl_remote_desk_manager::service::capability_grant_store::read_use::impl::read_use::_{{closure}}'),
         ]

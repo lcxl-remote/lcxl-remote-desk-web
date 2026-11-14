@@ -64,17 +64,22 @@ impl ScheduleStore {
     /// One loop per central process. Manager nodes may all scan: database fences,
     /// not this timer, decide which node creates each occurrence. Only the local
     /// scan cursor is volatile; task calendars and catch-up decisions are durable.
-    pub async fn run_calendar_materializer(self) {
-        let mut cursors = desk_assistant_data_store::schedule::ScanCursors::default();
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tick.tick().await;
-            for warning in desk_assistant_data_store::schedule::scan_tick(&self, &mut cursors).await
-            {
-                log::warn!("{warning}");
+    pub fn run_calendar_materializer(
+        self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        desk_diagnose_core::future::send_phase(move || async move {
+            let mut cursors = desk_assistant_data_store::schedule::ScanCursors::default();
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                for warning in
+                    desk_assistant_data_store::schedule::scan_tick(&self, &mut cursors).await
+                {
+                    log::warn!("{warning}");
+                }
             }
-        }
+        })
     }
 }
 

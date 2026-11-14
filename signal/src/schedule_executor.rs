@@ -318,6 +318,25 @@ impl SignalScheduleExecutor {
         }
     }
 
+    /// The continuation dispatch phase, type-erased at its original call point.
+    pub fn process_continuation<'a>(
+        &'a self,
+        candidate: &'a desk_diagnose_core::schedule::dispatch::DispatchCandidate,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = desk_diagnose_core::schedule::dispatch::DispatchReport>
+                + 'a,
+        >,
+    > {
+        desk_diagnose_core::future::phase(|| async move {
+            let host = continuation::ContinuationHost(self);
+            desk_diagnose_core::future::phase(|| {
+                desk_diagnose_core::schedule::dispatch::dispatch_continuation(&host, candidate)
+            })
+            .await
+        })
+    }
+
     async fn process(&self, candidate: run::Model) -> DispatchResult {
         let Ok(task) = serde_json::from_str::<crate::entity::agent_schedule::Model>(
             &candidate.task_snapshot_json,
@@ -334,13 +353,9 @@ impl SignalScheduleExecutor {
             device_id: task.target_device_id,
         };
         if task.kind == "fresh_task" {
-            return desk_diagnose_core::future::boxed(|| self.process_fresh(&candidate)).await;
+            return self.process_fresh(&candidate).await;
         }
-        let report = desk_diagnose_core::schedule::dispatch::dispatch_continuation(
-            &continuation::ContinuationHost(self),
-            &candidate,
-        )
-        .await;
+        let report = self.process_continuation(&candidate).await;
         if let Some(error) = &report.stopped {
             log::warn!(
                 "[schedule-executor] continuation {} stopped before settlement: {}",

@@ -2920,7 +2920,8 @@ async fn prepare_composed_turn(
                     StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
                 sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
                 sink.turn_started(&turn_id);
-                let outcome = match *runtime {
+                // Borrow the boxed turn so its run stays outside this phase future.
+                let outcome = match &*runtime {
                     desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. } => {
                         match desk_diagnose_core::future::boxed(|| {
                             store.claim_child(

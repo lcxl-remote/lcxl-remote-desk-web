@@ -62,12 +62,14 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
-        let claimed = desk_assistant_data_store::schedule::claim_continuation_on(
-            &super::SignalScheduleHost,
-            &txn,
-            input,
-            permission,
-        )
+        let claimed = desk_diagnose_core::future::send_phase(|| {
+            desk_assistant_data_store::schedule::claim_continuation_on(
+                &super::SignalScheduleHost,
+                &txn,
+                input,
+                permission,
+            )
+        })
         .await?;
         txn.commit().await?;
         Ok(claimed)

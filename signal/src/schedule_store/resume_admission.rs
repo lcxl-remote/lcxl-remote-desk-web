@@ -50,11 +50,13 @@ impl super::ScheduleStore {
         txn: &crate::config::connection::DatabaseTransaction,
         expected: &PersistedAgentSession,
     ) -> Result<u64, DbErr> {
-        desk_assistant_data_store::schedule::assistant_retrieval_deadline_on(
-            &super::SignalScheduleHost,
-            txn,
-            expected,
-        )
+        desk_diagnose_core::future::send_phase(|| {
+            desk_assistant_data_store::schedule::assistant_retrieval_deadline_on(
+                &super::SignalScheduleHost,
+                txn,
+                expected,
+            )
+        })
         .await
     }
 }

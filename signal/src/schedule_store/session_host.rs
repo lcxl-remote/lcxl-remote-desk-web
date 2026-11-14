@@ -289,15 +289,16 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
     ) -> Result<bool, ScheduleStoreError> {
         let now = desk_assistant_data_store::schedule::session::timestamp(now_ms)?;
         let context = super::TaskReceiptContext::load(txn, work).await?;
-        Ok(
+        let finished_at = now.to_rfc3339();
+        Ok(desk_diagnose_core::future::send_phase(|| {
             crate::capability_grant_store::fresh_recovery::restore_completed_calls(
                 txn,
                 session,
                 &context,
-                &now.to_rfc3339(),
+                &finished_at,
             )
-            .await?,
-        )
+        })
+        .await?)
     }
 
     async fn open_native_scope(
@@ -429,7 +430,11 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
     ) -> Result<NativeDisposition, DbErr> {
         use crate::agent_subagent_store::ScheduledNativeDisposition as Native;
         Ok(
-            match crate::agent_subagent_store::scheduled_native_on(txn, group).await? {
+            match desk_diagnose_core::future::send_phase(|| {
+                crate::agent_subagent_store::scheduled_native_on(txn, group)
+            })
+            .await?
+            {
                 Native::Settled => NativeDisposition::Settled,
                 Native::Pending => NativeDisposition::Pending,
                 Native::Unknown => NativeDisposition::Unknown,
@@ -735,7 +740,10 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         session: &PersistedAgentSession,
         parent: &desk_diagnose_core::chat::ChatMessage,
     ) -> Result<(), ScheduleStoreError> {
-        ScheduleStore::record_prompt_retention_on(txn, task, session, parent).await
+        desk_diagnose_core::future::send_phase(|| {
+            ScheduleStore::record_prompt_retention_on(txn, task, session, parent)
+        })
+        .await
     }
 
     async fn validate_model_control(
@@ -773,7 +781,10 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         actor: &str,
         device: &str,
     ) -> Result<String, ScheduleStoreError> {
-        ScheduleStore::owner_prompt_retention_on(txn, actor, device).await
+        desk_diagnose_core::future::send_phase(|| {
+            ScheduleStore::owner_prompt_retention_on(txn, actor, device)
+        })
+        .await
     }
 }
 

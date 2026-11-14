@@ -37,7 +37,6 @@ REQUIRED = {
         '^desk_diagnose_core::schedule::management_tools::parse$',
         '^desk_diagnose_core::provider_preflight::read::output_digest$',
         '^desk_diagnose_core::provider_preflight::read::error_output_digest$',
-        '^desk_diagnose_core::schedule::rehearsal::read_sources::project_tool_result_source$',
         '^desk_diagnose_core::ui_references::UiReferenceState::resolve_conversation_request$',
         '^desk_diagnose_core::ui_model_ids::project_tool_message$',
         '^desk_diagnose_core::conversation_title::request$',

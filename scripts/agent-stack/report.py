@@ -52,7 +52,7 @@ def protected(symbol):
         ))
         or ('ContextProtectionSet' in symbol and 'validate_references' in symbol)
         or ('GoalRun' in symbol and 'finish_assistant_context_wait_slice' in symbol)
-        or ('schedule' in symbol and any(word in symbol for word in ('context_wait', 'published_input', 'proposal', 'management_tools', 'exception', 'read_sources', 'dispatch')))
+        or ('schedule' in symbol and any(word in symbol for word in ('context_wait', 'published_input', 'proposal', 'management_tools', 'run_approval', 'dispatch')))
     )) or ('agent_goal_store' in symbol and any(word in symbol for word in (
         'settle_slice', 'persist_slice_on', 'validate_slice_session_on',
         'claim_slice', 'PreparedGoalClaim', 'scheduler_transition', 'wake_for_assistant_context', 'continuation_candidates',
@@ -63,7 +63,6 @@ def protected(symbol):
         'prepare_continuation_task_on', 'bind_continuation_session_on',
         'ContinuationTaskClaim', 'ContinuationSessionClaim',
         'lock_owner_context_authority', 'manage_from_session',
-        'read_rehearsal_reads_on', 'read_rehearsal_read_sources_on',
     ))) or ('schedule_executor' in symbol and any(word in symbol for word in (
         'process_goal', 'scan_goals_once', 'scan_once',
     ))) or any(word in symbol for word in (

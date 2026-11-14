@@ -33,8 +33,17 @@ fn settled(result: Result<run::Model, ScheduleStoreError>) -> Option<FreshSettle
 }
 
 impl SignalScheduleExecutor {
-    pub(super) async fn process_fresh(&self, candidate: &DispatchCandidate) -> DispatchResult {
-        dispatch_fresh(&FreshHost(self), candidate).await.result
+    /// The fresh dispatch phase, type-erased at its original call point.
+    pub fn process_fresh<'a>(
+        &'a self,
+        candidate: &'a DispatchCandidate,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DispatchResult> + 'a>> {
+        desk_diagnose_core::future::phase(|| async move {
+            let host = FreshHost(self);
+            desk_diagnose_core::future::phase(|| dispatch_fresh(&host, candidate))
+                .await
+                .result
+        })
     }
 
     async fn claim_fresh(
