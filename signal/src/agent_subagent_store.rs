@@ -1,8 +1,9 @@
 //! Durable delegation records and source controls, scoped to one owner and root.
 
 use crate::config::connection::DatabaseConnection;
-mod history;
-pub(crate) use history::group_children_on;
+pub(crate) use desk_assistant_data_store::delegation_group::{
+    admission_label, decode_group, group_children_on,
+};
 mod control;
 mod issue_control;
 pub(crate) use issue_control::apply_issue_changes_on;
@@ -134,48 +135,7 @@ fn invalid() -> DbErr {
     DbErr::Custom("delegated task is unavailable or its control state changed".into())
 }
 
-#[inline(never)]
-pub(crate) fn decode_group(row: &group_row::Model) -> Result<DelegationGroup, DbErr> {
-    let group: DelegationGroup = serde_json::from_str(&row.state_json).map_err(|_| invalid())?;
-    group.validate().map_err(|_| invalid())?;
-    if group.group_id != row.group_id
-        || group.root_conversation_id != row.root_conversation_id
-        || group.actor_id != row.actor_id
-        || group.device_id != row.device_id
-        || group.source.workbench_id() != row.source_workbench_id.as_deref()
-        || group.source.goal_id() != row.source_goal_id.as_deref()
-        || match &group.source {
-            desk_diagnose_core::subagent::DelegationSource::ScheduledOccurrence {
-                schedule_id,
-                occurrence_id,
-            } => {
-                row.source_schedule_id.as_deref() != Some(schedule_id.as_str())
-                    || row.source_occurrence_id.as_deref() != Some(occurrence_id.as_str())
-            }
-            _ => row.source_schedule_id.is_some() || row.source_occurrence_id.is_some(),
-        }
-        || i64::try_from(group.source_epoch).ok() != Some(row.source_epoch)
-        || i64::try_from(group.version).ok() != Some(row.version)
-        || i64::try_from(group.parent_input_revision).ok() != Some(row.parent_input_revision)
-        || i64::try_from(group.parent_control_revision).ok() != Some(row.parent_control_revision)
-        || group.parent_active != row.parent_active
-        || group.limits.deadline_ms != row.deadline_ms
-        || admission_label(group.source_admission) != row.source_admission
-    {
-        return Err(invalid());
-    }
-    Ok(group)
-}
-
 pub(crate) use desk_assistant_data_store::worker_request::decode_run;
-
-fn admission_label(admission: SourceAdmission) -> &'static str {
-    match admission {
-        SourceAdmission::Open => "open",
-        SourceAdmission::Paused => "paused",
-        SourceAdmission::Closed => "closed",
-    }
-}
 
 /// A child's directory check at dispatch uses what its owner approves in the
 /// main conversation now, read inside the caller's transaction.

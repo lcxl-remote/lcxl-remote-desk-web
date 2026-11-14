@@ -31,7 +31,7 @@ REQUIRED = {
         '^desk_diagnose_core::ui_model_ids::project_request$',
         '^desk_diagnose_core::ui_model_ids::resolve_session_call_with_context$',
         '^desk_diagnose_core::ui_model_ids::resolve_recorded_call$',
-        '^desk_diagnose_core::schedule::proposal::draft$',
+        '^desk_diagnose_core::schedule::proposal::creation$',
         '^desk_diagnose_core::schedule::proposal::spec$',
         '^desk_diagnose_core::schedule::proposal::invalid_input$',
         '^desk_diagnose_core::schedule::management_tools::parse$',

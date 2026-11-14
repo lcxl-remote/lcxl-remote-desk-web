@@ -174,9 +174,15 @@ fn task_requirement_limit_matches_unicode_character_input() {
     };
     assert!(normalize_creation(&draft).is_ok());
     draft.prompt.push('x');
-    assert_eq!(normalize_creation(&draft), Err(ScheduleError::InvalidCreation));
+    assert_eq!(
+        normalize_creation(&draft),
+        Err(ScheduleError::InvalidCreation)
+    );
     draft.prompt = "中".repeat(MAX_SCHEDULE_PROMPT_CHARS);
     assert!(normalize_creation(&draft).is_ok());
     draft.prompt.push('中');
-    assert_eq!(normalize_creation(&draft), Err(ScheduleError::InvalidCreation));
+    assert_eq!(
+        normalize_creation(&draft),
+        Err(ScheduleError::InvalidCreation)
+    );
 }

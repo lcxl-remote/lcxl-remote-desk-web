@@ -307,11 +307,6 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         session: &PersistedAgentSession,
         request_id: &str,
     ) -> Result<(), LockError>;
-    /// Decodes a delegation group row against its stored columns.
-    fn decode_group(
-        &self,
-        row: &crate::entity::agent_delegation_group::Model,
-    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr>;
     /// Decodes a delegation group's frozen creation envelope.
     fn decode_creation(
         &self,
@@ -367,12 +362,6 @@ pub trait ScheduleHostStores<C: ConnectionTrait>: SessionRows<C> + ScheduleLocks
         ),
         DbErr,
     >;
-    /// Every child run of a delegation group.
-    async fn group_children(
-        &self,
-        txn: &C,
-        group: &desk_diagnose_core::subagent::group::DelegationGroup,
-    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr>;
     /// Reads the directory receipt from the host run-event table and compares
     /// every column that table has. Missing row: NotFound; undecodable:
     /// Invalid; mismatch: Conflict.

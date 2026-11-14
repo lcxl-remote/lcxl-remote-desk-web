@@ -107,7 +107,7 @@ pub(in crate::schedule) async fn recover<C: ConnectionTrait, H: ScheduleHostStor
         .one(txn)
         .await?
         .ok_or(ScheduleStoreError::Conflict)?;
-    let group = host.decode_group(&row_group)?;
+    let group = crate::delegation_group::decode_group(&row_group)?;
     let unfinished = child_row::Entity::find()
         .filter(child_row::Column::GroupId.eq(group_id))
         .filter(child_row::Column::RootConversationId.eq(&work.run_id))
@@ -122,7 +122,7 @@ pub(in crate::schedule) async fn recover<C: ConnectionTrait, H: ScheduleHostStor
         if session.turn_state != TurnState::Cancelled {
             return Ok(Finish::Rollback(false));
         }
-        let tasks = host.group_children(txn, &group).await?;
+        let tasks = crate::delegation_group::group_children_on(txn, &group).await?;
         if tasks.is_empty() {
             return Ok(Finish::Rollback(false));
         }

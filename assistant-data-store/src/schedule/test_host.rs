@@ -376,19 +376,6 @@ impl ScheduleHostStores<DatabaseConnection> for Recorder {
     ) -> Result<(), crate::schedule::session::LockError> {
         Ok(())
     }
-    fn decode_group(
-        &self,
-        _: &crate::entity::agent_delegation_group::Model,
-    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr> {
-        unreachable!()
-    }
-    async fn group_children(
-        &self,
-        _: &DatabaseConnection,
-        _: &desk_diagnose_core::subagent::group::DelegationGroup,
-    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr> {
-        unreachable!()
-    }
     fn decode_creation(
         &self,
         _: &crate::entity::agent_delegation_group::Model,

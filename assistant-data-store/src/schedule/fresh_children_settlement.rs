@@ -303,7 +303,7 @@ async fn prepare_fresh_children_close<C: ConnectionTrait, H: ScheduleHostStores<
     {
         return Err(ScheduleStoreError::Conflict);
     }
-    let group = host.decode_group(group_row)?;
+    let group = crate::delegation_group::decode_group(group_row)?;
 
     let source = host
         .decode_creation(group_row)?
@@ -326,7 +326,7 @@ async fn prepare_fresh_children_close<C: ConnectionTrait, H: ScheduleHostStores<
         ) => true,
         Err(error) => return Err(error),
     };
-    let tasks = host.group_children(txn, &group).await?;
+    let tasks = crate::delegation_group::group_children_on(txn, &group).await?;
     let mut all_terminal = true;
     for task in &tasks {
         all_terminal &= crate::worker_request::decode_run(task)?.state.is_terminal();

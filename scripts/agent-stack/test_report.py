@@ -141,7 +141,7 @@ class Reports(unittest.TestCase):
     def test_schedule_input_boundaries_require_actual_execution(self):
         symbols = [
             'desk_diagnose_core::ui_model_ids::resolve_session_call_with_context',
-            'desk_diagnose_core::schedule::proposal::draft',
+            'desk_diagnose_core::schedule::proposal::creation',
             'desk_diagnose_core::schedule::proposal::spec',
             'desk_diagnose_core::schedule::proposal::invalid_input',
             'desk_diagnose_core::schedule::management_tools::parse',

@@ -463,21 +463,6 @@ impl ScheduleHostStores<DatabaseTransaction> for SignalScheduleHost {
         .map_err(|_| LockError::Denied)
     }
 
-    fn decode_group(
-        &self,
-        row: &crate::entity::agent_delegation_group::Model,
-    ) -> Result<desk_diagnose_core::subagent::group::DelegationGroup, DbErr> {
-        crate::agent_subagent_store::decode_group(row)
-    }
-
-    async fn group_children(
-        &self,
-        txn: &DatabaseTransaction,
-        group: &desk_diagnose_core::subagent::group::DelegationGroup,
-    ) -> Result<Vec<crate::entity::agent_subagent_run::Model>, DbErr> {
-        crate::agent_subagent_store::group_children_on(txn, group).await
-    }
-
     fn decode_creation(
         &self,
         row: &crate::entity::agent_delegation_group::Model,

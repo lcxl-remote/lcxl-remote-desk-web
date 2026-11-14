@@ -4,7 +4,7 @@ use crate::{
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 use desk_agent_protocol::schedule::{
-    ScheduleCreationSource, ScheduleCreation, ScheduleRule, ScheduleSpec, ScheduleTimeConfirmation,
+    ScheduleCreation, ScheduleCreationSource, ScheduleRule, ScheduleSpec, ScheduleTimeConfirmation,
     ScheduleTimeConversion, ScheduledTaskKind,
 };
 use serde::Deserialize;
@@ -96,9 +96,9 @@ struct Input {
     time_input: Option<ScheduleTimeConversion>,
 }
 
-/// The caller must hold the original turn fence when persisting this draft and
-/// its tool-result receipt. No model argument can replace this security subject.
-pub fn draft(
+/// The caller must hold the original turn fence when persisting this creation
+/// and its tool-result receipt. No model argument can replace this security subject.
+pub fn creation(
     session: &PersistedAgentSession,
     call: &ToolCall,
     observation: &crate::model_observability::tool::ToolObservation,
@@ -313,7 +313,9 @@ mod tests {
                 name: REQUEST_SCHEDULE.into(),
                 arguments_json: input.to_string(),
             };
-            let error = draft(&session, &call, &Default::default()).err().unwrap();
+            let error = creation(&session, &call, &Default::default())
+                .err()
+                .unwrap();
             assert!(error.contains("fresh_task"), "{error}");
             assert_eq!(
                 invalid_input(error).kind,
@@ -328,7 +330,7 @@ mod tests {
             .unwrap();
             call.arguments_json = input.to_string();
             assert_eq!(
-                draft(&session, &call, &Default::default()).unwrap().kind,
+                creation(&session, &call, &Default::default()).unwrap().kind,
                 ScheduledTaskKind::FreshTask
             );
         }
@@ -367,7 +369,9 @@ mod tests {
             arguments_json: input.to_string(),
         };
         // The model is told what to change, not that it lacks authority.
-        let error = draft(&session, &call, &Default::default()).err().unwrap();
+        let error = creation(&session, &call, &Default::default())
+            .err()
+            .unwrap();
         assert!(error.contains("only for conversation_resume"), "{error}");
         assert_eq!(
             invalid_input(error).kind,
@@ -442,7 +446,7 @@ mod tests {
                 arguments_json: input.to_string(),
             };
             assert_eq!(
-                draft(&session, &call, &Default::default())
+                creation(&session, &call, &Default::default())
                     .unwrap()
                     .target_device_id,
                 "b"
@@ -450,11 +454,11 @@ mod tests {
             let mut invalid = input.clone();
             invalid["target_ref"] = json!("ref-c");
             call.arguments_json = invalid.to_string();
-            assert!(draft(&session, &call, &Default::default()).is_err());
+            assert!(creation(&session, &call, &Default::default()).is_err());
             let mut ambiguous = input;
             ambiguous.as_object_mut().unwrap().remove("target_ref");
             call.arguments_json = ambiguous.to_string();
-            assert!(draft(&session, &call, &Default::default()).is_err());
+            assert!(creation(&session, &call, &Default::default()).is_err());
         }
     }
 
@@ -510,19 +514,20 @@ mod tests {
         let child = delegated(crate::subagent::DelegationSource::UserInput { input_revision: 1 });
         assert!(child.owner_direct_planning());
         assert!(!clock_prompt(&child, 1).is_empty());
-        let fresh = draft(&child, &call("fresh_task"), &Default::default()).unwrap();
+        let fresh = creation(&child, &call("fresh_task"), &Default::default()).unwrap();
         assert_eq!(fresh.target_device_id, "b");
-        let resume = draft(&child, &call("conversation_resume"), &Default::default()).unwrap_err();
+        let resume =
+            creation(&child, &call("conversation_resume"), &Default::default()).unwrap_err();
         assert!(resume.contains("delegated request"), "{resume}");
         // Only a request the owner delegated directly, in its delegated turn.
         let mut resumed = child.clone();
         resumed.trigger_origin = crate::session::TriggerOrigin::PermissionDecision;
-        assert!(draft(&resumed, &call("fresh_task"), &Default::default()).is_err());
+        assert!(creation(&resumed, &call("fresh_task"), &Default::default()).is_err());
         let issue = delegated(crate::subagent::DelegationSource::Goal {
             goal_id: "goal".into(),
         });
         assert!(!issue.owner_direct_planning());
-        assert!(draft(&issue, &call("fresh_task"), &Default::default()).is_err());
+        assert!(creation(&issue, &call("fresh_task"), &Default::default()).is_err());
         assert!(clock_prompt(&issue, 1).is_empty());
         let tools = registry();
         let names = |session: &PersistedAgentSession| {

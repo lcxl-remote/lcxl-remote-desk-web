@@ -347,7 +347,7 @@ fn child_creation_parser_rejects_forged_user_origin() {
     let call = ToolCall { id: "call".into(), name: tools::SPAWN.into(), arguments_json: serde_json::json!({"name":"Nested", "task":"Investigate", "acceptance_criteria":["Evidence"], "required_for_completion":true}).to_string() };
     assert!(tools::parse(&child, &call).is_err());
     assert!(
-        crate::schedule::proposal::draft(
+        crate::schedule::proposal::creation(
             &child,
             &ToolCall {
                 name: crate::schedule::proposal::REQUEST_SCHEDULE.into(),
