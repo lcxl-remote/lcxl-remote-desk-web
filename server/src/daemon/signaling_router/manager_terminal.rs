@@ -73,8 +73,14 @@ pub(super) async fn handle_manager_file_delete_inbound(
         Err(e) => {
             log::warn!(
                 "[router] DeleteFile payload parse failed for {connection_id:?}: {e}; \
-                 dropping (request_id={})",
+                 rejecting (request_id={})",
                 model.request_id,
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                "invalid file delete payload",
             );
             return Ok(());
         }
@@ -90,6 +96,57 @@ pub(super) async fn handle_manager_file_delete_inbound(
         .await
     {
         log::warn!("[router] failed to send typed DeleteFile: {e}");
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::SYSTEM_ERROR,
+            "no desktop session for this connection",
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_manager_directory_create_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "CreateDirectory") else {
+        return Ok(());
+    };
+    let request = match model.get_data::<CreateDirectoryRequest>() {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "[router] CreateDirectory payload parse failed for {connection_id:?}: {e}; \
+                 rejecting (request_id={})",
+                model.request_id,
+            );
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                "invalid create directory payload",
+            );
+            return Ok(());
+        }
+    };
+    let payload = CreateDirectoryPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+        request,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_connection_worker(connection_id, ServiceToWorker::CreateDirectory(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed CreateDirectory: {e}");
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::SYSTEM_ERROR,
+            "no desktop session for this connection",
+        );
     }
     Ok(())
 }

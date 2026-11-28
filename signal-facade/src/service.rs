@@ -1166,6 +1166,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::FilesListed
             | SignalingType::DeleteFile
             | SignalingType::FileDeleted
+            | SignalingType::CreateDirectory
+            | SignalingType::DirectoryCreated
             | SignalingType::ListTerminalCommands
             | SignalingType::TerminalCommandsListed
             | SignalingType::SetPrivateScreenVisibility

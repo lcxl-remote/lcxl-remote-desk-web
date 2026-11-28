@@ -347,6 +347,26 @@ fn outbound_dispatch_routes_empty_body_manager_responses_to_typed_variants() {
     }
 }
 
+#[test]
+fn outbound_dispatch_routes_directory_created_to_its_typed_variant() {
+    let model = SignalingModel::success_response(
+        "req-mkdir",
+        SignalingType::DirectoryCreated,
+        None,
+        Some("conn-mkdir".to_string()),
+        Some(&()),
+    )
+    .expect("build response");
+    let text = serde_json::to_string(&model).expect("serialise");
+    match build_outbound_payload_from_desk_text(text).expect("typed route") {
+        WorkerToService::DirectoryCreated(p) => {
+            assert_eq!(p.request_id, "req-mkdir");
+            assert_eq!(p.connection_id.as_deref(), Some("conn-mkdir"));
+        }
+        other => panic!("expected DirectoryCreated, got {other:?}"),
+    }
+}
+
 /// A `TerminalStarted` blob built by the worker's
 /// `handle_manager_terminal_start` (success_response with the
 /// original request_id) gets routed onto

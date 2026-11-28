@@ -36,7 +36,9 @@ use crate::model::policy_access::{CachedDecision, PolicyAccess};
 use crate::model::security_approval::{
     SecurityPermissionType, check_security_permission, resolve_permission,
 };
-use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
+use crate::service::file_manager::{
+    handle_manager_directory_create, handle_manager_file_delete, handle_manager_file_list,
+};
 use crate::service::terminal::{
     RunningTerminal, force_kill_terminal_process, handle_list_terminals,
     handle_manager_terminal_close, handle_manager_terminal_data, handle_manager_terminal_resize,
@@ -215,6 +217,10 @@ pub struct DeskSession {
     pub opened_file_managers: HashSet<String>,
     /// Direct worker event lane used for authoritative file activity facts.
     pub worker_event_sender: mpsc::UnboundedSender<WorkerToService>,
+    /// The worker's file-transfer dispatcher, whose `allow_file_transfer`
+    /// gate also covers creating directories. Absent where no transfer lane
+    /// exists, which denies every write.
+    pub file_transfer: Option<crate::worker::file_transfer_dispatcher::FileTransferDispatcher>,
 }
 
 impl DeskSession {
@@ -309,7 +315,22 @@ impl DeskSession {
             file_delete_permissions: HashMap::new(),
             opened_file_managers: HashSet::new(),
             worker_event_sender,
+            file_transfer: None,
         })
+    }
+
+    /// Whether `capability` is not explicitly denied for `connection_id`. A
+    /// prompt counts as allowed: the caller only decides what to offer, and the
+    /// action itself still asks.
+    pub async fn capability_not_denied(
+        &self,
+        connection_id: &str,
+        capability: SecurityPermissionType,
+    ) -> bool {
+        let global = self.policy.capability(capability).permission;
+        self.effective_permission(connection_id, global, |settings| capability.read(settings))
+            .await
+            != Some(false)
     }
 
     /// The effective permission for `connection_id` on one capability dimension:
@@ -562,6 +583,9 @@ impl DeskSession {
             }
             SignalingType::DeleteFile => {
                 handle_manager_file_delete(self, signaling_model).await?;
+            }
+            SignalingType::CreateDirectory => {
+                handle_manager_directory_create(self, signaling_model).await?;
             }
             SignalingType::StartTerminal => {
                 handle_manager_terminal_start(self, signaling_model).await?;

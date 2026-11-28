@@ -80,6 +80,38 @@ pub(crate) fn survives_remote_access_lock(msg: &ServiceToWorker) -> bool {
     )
 }
 
+/// Answers a file write dropped by the remote-access lock. Controllers wait
+/// for these requests without a fixed timeout, so a silent drop would leave
+/// them waiting for as long as the connection stays open.
+pub(crate) async fn reject_locked_file_write(
+    session: &mut crate::service::signaling::DeskSession,
+    msg: &ServiceToWorker,
+) {
+    let (request_id, connection_id, response_type) = match msg {
+        ServiceToWorker::DeleteFile(payload) => (
+            &payload.request_id,
+            &payload.connection_id,
+            desk_signal_facade::model::signal::SignalingType::FileDeleted,
+        ),
+        ServiceToWorker::CreateDirectory(payload) => (
+            &payload.request_id,
+            &payload.connection_id,
+            desk_signal_facade::model::signal::SignalingType::DirectoryCreated,
+        ),
+        _ => return,
+    };
+    let _ = session
+        .session
+        .send_error(
+            request_id,
+            response_type,
+            Some(connection_id.clone()),
+            desk_utils::error::DeskErrorCode::REMOTE_ACCESS_LOCKED,
+            "Remote access is locked",
+        )
+        .await;
+}
+
 /// How often a running command reports that it is still running.
 ///
 /// Long enough that many busy hosts do not flood the link, short enough

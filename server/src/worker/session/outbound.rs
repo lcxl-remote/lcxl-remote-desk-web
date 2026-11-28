@@ -103,6 +103,7 @@ pub(super) async fn dispatch_typed_signaling_with_request_id<T>(
             SignalingType::GetSystemInfo => Some(SignalingType::SystemInfoRetrieved),
             SignalingType::ListFiles => Some(SignalingType::FilesListed),
             SignalingType::DeleteFile => Some(SignalingType::FileDeleted),
+            SignalingType::CreateDirectory => Some(SignalingType::DirectoryCreated),
             SignalingType::StartTerminal => Some(SignalingType::TerminalStarted),
             SignalingType::ListTerminalCommands => Some(SignalingType::TerminalCommandsListed),
             _ => None,
@@ -249,6 +250,12 @@ pub(super) fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerT
                 connection_id: model.to_connection_id.clone(),
             }))
         }
+        SignalingType::DirectoryCreated => Some(WorkerToService::DirectoryCreated(
+            ManagerResponseRefPayload {
+                request_id: model.request_id.clone(),
+                connection_id: model.to_connection_id.clone(),
+            },
+        )),
         // Terminal-plane responses and notifications. The
         // worker's terminal handlers always set the target browser in
         // `to_connection_id` (either via `success_response` for

@@ -44,14 +44,14 @@ use desk_agent_protocol::{
 };
 use desk_ipc_protocol::message::{
     AgentRequestPayload, ApplyMediaSettingsPayload, AudioPipelinePhase, CloseTerminalPayload,
-    DeleteFilePayload, ExecCancelPayload, ExecPlanPayload, ListFilesPayload,
-    ListTerminalCommandsPayload, ManagerRequestRefPayload, MediaCodec, MediaKind,
+    CreateDirectoryPayload, DeleteFilePayload, ExecCancelPayload, ExecPlanPayload,
+    ListFilesPayload, ListTerminalCommandsPayload, ManagerRequestRefPayload, MediaCodec, MediaKind,
     MediaSettingsAction, PhysicalDisplayAction, ResizeTerminalPayload, SendTerminalInputPayload,
     ServiceToWorker, SetPhysicalDisplayModePayload, SetPrivateScreenVisibilityPayload,
     SetVirtualDisplayModePayload, StartAudioSettings, StartMediaPayload, StartTerminalPayload,
     UpdateMediaSettingsPayload,
 };
-use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
+use desk_signal_facade::model::files::{CreateDirectoryRequest, DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
 use desk_signal_facade::model::private_screen::SetPrivateScreenVisibilityData;
 use desk_signal_facade::model::remote_session::{
@@ -203,6 +203,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::DisplaySettingsChanged
         | SignalingType::FilesListed
         | SignalingType::FileDeleted
+        | SignalingType::DirectoryCreated
         | SignalingType::TerminalCommandsListed
         | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalStarted
@@ -374,6 +375,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::GetSystemInfo
         | SignalingType::ListFiles
         | SignalingType::DeleteFile
+        | SignalingType::CreateDirectory
         | SignalingType::StartTerminal
         | SignalingType::SendTerminalInput
         | SignalingType::ResizeTerminal
@@ -796,6 +798,20 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 DeskErrorCode::PERMISSION_ERROR,
                 "This connection is not permitted to perform the requested action",
             );
+        } else if model.from_connection_id.is_some()
+            && matches!(
+                model.signaling_type,
+                SignalingType::DeleteFile | SignalingType::CreateDirectory
+            )
+        {
+            // File writes have no fixed controller timeout, so a refusal must be
+            // answered with the request's own response type.
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::PERMISSION_ERROR,
+                "This connection is not permitted to perform the requested action",
+            );
         }
         return Ok(());
     }
@@ -1172,6 +1188,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::DisplaySettingsChanged
         | SignalingType::FilesListed
         | SignalingType::FileDeleted
+        | SignalingType::DirectoryCreated
         | SignalingType::TerminalCommandsListed
         | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalStarted
@@ -1224,6 +1241,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::GetSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
         SignalingType::ListFiles => handle_manager_file_list_inbound(ctx, model).await,
         SignalingType::DeleteFile => handle_manager_file_delete_inbound(ctx, model).await,
+        SignalingType::CreateDirectory => {
+            handle_manager_directory_create_inbound(ctx, model).await
+        }
         // Terminal-plane typed-IPC dispatch.
         SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
         SignalingType::SendTerminalInput => handle_send_data_to_terminal_inbound(ctx, model).await,

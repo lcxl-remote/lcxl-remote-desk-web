@@ -35,6 +35,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p lcxbox-agent-desk-server --lib worker::agent::windows_word_batch::tests::
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p lcxbox-agent-desk-server --lib service::file_manager::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # The ServiceDaemon runs only resident workers: session scheduling,
       # start back-off, secret trimming, desktop routing, offers both desktop
       # workers can continue, the virtual display owner and the SYSTEM quota

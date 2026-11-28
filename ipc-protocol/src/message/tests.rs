@@ -1,7 +1,9 @@
 use super::*;
 use desk_signal_facade::model::audio_capture::{AudioDataFlow, SelectedAudioDevice};
 use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
-use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::files::{
+    CreateDirectoryRequest, DeleteFileRequest, FileListParams, FileListResponse,
+};
 use desk_signal_facade::model::image_capture::Resolution;
 use desk_signal_facade::model::media_capability::VideoEncoderId;
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
@@ -1499,6 +1501,11 @@ fn service_to_worker_all_variants_round_trip() {
             connection_id: "c".to_string(),
             request: DeleteFileRequest::default(),
         }),
+        ServiceToWorker::CreateDirectory(CreateDirectoryPayload {
+            request_id: "r3b".to_string(),
+            connection_id: "c".to_string(),
+            request: CreateDirectoryRequest::default(),
+        }),
         ServiceToWorker::SetLocale(SetLocalePayload {
             operation_id: "op-locale".to_string(),
             locale: "en-US".to_string(),
@@ -1860,9 +1867,15 @@ fn worker_to_service_all_variants_round_trip() {
                 path: "/home/user".to_string(),
                 file_info_list: vec![],
                 total_count: 0,
+                can_write: false,
+                trash_available: false,
             },
         }),
         WorkerToService::FileDeleted(ManagerResponseRefPayload {
+            request_id: "r".to_string(),
+            connection_id: Some("c".to_string()),
+        }),
+        WorkerToService::DirectoryCreated(ManagerResponseRefPayload {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
         }),
@@ -2049,6 +2062,8 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
         SignalingType::FilesListed,
         SignalingType::DeleteFile,
         SignalingType::FileDeleted,
+        SignalingType::CreateDirectory,
+        SignalingType::DirectoryCreated,
         SignalingType::StartTerminal,
         SignalingType::SendTerminalInput,
         SignalingType::ResizeTerminal,
@@ -2065,7 +2080,7 @@ fn signaling_error_round_trips_wincode_for_every_signaling_type() {
     ];
     assert_eq!(
         all_types.len(),
-        48,
+        50,
         "SignalingType variant count drift — add new variant + tag here"
     );
     for ty in all_types {

@@ -55,6 +55,7 @@ pub(super) fn is_connection_scoped_capability_frame(t: SignalingType) -> bool {
             | ListTerminalCommands
             | ListFiles
             | DeleteFile
+            | CreateDirectory
             | SetPrivateScreenVisibility
             | ApplyRemoteSessionSettings
             | UpdateAdaptiveVideoQuality
@@ -83,6 +84,9 @@ pub(super) fn capped_session_permits(t: SignalingType, ceiling: &SecuritySetting
         ListFiles => ceiling.allow_file_browse != Some(false),
         DeleteFile => {
             ceiling.allow_file_browse != Some(false) && ceiling.allow_file_delete != Some(false)
+        }
+        CreateDirectory => {
+            ceiling.allow_file_browse != Some(false) && ceiling.allow_file_transfer != Some(false)
         }
         SetPrivateScreenVisibility => ceiling.allow_private_screen != Some(false),
         ApplyRemoteSessionSettings | UpdateAdaptiveVideoQuality => true,
@@ -156,6 +160,7 @@ pub(super) fn door1_permits(gate: &ConnectionGate, t: SignalingType) -> bool {
             t,
             SignalingType::ListFiles
                 | SignalingType::DeleteFile
+                | SignalingType::CreateDirectory
                 | SignalingType::ApplyRemoteSessionSettings
                 | SignalingType::UpdateAdaptiveVideoQuality
         ),

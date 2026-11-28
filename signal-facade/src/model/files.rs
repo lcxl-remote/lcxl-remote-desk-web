@@ -90,6 +90,19 @@ pub struct FileInfo {
     #[wincode(with = "DateTimeLocalWincode")]
     pub modified: Timestamp,
     pub err_msg: Option<String>,
+    /// The entry is a directory whose path round-trips losslessly, so a
+    /// controller may navigate into it.
+    #[serde(default)]
+    pub can_open: bool,
+    /// The file can be downloaded: readable by the host user and file
+    /// transfer is not denied for this connection. Filled by file-manager
+    /// listings only.
+    #[serde(default)]
+    pub can_read: bool,
+    /// The entry itself can be deleted by the host user and deletion is not
+    /// denied for this connection. Filled by file-manager listings only.
+    #[serde(default)]
+    pub can_delete: bool,
 }
 
 fn local_wire_time(time: Timestamp) -> String {
@@ -166,6 +179,9 @@ impl FileInfo {
             created: Timestamp::UNIX_EPOCH,
             modified: Timestamp::UNIX_EPOCH,
             err_msg: None,
+            can_open: false,
+            can_read: false,
+            can_delete: false,
         };
         match metadata {
             Ok(metadata) => {
@@ -173,6 +189,9 @@ impl FileInfo {
                 file_info.is_dir = metadata.is_dir();
                 file_info.is_file = metadata.is_file();
                 file_info.is_symlink = metadata.is_symlink();
+                // A lossy path could name a different entry, so only a
+                // directory whose path converts exactly may be opened.
+                file_info.can_open = file_info.is_dir && path.to_str().is_some();
                 file_info.permissions = FileInfo::get_permissions(&metadata);
                 match metadata
                     .accessed()
@@ -218,6 +237,32 @@ pub struct FileListResponse {
     pub path: String,
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,
+    /// The listed directory accepts uploads and new folders: writable by the
+    /// host user and file transfer is not denied for this connection.
+    #[serde(default)]
+    pub can_write: bool,
+    /// Deleting an entry of this directory can probably move it to the trash.
+    /// `false` only when the host has clear evidence that it cannot.
+    #[serde(default)]
+    pub trash_available: bool,
+}
+
+/// Request body for creating one directory.
+#[derive(
+    Deserialize,
+    Serialize,
+    ToSchema,
+    Clone,
+    Debug,
+    Default,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
+pub struct CreateDirectoryRequest {
+    /// Directory that receives the new entry, as returned by a listing.
+    pub parent_path: String,
+    /// Name of the new directory; a single path component.
+    pub name: String,
 }
 
 /// Request body for deleting a file.
@@ -338,6 +383,9 @@ mod wincode_tests {
             created: "2026-01-15T14:22:33Z".parse::<Timestamp>().unwrap(),
             modified: "2026-05-09T18:45:00Z".parse::<Timestamp>().unwrap(),
             err_msg: None,
+            can_open: false,
+            can_read: true,
+            can_delete: true,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -348,6 +396,9 @@ mod wincode_tests {
         assert_eq!(back.accessed, original.accessed);
         assert_eq!(back.created, original.created);
         assert_eq!(back.modified, original.modified);
+        assert!(!back.can_open);
+        assert!(back.can_read);
+        assert!(back.can_delete);
     }
 
     #[test]
@@ -364,11 +415,16 @@ mod wincode_tests {
             created: "2026-05-10T00:00:00Z".parse::<Timestamp>().unwrap(),
             modified: "2026-05-10T00:00:00Z".parse::<Timestamp>().unwrap(),
             err_msg: None,
+            can_open: false,
+            can_read: true,
+            can_delete: false,
         };
         let original = FileListResponse {
             path: "/home/user".to_string(),
             file_info_list: vec![make_info("a.txt", 100), make_info("b.txt", 200)],
             total_count: 2,
+            can_write: true,
+            trash_available: false,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -378,6 +434,58 @@ mod wincode_tests {
         assert_eq!(back.file_info_list.len(), 2);
         assert_eq!(back.file_info_list[0].name, "a.txt");
         assert_eq!(back.file_info_list[1].size, 200);
+        assert!(back.can_write);
+        assert!(!back.trash_available);
+    }
+
+    #[test]
+    fn capability_flags_default_off_when_absent_from_json() {
+        let info: FileInfo = serde_json::from_value(serde_json::json!({
+            "name": "a", "path": "/a", "size": 0, "is_dir": true, "is_file": false,
+            "is_symlink": false, "permissions": 0, "accessed": "2026-01-01T00:00:00Z",
+            "created": "2026-01-01T00:00:00Z", "modified": "2026-01-01T00:00:00Z",
+            "err_msg": null
+        }))
+        .unwrap();
+        assert!(!info.can_open && !info.can_read && !info.can_delete);
+        let list: FileListResponse = serde_json::from_value(
+            serde_json::json!({"path": "", "file_info_list": [], "total_count": 0}),
+        )
+        .unwrap();
+        assert!(!list.can_write && !list.trash_available);
+    }
+
+    #[test]
+    fn new_marks_only_lossless_directories_openable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(FileInfo::new(dir.path().to_path_buf()).unwrap().can_open);
+        assert!(!FileInfo::new(file).unwrap().can_open);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let lossy = dir.path().join(std::ffi::OsStr::from_bytes(b"bad\xff"));
+            if std::fs::create_dir(&lossy).is_ok() {
+                let info = FileInfo::new(lossy).unwrap();
+                assert!(info.is_dir);
+                assert!(!info.can_open);
+            }
+        }
+    }
+
+    #[test]
+    fn create_directory_request_round_trips_wincode() {
+        let original = CreateDirectoryRequest {
+            parent_path: "/srv".to_string(),
+            name: "new".to_string(),
+        };
+        let config = unbounded_config();
+        let bytes = wincode::config::serialize(&original, config).expect("encode");
+        let back: CreateDirectoryRequest =
+            wincode::config::deserialize(&bytes, config).expect("decode");
+        assert_eq!(back.parent_path, original.parent_path);
+        assert_eq!(back.name, original.name);
     }
 
     #[test]

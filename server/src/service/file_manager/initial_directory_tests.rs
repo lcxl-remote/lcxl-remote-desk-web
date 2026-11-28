@@ -16,7 +16,7 @@ async fn initial_listing_returns_home_contents_and_effective_path() {
         .await
         .unwrap();
     let path = home.path().to_str().unwrap().to_owned();
-    let response = list_files_with_home(initial_request(), Some(path.clone()))
+    let response = list_files_with_home(initial_request(), Some(path.clone()), None)
         .await
         .unwrap();
     assert_eq!(response.path, path);
@@ -43,6 +43,7 @@ async fn missing_or_unreadable_home_falls_back_to_existing_root_entry() {
         let response = list_files_with_home(
             initial_request(),
             home.map(|path| path.to_str().unwrap().to_owned()),
+            None,
         )
         .await
         .unwrap();
@@ -57,7 +58,7 @@ async fn explicit_paths_and_root_navigation_never_redirect_to_home() {
     let home_path = Some(home.path().to_str().unwrap().to_owned());
     let mut params = initial_request();
     params.path = directory.path().to_str().unwrap().to_owned();
-    let response = list_files_with_home(params.clone(), home_path.clone())
+    let response = list_files_with_home(params.clone(), home_path.clone(), None)
         .await
         .unwrap();
     assert_eq!(response.path, params.path);
@@ -68,14 +69,14 @@ async fn explicit_paths_and_root_navigation_never_redirect_to_home() {
         .unwrap()
         .to_owned();
     assert!(
-        list_files_with_home(params, home_path.clone())
+        list_files_with_home(params, home_path.clone(), None)
             .await
             .is_err()
     );
     let mut root_params = initial_request();
     root_params.prefer_user_home = false;
     assert_eq!(
-        list_files_with_home(root_params.clone(), home_path.clone())
+        list_files_with_home(root_params.clone(), home_path.clone(), None)
             .await
             .unwrap()
             .path,
@@ -84,12 +85,12 @@ async fn explicit_paths_and_root_navigation_never_redirect_to_home() {
     root_params.directories_only = true;
     // Some root entries cannot be stat'ed (for example macOS special links).
     // Preserve the directory picker's existing result, including such errors.
-    let expected = list_files_at_path(root_params.clone())
+    let expected = list_files_at_path(root_params.clone(), None)
         .await
         .map(|response| response.path)
         .map_err(|error| error.to_string());
     assert_eq!(
-        list_files_with_home(root_params, home_path)
+        list_files_with_home(root_params, home_path, None)
             .await
             .map(|response| response.path)
             .map_err(|error| error.to_string()),
@@ -107,7 +108,7 @@ async fn directory_only_listing_reports_its_effective_path() {
     let path = home.path().to_str().unwrap().to_owned();
     let mut params = initial_request();
     params.directories_only = true;
-    let response = list_files_with_home(params, Some(path.clone()))
+    let response = list_files_with_home(params, Some(path.clone()), None)
         .await
         .unwrap();
     assert_eq!(response.path, path);

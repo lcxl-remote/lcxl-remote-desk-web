@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use desk_signal_facade::model::audio_capture::AudioDevice;
 use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
-use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::files::{
+    CreateDirectoryRequest, DeleteFileRequest, FileListParams, FileListResponse,
+};
 use desk_signal_facade::model::image_capture::DisplayInfo;
 use desk_signal_facade::model::policy_snapshot::{PolicyGenerations, PolicySnapshot};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
@@ -744,6 +746,14 @@ pub struct DeleteFilePayload {
     pub request_id: String,
     pub connection_id: String,
     pub request: DeleteFileRequest,
+}
+
+/// Payload for [`ServiceToWorker::CreateDirectory`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct CreateDirectoryPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    pub request: CreateDirectoryRequest,
 }
 
 /// Payload of [`crate::message::ServiceToWorker::SetExecSandboxLabelIdle`].

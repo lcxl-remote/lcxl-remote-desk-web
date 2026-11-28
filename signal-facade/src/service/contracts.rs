@@ -36,6 +36,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::GetSystemInfo
         | SignalingType::ListFiles
         | SignalingType::DeleteFile
+        | SignalingType::CreateDirectory
         | SignalingType::StartTerminal
         | SignalingType::ListTerminalCommands
         | SignalingType::InvokeAgentCapability
@@ -75,6 +76,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::SystemInfoRetrieved
         | SignalingType::FilesListed
         | SignalingType::FileDeleted
+        | SignalingType::DirectoryCreated
         | SignalingType::TerminalStarted
         | SignalingType::TerminalCommandsListed
         | SignalingType::AgentCapabilityCompleted
@@ -153,6 +155,7 @@ pub fn response_type_for_request(t: SignalingType) -> Option<SignalingType> {
         SignalingType::GetSystemInfo => SignalingType::SystemInfoRetrieved,
         SignalingType::ListFiles => SignalingType::FilesListed,
         SignalingType::DeleteFile => SignalingType::FileDeleted,
+        SignalingType::CreateDirectory => SignalingType::DirectoryCreated,
         SignalingType::StartTerminal => SignalingType::TerminalStarted,
         SignalingType::ListTerminalCommands => SignalingType::TerminalCommandsListed,
         SignalingType::InvokeAgentCapability => SignalingType::AgentCapabilityCompleted,
@@ -201,6 +204,7 @@ pub fn response_types_for_request(t: SignalingType) -> &'static [SignalingType] 
         GetSystemInfo => &[SystemInfoRetrieved],
         ListFiles => &[FilesListed],
         DeleteFile => &[FileDeleted],
+        CreateDirectory => &[DirectoryCreated],
         StartTerminal => &[TerminalStarted],
         ListTerminalCommands => &[TerminalCommandsListed],
         InvokeAgentCapability => &[AgentCapabilityCompleted],
@@ -651,6 +655,7 @@ pub(crate) fn remote_access_frame_requires_unlocked(t: SignalingType) -> bool {
             | SignalingType::MediaPipelineRetryCompleted
             | SignalingType::FilesListed
             | SignalingType::FileDeleted
+            | SignalingType::DirectoryCreated
             | SignalingType::TerminalCommandsListed
             | SignalingType::ReportAiAuditEvent
             | SignalingType::EdgeExecutionCompleted

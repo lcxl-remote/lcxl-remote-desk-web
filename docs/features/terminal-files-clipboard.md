@@ -40,7 +40,14 @@ keeps the current directory. Android, iOS, and the Manager console behave the sa
 
 - **Upload** files to the remote machine.
 - **Download** files back to the controller.
-- **Delete** files, with a **recycle-bin** mechanism for recoverable deletions.
+- **Create folders**.
+- **Delete** files or folders. By default they go to the **trash** so they can be recovered; choosing **Delete Permanently** asks for a second confirmation.
+
+The list only shows actions that can be carried out. The host decides from the device settings, the access grant and the remote user's file permissions: a file that cannot be read has no download button, an entry that cannot be deleted (such as a drive root or a file in a read-only folder) has no delete button, and a folder that cannot be written shows neither upload nor **New folder**. Creating folders uses the same file-transfer permission as uploads. Actions that need approval still appear; after a click the controller shows that it is waiting for the device owner.
+
+When the host finds that the current location may have no trash (for example a network drive, a USB drive, or Linux without a usable trash folder), the delete dialog shows a warning icon next to **Delete Permanently**. Deleting without that option then reports an error and keeps the file.
+
+Mount points, and folders that contain one, cannot be deleted. Deleting a symbolic link removes only the link; on Linux, a link that is not on the same device as the trash can only be deleted permanently.
 
 ### Drop files onto the remote desktop
 

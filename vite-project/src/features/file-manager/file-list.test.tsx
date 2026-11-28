@@ -13,6 +13,8 @@ vi.mock("react-i18next", () =>
 const h = vi.hoisted(() => ({
     listFiles: vi.fn(),
     uploadFile: vi.fn(),
+    deleteFile: vi.fn(),
+    createDirectory: vi.fn(),
     toast: vi.fn(),
     querySystemInfo: vi.fn().mockResolvedValue(null),
     closeConnection: vi.fn(),
@@ -37,7 +39,8 @@ vi.mock("./use-file-transfer", async (importOriginal) => ({
         cancelTransfer: vi.fn(),
         removeTransfer: vi.fn(),
         listFiles: h.listFiles,
-        deleteFile: vi.fn(),
+        deleteFile: h.deleteFile,
+        createDirectory: h.createDirectory,
         querySystemInfo: h.querySystemInfo,
         closeConnection: h.closeConnection,
         prepareTransfers: h.prepareTransfers,
@@ -46,9 +49,6 @@ vi.mock("./use-file-transfer", async (importOriginal) => ({
         sessionTargets: [],
         selectSessionTarget: vi.fn(),
     }),
-}))
-vi.mock("@/features/desk/restricted-session", () => ({
-    useRestrictedSession: () => ({ capabilityVisible: () => true }),
 }))
 vi.mock("@/hooks/use-toast", () => ({
     useToast: () => ({ toast: h.toast }),
@@ -117,7 +117,7 @@ describe("FileList initial user directory", () => {
     }
 
     it("uses the resolved home for refresh and upload without listing it twice", async () => {
-        h.listFiles.mockResolvedValue({ path: "/home/user", file_info_list: [], total_count: 0 })
+        h.listFiles.mockResolvedValue({ path: "/home/user", file_info_list: [], total_count: 0, can_write: true })
         const { container } = renderList()
         await screen.findByText("/home/user")
         expect(h.listFiles).toHaveBeenCalledExactlyOnceWith({
@@ -203,7 +203,7 @@ describe("FileList initial user directory", () => {
         renderList()
         const refresh = screen.getByRole("button", { name: "Refresh" })
         await waitFor(() => expect(refresh).toBeEnabled())
-        expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled()
+        expect(screen.queryByRole("button", { name: "Upload" })).toBeNull()
         fireEvent.click(refresh)
         await screen.findByText("/home/user")
         expect(h.listFiles).toHaveBeenLastCalledWith({
@@ -228,11 +228,108 @@ describe("FileList initial user directory", () => {
         h.listFiles.mockReturnValueOnce(initial.promise)
             .mockResolvedValue({ path: "", file_info_list: [], total_count: 0 })
         renderList()
-        expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled()
+        expect(screen.queryByRole("button", { name: "Upload" })).toBeNull()
         fireEvent.click(screen.getByRole("button", { name: "My Computer" }))
         await waitFor(() => expect(h.listFiles).toHaveBeenCalledTimes(2))
         await act(async () => initial.resolve({ path: "/home/user", file_info_list: [], total_count: 0 }))
         expect(screen.queryByText("/home/user")).toBeNull()
         expect(screen.getByText("My Computer")).toBeInTheDocument()
+    })
+})
+
+describe("FileList actions follow the host's flags", () => {
+    beforeEach(() => {
+        h.listFiles.mockReset()
+        h.uploadFile.mockReset()
+        h.deleteFile.mockReset()
+        h.createDirectory.mockReset()
+        h.toast.mockReset()
+    })
+
+    function renderList() {
+        return render(
+            <MemoryRouter initialEntries={["/files/connection-1"]}>
+                <Routes><Route path="/files/:id" element={<FileList />} /></Routes>
+            </MemoryRouter>,
+        )
+    }
+
+    const entry = (name: string, flags: Record<string, boolean>) => ({
+        name, path: `/home/user/${name}`, size: 1, is_dir: false, is_file: true,
+        modified: "2026-01-01T00:00:00Z", can_open: false, can_read: false, can_delete: false, ...flags,
+    })
+
+    it("offers only the actions the host allows", async () => {
+        h.listFiles.mockResolvedValue({
+            path: "/home/user",
+            file_info_list: [
+                entry("open.txt", { can_read: true, can_delete: true }),
+                entry("locked.txt", {}),
+                { ...entry("closed", {}), is_dir: true, is_file: false },
+            ],
+            total_count: 3,
+            can_write: false,
+        })
+        renderList()
+        await screen.findByText("open.txt")
+        expect(screen.getAllByRole("button", { name: "Download" })).toHaveLength(1)
+        expect(screen.getAllByRole("button", { name: "Delete" })).toHaveLength(1)
+        expect(screen.queryByRole("button", { name: "Upload" })).toBeNull()
+        expect(screen.queryByRole("button", { name: "New folder" })).toBeNull()
+        fireEvent.click(screen.getByText("closed"))
+        expect(h.listFiles).toHaveBeenCalledTimes(1)
+    })
+
+    it("keeps writes on the last listing that succeeded", async () => {
+        h.listFiles
+            .mockResolvedValueOnce({
+                path: "/home/user",
+                file_info_list: [{ ...entry("sub", { can_open: true }), is_dir: true, is_file: false }],
+                total_count: 1,
+                can_write: true,
+            })
+            .mockRejectedValueOnce(new Error("Access denied"))
+        const { container } = renderList()
+        fireEvent.click(await screen.findByText("sub"))
+        await waitFor(() => expect(h.listFiles).toHaveBeenCalledTimes(2))
+        await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled())
+        expect(screen.getByText("/home/user")).toBeInTheDocument()
+        const file = new File(["text"], "file.txt", { type: "text/plain" })
+        fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } })
+        expect(h.uploadFile).toHaveBeenCalledWith("/home/user", file)
+    })
+
+    it("creates a folder in the listed directory and refreshes", async () => {
+        h.listFiles.mockResolvedValue({ path: "/home/user", file_info_list: [], total_count: 0, can_write: true })
+        h.createDirectory.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("exists"))
+        renderList()
+        fireEvent.click(await screen.findByRole("button", { name: "New folder" }))
+        fireEvent.change(screen.getByRole("textbox", { name: "Folder name" }), { target: { value: " reports " } })
+        fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
+        await waitFor(() => expect(h.createDirectory).toHaveBeenCalledWith({ parent_path: "/home/user", name: "reports" }))
+        await waitFor(() => expect(h.listFiles).toHaveBeenCalledTimes(2))
+
+        fireEvent.click(screen.getByRole("button", { name: "New folder" }))
+        fireEvent.change(screen.getByRole("textbox", { name: "Folder name" }), { target: { value: "reports" } })
+        fireEvent.click(screen.getByRole("button", { name: "Confirm" }))
+        await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.objectContaining({ variant: "destructive" })))
+    })
+
+    it("warns about a missing trash without forcing a permanent delete", async () => {
+        h.listFiles.mockResolvedValue({
+            path: "/home/user",
+            file_info_list: [entry("old.txt", { can_delete: true })],
+            total_count: 1,
+            trash_available: false,
+        })
+        renderList()
+        await screen.findByText("old.txt")
+        fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+        const checkbox = await screen.findByRole("checkbox")
+        expect(checkbox).not.toBeChecked()
+        expect(checkbox).toBeEnabled()
+        const tip = screen.getByRole("button", { name: /may not have a trash/ })
+        fireEvent.click(tip)
+        expect(await screen.findAllByText(/may not have a trash/)).not.toHaveLength(0)
     })
 })

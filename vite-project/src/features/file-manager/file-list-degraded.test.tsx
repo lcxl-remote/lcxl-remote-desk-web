@@ -64,9 +64,6 @@ vi.mock("./use-file-transfer", async (importOriginal) => ({
         selectSessionTarget: vi.fn(),
     }),
 }))
-vi.mock("@/features/desk/restricted-session", () => ({
-    useRestrictedSession: () => ({ capabilityVisible: () => true }),
-}))
 vi.mock("@/hooks/use-toast", () => ({
     useToast: () => ({ toast: h.toast }),
 }))
@@ -79,9 +76,10 @@ describe("FileList with an unavailable transfer channel", () => {
     beforeEach(() => {
         h.listFiles.mockReset()
         h.listFiles.mockResolvedValue({
-            path: "",
-            file_info_list: [{ name: "a.txt", path: "/a.txt", is_dir: false, size: 12, modified: 0 }],
+            path: "/home",
+            file_info_list: [{ name: "a.txt", path: "/home/a.txt", is_dir: false, size: 12, modified: 0, can_read: true }],
             total_count: 1,
+            can_write: true,
         })
         writeText = vi.fn().mockResolvedValue(undefined)
         Object.defineProperty(navigator, "clipboard", {
@@ -121,6 +119,8 @@ describe("FileList with an unavailable transfer channel", () => {
 
         // Transfers are withdrawn; nothing else is.
         expect(screen.getByRole("button", { name: /Upload/ })).toBeDisabled()
+        // Creating a folder travels the signaling WebSocket, not the channel.
+        expect(screen.getByRole("button", { name: "New folder" })).toBeEnabled()
         const downloadButton = screen.getByRole("button", {
             name: "File transfer channel unavailable",
         })

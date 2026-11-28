@@ -46,6 +46,9 @@ pub(super) async fn list_directories(
             .take(params.page_count as usize)
             .collect(),
         total_count,
+        // The directory picker only navigates; it never writes or deletes.
+        can_write: false,
+        trash_available: false,
     })
 }
 
@@ -69,7 +72,7 @@ mod tests {
             directories_only: true,
             ..Default::default()
         };
-        let first = list_files(params.clone()).await.unwrap();
+        let first = list_files(params.clone(), None).await.unwrap();
         assert_eq!(first.total_count, 3);
         assert_eq!(
             first
@@ -80,22 +83,22 @@ mod tests {
             ["a", "m"]
         );
         params.page_no = 2;
-        let second = list_files(params.clone()).await.unwrap();
+        let second = list_files(params.clone(), None).await.unwrap();
         assert_eq!(second.total_count, 3);
         assert_eq!(second.file_info_list[0].name, "z");
         assert_eq!(second.file_info_list.len(), 1);
         params.page_no = 3;
         assert!(
-            list_files(params.clone())
+            list_files(params.clone(), None)
                 .await
                 .unwrap()
                 .file_info_list
                 .is_empty()
         );
         params.page_no = i64::MAX;
-        assert!(list_files(params.clone()).await.is_err());
+        assert!(list_files(params.clone(), None).await.is_err());
         params.page_no = 0;
-        assert!(list_files(params).await.is_err());
+        assert!(list_files(params, None).await.is_err());
     }
 
     #[tokio::test]
@@ -109,8 +112,11 @@ mod tests {
             directories_only: true,
             ..Default::default()
         };
-        assert_eq!(list_files(params.clone()).await.unwrap().total_count, 0);
+        assert_eq!(
+            list_files(params.clone(), None).await.unwrap().total_count,
+            0
+        );
         params.path = root.path().join("absent").to_string_lossy().into();
-        assert!(list_files(params).await.is_err());
+        assert!(list_files(params, None).await.is_err());
     }
 }

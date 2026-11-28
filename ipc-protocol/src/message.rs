@@ -118,6 +118,10 @@ pub enum ServiceToWorker {
     /// [`WorkerToService::FileDeleted`] (empty body).
     DeleteFile(DeleteFilePayload),
 
+    /// Browser → worker request to create one directory. Worker replies
+    /// via [`WorkerToService::DirectoryCreated`] (empty body).
+    CreateDirectory(CreateDirectoryPayload),
+
     // ---------- Terminal plane (typed) ----------
     /// Browser → worker request to launch a new PTY-backed terminal
     /// session. Worker replies via
@@ -464,6 +468,11 @@ pub enum WorkerToService {
     /// `request_id` correlates with the original request).
     FileDeleted(ManagerResponseRefPayload),
 
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::CreateDirectory`] (empty body —
+    /// `request_id` correlates with the original request).
+    DirectoryCreated(ManagerResponseRefPayload),
+
     // ---------- Terminal plane (typed) ----------
     /// Worker → daemon success reply for
     /// [`ServiceToWorker::StartTerminal`]. Empty body — the
@@ -674,6 +683,7 @@ impl WorkerToService {
             Self::SystemInfoRetrieved(payload) => payload.connection_id.as_deref(),
             Self::FilesListed(payload) => payload.connection_id.as_deref(),
             Self::FileDeleted(payload) => payload.connection_id.as_deref(),
+            Self::DirectoryCreated(payload) => payload.connection_id.as_deref(),
             Self::TerminalStarted(payload) => Some(&payload.connection_id),
             Self::TerminalClosed(payload) => Some(&payload.connection_id),
             Self::TerminalOutputProduced(payload) => Some(&payload.connection_id),

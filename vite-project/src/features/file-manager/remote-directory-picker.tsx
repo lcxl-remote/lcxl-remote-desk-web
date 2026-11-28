@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { SessionTargetDialog } from '@/features/desk/session-target-selection';
 import { useFileTransfer } from './use-file-transfer';
 
-type Directory = { name: string; path: string; err_msg?: string | null };
+type Directory = { name: string; path: string; err_msg?: string | null; can_open?: boolean };
 const pageSize = 100;
 
 export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSelect, onCancel }: {
@@ -64,8 +64,8 @@ export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSel
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {data && <>
             <div className="max-h-64 space-y-1 overflow-y-auto">
-                {data.file_info_list.map(directory => <Button key={directory.path} type="button" variant="ghost"
-                    className="flex w-full justify-start" disabled={busy || !!directory.err_msg} title={directory.err_msg ?? directory.path}
+                {data.file_info_list.map((directory, index) => <Button key={`${index}:${directory.path}`} type="button" variant="ghost"
+                    className="flex w-full justify-start" disabled={busy || !!directory.err_msg || !directory.can_open} title={directory.err_msg ?? directory.path}
                     onClick={() => navigate([...(paths ?? []), directory.path])}>
                     <Folder className="mr-2 h-4 w-4 shrink-0" /><span className="truncate">{directory.name}</span>
                 </Button>)}

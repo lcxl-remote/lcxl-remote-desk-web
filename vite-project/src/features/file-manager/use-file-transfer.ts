@@ -15,6 +15,8 @@ import {
     SIGNALING_TYPE_CODE_FILES_LISTED,
     SIGNALING_TYPE_CODE_DELETE_FILE,
     SIGNALING_TYPE_CODE_FILE_DELETED,
+    SIGNALING_TYPE_CODE_CREATE_DIRECTORY,
+    SIGNALING_TYPE_CODE_DIRECTORY_CREATED,
     SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
     SIGNALING_TYPE_CODE_ERROR,
 } from '../desk/constants';
@@ -296,7 +298,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
     const pendingRequests = useRef(new Map<string, {
         resolve: (value: any) => void;
         reject: (error: Error) => void;
-        timeout: ReturnType<typeof setTimeout>;
+        timeout: ReturnType<typeof setTimeout> | undefined;
         expectedResponseType: number;
     }>());
 
@@ -873,6 +875,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
                 if (pending && (
                     signaling_type === SIGNALING_TYPE_CODE_FILES_LISTED
                     || signaling_type === SIGNALING_TYPE_CODE_FILE_DELETED
+                    || signaling_type === SIGNALING_TYPE_CODE_DIRECTORY_CREATED
                     || signaling_type === SIGNALING_TYPE_CODE_SYSTEM_INFO_RETRIEVED
                 )) {
                     console.error(
@@ -1047,10 +1050,19 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         void ensureDataChannel().catch(() => { });
     }, [ensureDataChannel]);
 
+    /**
+     * Send one file request over the session WebSocket.
+     *
+     * `timeoutMs: null` waits until the reply arrives or the session closes.
+     * File writes use it: the host may be waiting for its user to approve them,
+     * for as long as the host's approval timeout allows, and giving up earlier
+     * would report a failure for an action the host still performs.
+     */
     const sendFileRequest = useCallback(async <T,>(
         signalingType: number,
         expectedResponseType: number,
         signalingData: unknown,
+        timeoutMs: number | null = 30_000,
     ): Promise<T> => {
         // Only the session is required. These requests travel over the WebSocket,
         // and the host admits the connection when it answers `RequestRemoteAccess`
@@ -1062,10 +1074,10 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         }
         const requestId = uuidv4();
         return new Promise<T>((resolve, reject) => {
-            const timeout = setTimeout(() => {
+            const timeout = timeoutMs === null ? undefined : setTimeout(() => {
                 pendingRequests.current.delete(requestId);
                 reject(new ConnectionError('session-closed', "File operation timed out"));
-            }, 30_000);
+            }, timeoutMs);
             pendingRequests.current.set(requestId, {
                 resolve: value => resolve(value as T),
                 reject,
@@ -1092,7 +1104,11 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
     ), [sendFileRequest]);
 
     const deleteFile = useCallback((request: unknown) => (
-        sendFileRequest<void>(SIGNALING_TYPE_CODE_DELETE_FILE, SIGNALING_TYPE_CODE_FILE_DELETED, request)
+        sendFileRequest<void>(SIGNALING_TYPE_CODE_DELETE_FILE, SIGNALING_TYPE_CODE_FILE_DELETED, request, null)
+    ), [sendFileRequest]);
+
+    const createDirectory = useCallback((request: { parent_path: string; name: string }) => (
+        sendFileRequest<void>(SIGNALING_TYPE_CODE_CREATE_DIRECTORY, SIGNALING_TYPE_CODE_DIRECTORY_CREATED, request, null)
     ), [sendFileRequest]);
 
     // The host's own system information. The server this browser is connected to
@@ -1291,6 +1307,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         removeTransfer,
         listFiles,
         deleteFile,
+        createDirectory,
         querySystemInfo,
         closeConnection,
         prepareTransfers,

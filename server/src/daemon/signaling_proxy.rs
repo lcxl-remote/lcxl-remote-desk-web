@@ -1397,6 +1397,16 @@ pub async fn run_signaling_proxy(
                     Option::<&()>::None,
                 );
             }
+            WorkerToService::DirectoryCreated(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "DirectoryCreated",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::DirectoryCreated,
+                    Option::<&()>::None,
+                );
+            }
             // Confirmation only. The daemon committed the locale before telling
             // the worker, so treating this as a value to write back would let a
             // slow acknowledgement undo a newer change that overtook it.

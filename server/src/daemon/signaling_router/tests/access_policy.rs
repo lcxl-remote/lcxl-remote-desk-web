@@ -123,7 +123,7 @@ pub(super) fn capped_session_permits_matrix_over_all_signaling_types() {
         CloseTerminal,
         ListTerminalCommands,
     ];
-    let file_family = [ListFiles, DeleteFile];
+    let file_family = [ListFiles, DeleteFile, CreateDirectory];
 
     for t in SignalingType::iter() {
         let baseline = is_baseline_signaling_type(t);
@@ -217,6 +217,33 @@ pub(super) fn capped_session_requires_browse_and_delete_for_file_delete() {
         ..Default::default()
     };
     assert!(capped_session_permits(DeleteFile, &browse_and_delete));
+    let transfer_denied = SecuritySettings {
+        allow_file_browse: Some(true),
+        allow_file_transfer: Some(false),
+        ..Default::default()
+    };
+    assert!(!capped_session_permits(CreateDirectory, &transfer_denied));
+
+    let browse_and_transfer = SecuritySettings {
+        allow_file_browse: Some(true),
+        allow_file_transfer: Some(true),
+        ..Default::default()
+    };
+    assert!(capped_session_permits(
+        CreateDirectory,
+        &browse_and_transfer
+    ));
+    let transfer_only = SecuritySettings {
+        allow_file_browse: Some(false),
+        allow_file_transfer: Some(true),
+        ..Default::default()
+    };
+    assert!(!capped_session_permits(CreateDirectory, &transfer_only));
+    // Unconfigured (prompt) dimensions stay tryable.
+    assert!(capped_session_permits(
+        CreateDirectory,
+        &SecuritySettings::default()
+    ));
 }
 
 /// The admission-based door1 gate: a session admitted as owner passes
@@ -261,6 +288,7 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
         ListTerminalCommands,
         ListFiles,
         DeleteFile,
+        CreateDirectory,
         SetPrivateScreenVisibility,
     ] {
         assert!(
@@ -289,6 +317,10 @@ pub(super) fn door1_permits_gates_capped_sessions_and_fails_closed_unadmitted_ca
     // connection now that their REST entry points no longer exist.
     assert!(!door1_permits(&ConnectionGate::ServerInternal, ListFiles));
     assert!(!door1_permits(&ConnectionGate::ServerInternal, DeleteFile));
+    assert!(!door1_permits(
+        &ConnectionGate::ServerInternal,
+        CreateDirectory
+    ));
     assert!(!door1_permits(
         &ConnectionGate::ServerInternal,
         ApplyRemoteSessionSettings

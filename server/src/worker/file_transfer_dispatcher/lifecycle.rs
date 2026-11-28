@@ -141,6 +141,13 @@ impl FileTransferDispatcher {
         resolved.approved
     }
 
+    /// The `allow_file_transfer` decision for a write that does not travel the
+    /// file lane, such as creating a directory. Shares the prompt and cache of
+    /// the lane's own commands.
+    pub(crate) async fn transfer_permission(&self, connection_id: &str) -> bool {
+        self.permission_for(connection_id, true).await
+    }
+
     /// Add a connection to the active set. Subsequent file-lane
     /// commands for this `connection_id` will be processed; commands
     /// for inactive connections are dropped.

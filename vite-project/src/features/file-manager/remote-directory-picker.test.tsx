@@ -14,7 +14,7 @@ describe('remote directory picker', () => {
     beforeEach(() => { vi.clearAllMocks(); h.info.mockResolvedValue({ name: 'Windows' }); });
     afterEach(cleanup);
     it.each(['target', null])('selects a drive for target %s with server-side filtering', async (target) => {
-        h.list.mockResolvedValueOnce({ file_info_list: [{ name: 'C:\\', path: 'C:\\' }], total_count: 1 })
+        h.list.mockResolvedValueOnce({ file_info_list: [{ name: 'C:\\', path: 'C:\\', can_open: true }], total_count: 1 })
             .mockResolvedValue({ file_info_list: [], total_count: 0 });
         const select = vi.fn();
         const view = render(<RemoteDirectoryPicker deskId="device" sessionTargetId={target} disabled={false} onSelect={select} onCancel={() => {}} />);
@@ -30,7 +30,7 @@ describe('remote directory picker', () => {
     it('allows the Unix root, uses the server count for pagination, and ignores stale responses', async () => {
         h.info.mockResolvedValue({ name: 'Linux' });
         let resolve!: (value: unknown) => void;
-        h.list.mockResolvedValueOnce({ file_info_list: [{ name: 'home', path: '/home' }], total_count: 101 })
+        h.list.mockResolvedValueOnce({ file_info_list: [{ name: 'home', path: '/home', can_open: true }], total_count: 101 })
             .mockImplementationOnce(() => new Promise(r => { resolve = r; }))
             .mockResolvedValue({ file_info_list: [], total_count: 0 });
         const select = vi.fn();
@@ -43,6 +43,23 @@ describe('remote directory picker', () => {
         view.unmount();
         await act(async () => resolve({ file_info_list: [{ name: 'stale', path: '/stale' }], total_count: 1 }));
         expect(screen.queryByText('stale')).toBeNull();
+    });
+    it('does not open a directory the host marks as not openable', async () => {
+        h.info.mockResolvedValue({ name: 'Linux' });
+        h.list.mockResolvedValue({
+            file_info_list: [
+                { name: 'bad\uFFFD', path: '/bad\uFFFD', can_open: false },
+                { name: 'bad\uFFFD', path: '/bad\uFFFD', can_open: true },
+            ],
+            total_count: 2,
+        });
+        render(<RemoteDirectoryPicker deskId="device" sessionTargetId="target" disabled={false} onSelect={vi.fn()} onCancel={vi.fn()} />);
+        const buttons = await screen.findAllByRole('button', { name: 'bad\uFFFD' });
+        expect(buttons[0]).toBeDisabled();
+        expect(buttons[1]).toBeEnabled();
+        const calls = h.list.mock.calls.length;
+        fireEvent.click(buttons[0]);
+        expect(h.list.mock.calls.length).toBe(calls);
     });
     it('does not treat a refused listing as empty or allow selection before retry succeeds', async () => {
         h.info.mockResolvedValue({ name: 'Linux' });

@@ -25,6 +25,7 @@ fn owner_plane_frames_are_classified_for_code_session_denial() {
         ListTerminalCommands,
         ListFiles,
         DeleteFile,
+        CreateDirectory,
         SetPrivateScreenVisibility,
         ApplyRemoteSessionSettings,
         UpdateAdaptiveVideoQuality,

@@ -2067,3 +2067,147 @@ pub(super) async fn route_dispatches_set_virtual_display_mode_with_valid_input()
         other => panic!("unexpected IPC: {other:?}"),
     }
 }
+
+fn file_write_model(request_id: &str, t: SignalingType, body: serde_json::Value) -> SignalingModel {
+    SignalingModel::new(
+        request_id,
+        t,
+        Some("conn-file".to_string()),
+        None,
+        Some(body),
+        None,
+    )
+}
+
+fn create_directory_body() -> serde_json::Value {
+    serde_json::to_value(desk_signal_facade::model::files::CreateDirectoryRequest {
+        parent_path: "/srv".to_string(),
+        name: "new".to_string(),
+    })
+    .unwrap()
+}
+
+fn delete_file_body() -> serde_json::Value {
+    serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
+        file_path: "/srv/old.txt".to_string(),
+        delete_permanently: Some(false),
+    })
+    .unwrap()
+}
+
+fn assert_error_reply(
+    rx: &mut broadcast::Receiver<String>,
+    request_id: &str,
+    response_type: SignalingType,
+    code: DeskErrorCode,
+) {
+    let response = read_response(rx);
+    assert_eq!(response.signaling_type, response_type);
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(
+        response
+            .response_state
+            .as_ref()
+            .expect("error state")
+            .error_code,
+        code.code()
+    );
+}
+
+/// Controllers wait for file writes without a fixed timeout, so a door1
+/// refusal must answer with the request's own response type.
+#[tokio::test]
+pub(super) async fn refused_file_writes_reply_with_their_response_type() {
+    let cases = [
+        (
+            SignalingType::CreateDirectory,
+            SignalingType::DirectoryCreated,
+            create_directory_body(),
+        ),
+        (
+            SignalingType::DeleteFile,
+            SignalingType::FileDeleted,
+            delete_file_body(),
+        ),
+    ];
+    for (t, response_type, body) in cases {
+        // Un-admitted connection.
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        route(&file_write_model("req-unadmitted", t, body.clone()), &ctx)
+            .await
+            .unwrap();
+        assert_error_reply(
+            &mut rx,
+            "req-unadmitted",
+            response_type,
+            DeskErrorCode::PERMISSION_ERROR,
+        );
+
+        // Capped session whose ceiling denies the write.
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        let ceiling = SecuritySettings {
+            allow_file_browse: Some(true),
+            allow_file_delete: Some(false),
+            allow_file_transfer: Some(false),
+            ..Default::default()
+        };
+        ctx.pc_registry
+            .record_admission("conn-file", pc_manager::Admission::Capped(ceiling))
+            .await;
+        route(&file_write_model("req-capped", t, body.clone()), &ctx)
+            .await
+            .unwrap();
+        assert_error_reply(
+            &mut rx,
+            "req-capped",
+            response_type,
+            DeskErrorCode::PERMISSION_ERROR,
+        );
+    }
+}
+
+/// Admitted file writes that cannot reach a worker, or whose body does not
+/// parse, are answered rather than dropped.
+#[tokio::test]
+pub(super) async fn undeliverable_file_writes_reply_with_their_response_type() {
+    let cases = [
+        (
+            SignalingType::CreateDirectory,
+            SignalingType::DirectoryCreated,
+            create_directory_body(),
+        ),
+        (
+            SignalingType::DeleteFile,
+            SignalingType::FileDeleted,
+            delete_file_body(),
+        ),
+    ];
+    for (t, response_type, body) in cases {
+        let (ctx, mut rx) = make_ctx_with_rx().await;
+        ctx.pc_registry
+            .record_admission("conn-file", pc_manager::Admission::OwnerFull)
+            .await;
+        route(&file_write_model("req-no-worker", t, body), &ctx)
+            .await
+            .unwrap();
+        assert_error_reply(
+            &mut rx,
+            "req-no-worker",
+            response_type,
+            DeskErrorCode::SYSTEM_ERROR,
+        );
+
+        route(
+            &file_write_model("req-bad", t, serde_json::json!("not a request")),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_error_reply(
+            &mut rx,
+            "req-bad",
+            response_type,
+            DeskErrorCode::INVALID_PARAMS,
+        );
+    }
+}

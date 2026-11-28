@@ -239,6 +239,14 @@ pub enum SignalingType {
     #[wincode(tag = 10017)]
     TerminalCommandsListed = 10017,
 
+    /// Create one directory inside a listed directory.
+    #[wincode(tag = 10018)]
+    CreateDirectory = 10018,
+
+    /// Response to [`Self::CreateDirectory`].
+    #[wincode(tag = 10019)]
+    DirectoryCreated = 10019,
+
     /// ServiceDaemon → Browser: desktop is switching, WebRTC will drop shortly
     #[wincode(tag = 500)]
     DesktopSwitching = 500,

@@ -2,11 +2,20 @@ import { useDeviceTarget } from '@/features/desk/device-target-context';
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, HardDrive, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
+import { FileIcon, FolderIcon, FolderPlus, ArrowUp, RefreshCw, Home, HardDrive, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info, AlertCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { Input } from "@/components/ui/input"
+import {
+    Dialog,
+    DialogContent,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
     AlertDialog,
@@ -37,7 +46,6 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, isConnectionError, type TransferProgress } from "./use-file-transfer"
 import { CONNECTION_FAILURE_KEYS, TransferUnavailableAlert } from "./transfer-unavailable-alert"
-import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { useToast } from "@/hooks/use-toast"
 import { deskErrorCodeEnum, startupModeEnum, type StartupMode } from "@/services/types"
 import { deskErrorMessage, errorCodeOf, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n"
@@ -114,6 +122,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
         removeTransfer,
         listFiles,
         deleteFile,
+        createDirectory,
         querySystemInfo,
         closeConnection,
         prepareTransfers,
@@ -122,8 +131,6 @@ function FileListContent({ orgId }: { orgId?: number }) {
         sessionTargets,
         selectSessionTarget,
     } = useFileTransfer(connectionId, orgId)
-    const restricted = useRestrictedSession(connectionId)
-    const canDelete = restricted.capabilityVisible("allow_file_delete")
     const [data, setData] = useState<any>(null)
     const [isLoading, setIsLoading] = useState(true)
     const [isDeleting, setIsDeleting] = useState(false)
@@ -217,6 +224,13 @@ function FileListContent({ orgId }: { orgId?: number }) {
         }
     }, [closeConnection])
 
+    // Writes and the breadcrumb follow the last listing that succeeded, so a
+    // failed navigation never sends an upload somewhere the user cannot see.
+    const listedPath: string | null = data ? data.path : null
+    const canWrite = Boolean(data?.can_write)
+    const [newFolderOpen, setNewFolderOpen] = useState(false)
+    const [newFolderName, setNewFolderName] = useState("")
+    const [pendingWrites, setPendingWrites] = useState(0)
     const files = data?.file_info_list || []
     const totalCount = Number(data?.total_count || 0)
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
@@ -230,7 +244,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
 
     // Navigate into a directory using its path from the backend
     const handleOpen = (file: any) => {
-        if (file.is_dir) {
+        if (file.can_open) {
             // Use file.path from backend directly (handles Windows paths, ".." entries, etc.)
             handleNavigate(file.path)
         }
@@ -265,7 +279,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
 
     const handleDownload = (e: React.MouseEvent, file: any) => {
         e.stopPropagation()
-        if (file.is_dir) return
+        if (!file.can_read) return
         // Use file.path from backend directly
         downloadFile(file.path, file.name)
     }
@@ -289,6 +303,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
     const executeDelete = async () => {
         if (!fileToDelete || !connectionId || isDeleting) return
         setIsDeleting(true)
+        setPendingWrites(n => n + 1)
         try {
             await deleteFile({
                 file_path: fileToDelete.path,
@@ -313,6 +328,27 @@ function FileListContent({ orgId }: { orgId?: number }) {
             })
         } finally {
             setIsDeleting(false)
+            setPendingWrites(n => n - 1)
+        }
+    }
+
+    const submitNewFolder = async () => {
+        const name = newFolderName.trim()
+        if (!name || listedPath === null) return
+        setNewFolderOpen(false)
+        setPendingWrites(n => n + 1)
+        try {
+            await createDirectory({ parent_path: listedPath, name })
+            toast({ title: t("pages.fileManager.createSuccess") })
+            await loadFiles()
+        } catch (error) {
+            toast({
+                title: t("pages.fileManager.createFailed"),
+                description: describeError(error),
+                variant: "destructive",
+            })
+        } finally {
+            setPendingWrites(n => n - 1)
         }
     }
 
@@ -323,10 +359,10 @@ function FileListContent({ orgId }: { orgId?: number }) {
 
     const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files
-        if (!files || files.length === 0) return
+        if (!files || files.length === 0 || listedPath === null) return
 
         for (let i = 0; i < files.length; i++) {
-            uploadFile(currentPath, files[i])
+            uploadFile(listedPath, files[i])
         }
 
         // Reset input
@@ -372,7 +408,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
                         <BreadcrumbList>
                             <BreadcrumbItem>
                                 <BreadcrumbPage className="font-mono text-sm">
-                                    {currentPath || t('pages.fileManager.myComputer')}
+                                    {(listedPath ?? currentPath) || t('pages.fileManager.myComputer')}
                                 </BreadcrumbPage>
                             </BreadcrumbItem>
                         </BreadcrumbList>
@@ -393,16 +429,35 @@ function FileListContent({ orgId }: { orgId?: number }) {
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </Button>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleUploadClick}
-                        disabled={transfersUnavailable || isLoading || (requestedPath === null && resolvedRequestPath.current === null)}
-                        title={transfersUnavailable ? t('pages.fileManager.transferUnavailable.title') : undefined}
-                    >
-                        <Upload className="h-4 w-4 mr-1" />
-                        {t('pages.fileManager.upload')}
-                    </Button>
+                    {pendingWrites > 0 && (
+                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            {t('pages.fileManager.awaitingHost')}
+                        </span>
+                    )}
+                    {canWrite && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => { setNewFolderName(""); setNewFolderOpen(true) }}
+                            disabled={isLoading}
+                        >
+                            <FolderPlus className="h-4 w-4 mr-1" />
+                            {t('pages.fileManager.newFolder')}
+                        </Button>
+                    )}
+                    {canWrite && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleUploadClick}
+                            disabled={transfersUnavailable || isLoading}
+                            title={transfersUnavailable ? t('pages.fileManager.transferUnavailable.title') : undefined}
+                        >
+                            <Upload className="h-4 w-4 mr-1" />
+                            {t('pages.fileManager.upload')}
+                        </Button>
+                    )}
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -520,10 +575,10 @@ function FileListContent({ orgId }: { orgId?: number }) {
                                     </TableCell>
                                 </TableRow>
                             )}
-                            {files.map((file: any) => (
+                            {files.map((file: any, index: number) => (
                                 <TableRow
-                                    key={file.name}
-                                    className="cursor-pointer hover:bg-muted/50"
+                                    key={`${index}:${file.path}`}
+                                    className={file.can_open ? "cursor-pointer hover:bg-muted/50" : "hover:bg-muted/50"}
                                     onClick={() => handleOpen(file)}
                                 >
                                     <TableCell>
@@ -537,7 +592,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
                                     <TableCell>{file.is_dir ? '-' : formatBytes(file.size)}</TableCell>
                                     <TableCell>{new Date(file.modified).toLocaleString()}</TableCell>
                                     <TableCell>
-                                        {!file.is_dir && (
+                                        {file.can_read && (
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
@@ -551,7 +606,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
                                                 <Download className="h-3.5 w-3.5" />
                                             </Button>
                                         )}
-                                        {file.name !== ".." && canDelete && (
+                                        {file.can_delete && (
                                             <Button
                                                 variant="ghost"
                                                 size="icon"
@@ -627,6 +682,23 @@ function FileListContent({ orgId }: { orgId?: number }) {
                         <Label htmlFor="permanent-delete" className="text-sm font-medium leading-none cursor-pointer">
                             {t('pages.fileManager.deletePermanently')}
                         </Label>
+                        {data && !data.trash_available && (
+                            <Popover>
+                                <PopoverTrigger asChild>
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-6 w-6 text-amber-500"
+                                        aria-label={t('pages.fileManager.trashUnavailable')}
+                                    >
+                                        <AlertCircle className="h-4 w-4" />
+                                    </Button>
+                                </PopoverTrigger>
+                                <PopoverContent className="text-sm w-64">
+                                    {t('pages.fileManager.trashUnavailable')}
+                                </PopoverContent>
+                            </Popover>
+                        )}
                     </div>
                     <AlertDialogFooter>
                         <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
@@ -636,6 +708,34 @@ function FileListContent({ orgId }: { orgId?: number }) {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+
+            <Dialog open={newFolderOpen} onOpenChange={setNewFolderOpen}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>{t('pages.fileManager.newFolder')}</DialogTitle>
+                    </DialogHeader>
+                    <form
+                        onSubmit={(e) => { e.preventDefault(); void submitNewFolder() }}
+                        className="space-y-4"
+                    >
+                        <Input
+                            autoFocus
+                            value={newFolderName}
+                            onChange={(e) => setNewFolderName(e.target.value)}
+                            placeholder={t('pages.fileManager.newFolderName')}
+                            aria-label={t('pages.fileManager.newFolderName')}
+                        />
+                        <DialogFooter>
+                            <Button type="button" variant="outline" onClick={() => setNewFolderOpen(false)}>
+                                {t('common.cancel')}
+                            </Button>
+                            <Button type="submit" disabled={!newFolderName.trim()}>
+                                {t('common.confirm')}
+                            </Button>
+                        </DialogFooter>
+                    </form>
+                </DialogContent>
+            </Dialog>
 
             <AlertDialog open={deleteDoubleConfirmOpen} onOpenChange={setDeleteDoubleConfirmOpen}>
                 <AlertDialogContent>

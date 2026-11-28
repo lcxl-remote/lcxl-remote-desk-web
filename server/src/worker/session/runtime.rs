@@ -796,6 +796,9 @@ impl WorkerSession {
         } else {
             None
         };
+        if let Some(session) = desk_session.as_mut() {
+            session.file_transfer = file_transfer_dispatcher.clone();
+        }
 
         info!("Worker runtime resources created; entering main loop");
 
@@ -955,6 +958,9 @@ impl WorkerSession {
                                 && !survives_remote_access_lock(&msg)
                             {
                                 warn!("Dropping worker command while remote access is locked");
+                                if let Some(session) = desk_session.as_mut() {
+                                    reject_locked_file_write(session, &msg).await;
+                                }
                                 continue;
                             }
                             match msg {
@@ -1379,6 +1385,18 @@ impl WorkerSession {
                                         dispatch_typed_signaling_with_request_id(
                                             session,
                                             SignalingType::DeleteFile,
+                                            payload.request_id,
+                                            Some(payload.connection_id),
+                                            Some(&payload.request),
+                                        )
+                                        .await;
+                                    }
+                                }
+                                ServiceToWorker::CreateDirectory(payload) => {
+                                    if let Some(session) = desk_session.as_mut() {
+                                        dispatch_typed_signaling_with_request_id(
+                                            session,
+                                            SignalingType::CreateDirectory,
                                             payload.request_id,
                                             Some(payload.connection_id),
                                             Some(&payload.request),

@@ -527,15 +527,16 @@ impl FileTransferDispatcher {
     ) -> std::io::Result<Option<Arc<Upload>>> {
         let cancelled = || cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst));
         let no_replace = req.target_location == Some(UploadLocation::Downloads);
+        let missing_target = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "exactly one upload target is required",
+            )
+        };
         let directory = match (&req.target_dir, req.target_location) {
             (None, Some(UploadLocation::Downloads)) => self.downloads_directory().await?,
-            (Some(path), None) if !path.is_empty() => PathBuf::from(path),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "exactly one upload target is required",
-                ));
-            }
+            (Some(path), None) => explicit_upload_dir(path).ok_or_else(missing_target)?,
+            _ => return Err(missing_target()),
         };
         let directory = tokio::fs::canonicalize(directory).await?;
         if !tokio::fs::metadata(&directory).await?.is_dir() {
@@ -640,5 +641,34 @@ fn upload_name(name: &str, suffix: usize) -> String {
     ) {
         (Some(stem), Some(extension)) => format!("{stem} ({suffix}).{extension}"),
         _ => format!("{name} ({suffix})"),
+    }
+}
+
+/// The directory an explicit upload target names. An empty path is the root
+/// listing: `/` on Unix, the Windows drive list, which takes no files.
+fn explicit_upload_dir(path: &str) -> Option<PathBuf> {
+    if !path.is_empty() {
+        Some(PathBuf::from(path))
+    } else if cfg!(unix) {
+        Some(PathBuf::from("/"))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod explicit_target_tests {
+    use super::*;
+
+    #[test]
+    fn empty_target_is_the_unix_root_and_refused_on_windows() {
+        assert_eq!(
+            explicit_upload_dir("/srv").as_deref(),
+            Some(std::path::Path::new("/srv"))
+        );
+        assert_eq!(
+            explicit_upload_dir("").as_deref(),
+            cfg!(unix).then_some(std::path::Path::new("/"))
+        );
     }
 }
